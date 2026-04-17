@@ -21,3 +21,4 @@ paper-logs/
 reports/backtests/
 reports/walk-forwards/
 reports/ensembles/
+reports/ga-runs/
