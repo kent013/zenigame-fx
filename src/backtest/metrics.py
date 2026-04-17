@@ -24,9 +24,9 @@ class BacktestMetrics:
     max_drawdown: Decimal
     max_drawdown_pct: Decimal
     final_equity: Decimal
-    sharpe: Decimal | None           # 年率 Sharpe。サンプル不足時 None
-    sortino: Decimal | None          # 年率 Sortino。損失分散ゼロ時 None
-    calmar: Decimal | None           # annual_return / max_drawdown_pct。未計算時 None
+    sharpe: Decimal | None  # 年率 Sharpe。サンプル不足時 None
+    sortino: Decimal | None  # 年率 Sortino。損失分散ゼロ時 None
+    calmar: Decimal | None  # annual_return / max_drawdown_pct。未計算時 None
     avg_trade_duration: timedelta | None
     max_trade_duration: timedelta | None
 

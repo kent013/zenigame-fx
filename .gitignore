@@ -20,3 +20,4 @@ devnotes/**/tmp/
 paper-logs/
 reports/backtests/
 reports/walk-forwards/
+reports/ensembles/
