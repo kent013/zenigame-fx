@@ -1,0 +1,2 @@
+AGENTS.mdを読むこと。
+CLAUDE.mdを修正する依頼が来たらAGENTS.mdを修正すること

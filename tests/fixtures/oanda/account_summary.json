@@ -1,0 +1,11 @@
+{
+  "account": {
+    "id": "001-009-12345-001",
+    "currency": "JPY",
+    "balance": "1000000.00",
+    "marginRate": "0.04",
+    "openTradeCount": 0,
+    "openPositionCount": 0
+  },
+  "lastTransactionID": "1"
+}

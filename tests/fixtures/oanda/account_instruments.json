@@ -1,0 +1,16 @@
+{
+  "instruments": [
+    {
+      "name": "USD_JPY",
+      "displayName": "USD/JPY",
+      "type": "CURRENCY",
+      "pipLocation": -2,
+      "displayPrecision": 3,
+      "tradeUnitsPrecision": 0,
+      "marginRate": "0.04",
+      "minimumTradeSize": "1",
+      "maximumOrderUnits": "100000000"
+    }
+  ],
+  "lastTransactionID": "1"
+}
