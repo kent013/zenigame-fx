@@ -78,3 +78,27 @@ class PriceBarM1(Base):
 
     def __repr__(self) -> str:
         return f"<PriceBarM1(pair_id={self.pair_id}, bar_time={self.bar_time})>"
+
+
+class EconomicEventRow(Base):
+    __tablename__ = "economic_event"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    impact: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    forecast: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    actual: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    source: Mapped[str] = mapped_column(String(40), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("event_time", "currency", "name", name="uq_economic_event_time_ccy_name"),
+        CheckConstraint("impact BETWEEN 1 AND 3", name="ck_economic_event_impact_range"),
+        Index("ix_economic_event_time", "event_time"),
+        Index("ix_economic_event_currency_time", "currency", "event_time"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<EconomicEventRow(event_time={self.event_time}, currency={self.currency}, name={self.name})>"
