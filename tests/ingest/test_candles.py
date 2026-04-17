@@ -117,8 +117,7 @@ def test_iter_range_uses_cache_for_historical_chunks(client: OandaClient, tmp_pa
         "instrument": "USD_JPY",
         "granularity": "M1",
         "candles": [
-            _candle((old_start + timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:%S") + ".000000000Z")
-            for m in range(3)
+            _candle((old_start + timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:%S") + ".000000000Z") for m in range(3)
         ],
     }
     route = respx.get(f"{BASE_URL}/v3/instruments/USD_JPY/candles").mock(return_value=Response(200, json=page))
