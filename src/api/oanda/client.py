@@ -103,6 +103,7 @@ class OandaClient:
         count: int | None = None,
         from_time: str | None = None,
         to_time: str | None = None,
+        include_first: bool | None = None,
     ) -> CandlesResponse:
         params: dict[str, Any] = {"granularity": granularity, "price": price}
         if count is not None:
@@ -111,5 +112,7 @@ class OandaClient:
             params["from"] = from_time
         if to_time is not None:
             params["to"] = to_time
+        if include_first is not None:
+            params["includeFirst"] = "true" if include_first else "false"
         payload = self._get(endpoints.instrument_candles(instrument), params=params)
         return CandlesResponse.model_validate(payload)

@@ -2,9 +2,10 @@
 
 完了判定 #4 / #5 を同時に満たす最小スクリプト。
 """
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy.dialects.postgresql import insert
 
@@ -30,7 +31,7 @@ def main() -> None:
         )
 
     base, quote = usd_jpy.name.split("_", 1)
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     values = {
         "oanda_name": usd_jpy.name,
         "display_name": usd_jpy.display_name,
