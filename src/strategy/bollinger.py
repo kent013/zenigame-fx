@@ -6,8 +6,10 @@ from statistics import mean, pstdev
 
 from src.broker.orders import OrderSignal, PortfolioSnapshot
 from src.domain.price import PriceBar
+from src.strategy.registry import register
 
 
+@register("bollinger")
 class BollingerMeanReversionStrategy:
     """close が ±k*stddev のバンドを突き抜けたら逆張り、SMA タッチで決済。
 
