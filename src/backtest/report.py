@@ -53,6 +53,11 @@ def render_markdown(result: BacktestResult, metrics: BacktestMetrics) -> str:
     lines.append(f"| profit_factor | {_dec(metrics.profit_factor)} |")
     lines.append(f"| max_drawdown | {_dec(metrics.max_drawdown)} |")
     lines.append(f"| max_drawdown_pct | {_dec(metrics.max_drawdown_pct)} |")
+    lines.append(f"| sharpe | {_dec(metrics.sharpe)} |")
+    lines.append(f"| sortino | {_dec(metrics.sortino)} |")
+    lines.append(f"| calmar | {_dec(metrics.calmar)} |")
+    lines.append(f"| avg_trade_duration | {metrics.avg_trade_duration or '-'} |")
+    lines.append(f"| max_trade_duration | {metrics.max_trade_duration or '-'} |")
     lines.append(f"| final_equity | {_dec(metrics.final_equity)} |")
     lines.append("")
     lines.append("## Trades (first 10)")
@@ -84,6 +89,11 @@ def _metrics_to_dict(m: BacktestMetrics) -> dict[str, object]:
         "profit_factor": None if m.profit_factor is None else str(m.profit_factor),
         "max_drawdown": str(m.max_drawdown),
         "max_drawdown_pct": str(m.max_drawdown_pct),
+        "sharpe": None if m.sharpe is None else str(m.sharpe),
+        "sortino": None if m.sortino is None else str(m.sortino),
+        "calmar": None if m.calmar is None else str(m.calmar),
+        "avg_trade_duration_s": None if m.avg_trade_duration is None else m.avg_trade_duration.total_seconds(),
+        "max_trade_duration_s": None if m.max_trade_duration is None else m.max_trade_duration.total_seconds(),
         "final_equity": str(m.final_equity),
     }
 
