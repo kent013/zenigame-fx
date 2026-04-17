@@ -8,35 +8,96 @@ FX（外国為替）取引を対象としたデータ収集・シグナル生成
 
 ## 現状
 
-**初期段階**。ソースコード・データ基盤・インフラはまだ存在しない。現在は以下のみ整備済み:
+Phase 0〜4g 実装済み。OANDA demo 口座のクレデンシャル到着後に稼働検証を予定。
 
-- `AGENTS.md` — プロジェクト方針・開発ルール
-- `CLAUDE.md` — Claude Code 向けエントリポイント（`AGENTS.md` を参照）
-- `.claude/` — Claude Code 設定一式（skills は zenigame 由来で未適合。詳細は [AGENTS.md](AGENTS.md)）
+| Phase | 内容 | 状態 |
+|-------|------|------|
+| 0 | プロジェクト骨格（uv / PostgreSQL / Alembic / OANDA client skeleton） | ✓ |
+| 1 | OANDA ヒストリカル/インクリメンタル取得 + diskcache | ✓ |
+| 2 | MockBroker + 単一戦略バックテスト + MD/JSON レポート | ✓ |
+| 3 | Paper Trading orchestrator（Replay / Live） + graceful shutdown | ✓ |
+| 4a | Strategy Registry + 3 戦略追加 + Grid Search | ✓ |
+| 4b | Walk-Forward validation | ✓ |
+| 4c | Sharpe / Sortino / Calmar / trade duration | ✓ |
+| 4d | Strategy ensemble + correlation | ✓ |
+| 4e | 経済指標カレンダー基盤 + EventAware wrapper | ✓ |
+| 4f | DSL expression trees + DslStrategy | ✓ |
+| 4g | 最小 GA（DSL ゲノム進化） | ✓ |
+
+**テスト**: 104/104 pass / **Lint**: ruff clean / **型**: mypy（warning only）
+
+詳細は [docs/runbook.md](docs/runbook.md) を参照。
+
+## クイックスタート
+
+```bash
+# 1. 初期セットアップ
+bash scripts/init.sh
+
+# 2. .env に OANDA の認証情報をセット
+cp .env.example .env
+$EDITOR .env
+# OANDA_ACCOUNT_ID / OANDA_API_TOKEN を記入
+
+# 3. 疎通確認 + USD_JPY を DB に投入
+uv run python scripts/oanda_ping.py
+
+# 4. ヒストリカル取得（1 日分で疎通確認）
+uv run python scripts/fetch_historical.py --instrument USD_JPY --days 1
+
+# 5. バックテスト
+uv run python scripts/backtest_run.py \
+    --instrument USD_JPY \
+    --from 2026-04-01 --to 2026-04-15 \
+    --leverage 10 --strategy bollinger
+```
 
 ## 短期目標
 
-zenigame を参考に、FX 取引を実行する仕組みの骨格を実装する。
+zenigame を参考に、FX 取引を実行する仕組みの骨格を実装する（達成）。
 
-## フェーズ構成（予定）
+## 技術スタック
+
+- Python 3.11+ / uv
+- PostgreSQL 16（価格・ニュース・メタデータ）
+- SQLAlchemy 2.0 + Alembic
+- httpx + tenacity（OANDA v20 API クライアント）
+- pydantic v2 + pydantic-settings
+- diskcache（HTTP レスポンス）
+- structlog
+- pytest + respx + testcontainers
+
+## フェーズ構成（今後の予定）
 
 | Phase | 内容 |
 |-------|------|
-| Phase1 | 価格・通貨ペアDB・キャッシュ（基盤） |
-| Phase2 | ニュース・経済指標取り込みと分類 |
-| Phase3 | シグナル生成と評価（改善ループ） |
-| Phase4 | 取引ルール込みの検証（バックテスト） |
-| Phase5 | 売買実行（Paper Trading → Live） |
+| 5 | Live Trading（実ブローカー接続・リスクガード・監視） |
+| 4h+ | NSGA-II 多目的、ゲノムアーカイブ、Stage Gate、LLM 変異（必要に応じて） |
 
-## 想定技術スタック
+## ディレクトリ構成
 
-- Python 3.11+ / uv
-- PostgreSQL（価格・ニュース・メタデータ）
-- FX データソース: 未選定（OANDA / MetaTrader5 / Dukascopy / Alpha Vantage 等を比較予定）
-- タスクキュー: 未定（zenigame 同様 Dramatiq + RabbitMQ を想定）
+```
+src/
+├── api/             # OANDA v20 クライアント + HTTP キャッシュ
+├── backtest/        # エンジン / Grid Search / Walk-Forward / Ensemble / 指標 / レポート
+├── broker/          # BrokerGateway Protocol / MockBroker / 証拠金ロジック
+├── db/              # SQLAlchemy モデル + Alembic マイグレーション
+├── domain/          # 通貨ペア / PriceBar
+├── dsl/             # 式木 AST / evaluator / Genome / DslStrategy
+├── events/          # 経済指標カレンダー
+├── ga/              # ランダム生成 / crossover / mutation / GA ループ
+├── ingest/          # OANDA データ取り込み
+├── paper_trading/   # Orchestrator / BarFeed / EventLogger
+├── strategy/        # Bollinger / MA Crossover / RSI / Donchian / EventAware
+└── utils/           # 時刻ユーティリティ
+scripts/             # CLI ランナー一式
+tests/               # pytest
+devnotes/            # 設計文書（各 phase の詳細設計）
+reports/             # 実行結果の出力先（.gitignore）
+```
 
-実装が進んだ段階で本 README を更新する。
+## ドキュメント
 
-## 次のアクション
-
-最初のマイルストーン候補は [AGENTS.md の「次のアクション候補」](AGENTS.md#次のアクション候補) を参照。
+- [AGENTS.md](AGENTS.md): プロジェクト方針・開発ルール
+- [docs/runbook.md](docs/runbook.md): CLI コマンド一覧・推奨フロー
+- [devnotes/](devnotes/): 各 Phase の詳細設計
