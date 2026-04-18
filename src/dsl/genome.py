@@ -40,7 +40,9 @@ class DslStrategy:
 
     def on_bar(self, bar: PriceBar, snapshot: PortfolioSnapshot) -> list[OrderSignal]:
         self._bars.append(bar)
-        if len(self._bars) <= self._warmup:
+        # warmup_bars() が返す値と同じバー数が揃った時点から評価を開始する。
+        # 修正前は `<=` により 1 本余計に待機していた（Phase 4f audit Bug #1）。
+        if len(self._bars) < self._warmup:
             return []
         ctx = EvalContext(bars=self._bars, i=len(self._bars) - 1)
 
