@@ -182,7 +182,12 @@ def max_lookback(expr: Expr) -> int:
     if isinstance(expr, Indicator):
         # RSI は window+1 バー必要、他は window バー
         extra = 1 if expr.kind == "rsi" else 0
-        return max(expr.window + extra, max_lookback(expr.of))
+        own = expr.window + extra
+        inner = max_lookback(expr.of)
+        # Indicator は内側の式を window 本の各時点で評価する。内側自身が lookback を
+        # 要求する（別の Indicator を含む）場合、最も過去のサンプル点でも inner バーが
+        # 必要になるので own + inner - 1 バーが必要。inner=0 なら純粋に own バー。
+        return own + max(inner - 1, 0)
     if isinstance(expr, BinOp | Compare):
         return max(max_lookback(expr.lhs), max_lookback(expr.rhs))
     if isinstance(expr, Logical):
