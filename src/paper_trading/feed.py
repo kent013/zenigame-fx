@@ -6,14 +6,26 @@ from collections.abc import Iterable, Iterator
 from datetime import datetime, timedelta
 from typing import Protocol
 
+import httpx
 import structlog
 
-from src.api.oanda.client import OandaClient
+from src.api.oanda.client import (
+    OandaAuthError,
+    OandaClient,
+    OandaRateLimitError,
+    OandaServerError,
+)
 from src.api.oanda.models import Candle
 from src.domain.price import Ohlc, PriceBar
-from src.utils.time import to_utc
+from src.utils.time import now_utc, to_utc
 
 logger = structlog.get_logger(__name__)
+
+# Live polling のバー欠落を許容する安全上限。30 分以上の遅延があれば count を拡張するが、
+# 万が一の暴走で 500 本を超える要求はしない（OANDA の 5000 本上限に対しても安全側）。
+_LIVE_COUNT_MIN = 2
+_LIVE_COUNT_MAX = 500
+_LIVE_BAR_BUFFER = 2
 
 
 class BarFeed(Protocol):
@@ -48,7 +60,17 @@ class ReplayBarFeed:
 
 
 class LiveBarFeed:
-    """OANDA の candles エンドポイントを定期 polling し、新規完成バーを yield する。"""
+    """OANDA の candles エンドポイントを定期 polling し、新規完成バーを yield する。
+
+    例外ポリシー（audit follow-up）:
+    - `OandaAuthError`（401 等）は即時 raise。無限ループ化させない
+    - `OandaRateLimitError` / `OandaServerError` / `httpx.TransportError` は warning だけ出して次 tick に進む
+    - その他の予期しない例外は error ログを出してから raise
+
+    count 計算（audit follow-up）:
+    - 前回 yield 以降に経過した分数 + buffer でリクエスト count を決める
+    - 初回と通常時は `_LIVE_COUNT_MIN` (2)、長時間ダウンからの復帰時は最大 `_LIVE_COUNT_MAX` (500) まで拡張
+    """
 
     def __init__(
         self,
@@ -56,13 +78,24 @@ class LiveBarFeed:
         instrument: str,
         poll_interval_seconds: float = 10.0,
         granularity: str = "M1",
+        bar_interval_seconds: float = 60.0,
     ) -> None:
         self._client = client
         self._instrument = instrument
         self._poll_interval = poll_interval_seconds
         self._granularity = granularity
+        self._bar_interval = bar_interval_seconds
         self._stop_event = threading.Event()
         self._last_yielded: datetime | None = None
+
+    def _compute_count(self) -> int:
+        if self._last_yielded is None:
+            return _LIVE_COUNT_MIN
+        elapsed = (now_utc() - self._last_yielded).total_seconds()
+        if elapsed <= 0:
+            return _LIVE_COUNT_MIN
+        expected_bars = int(elapsed // self._bar_interval) + _LIVE_BAR_BUFFER
+        return max(_LIVE_COUNT_MIN, min(_LIVE_COUNT_MAX, expected_bars))
 
     def __iter__(self) -> Iterator[PriceBar]:
         while not self._stop_event.is_set():
@@ -71,19 +104,28 @@ class LiveBarFeed:
                     instrument=self._instrument,
                     granularity=self._granularity,
                     price="BA",
-                    count=2,
+                    count=self._compute_count(),
                 )
-                for candle in resp.candles:
-                    if not candle.complete:
-                        continue
-                    candle_time = to_utc(candle.time)
-                    if self._last_yielded is not None and candle_time <= self._last_yielded:
-                        continue
-                    bar = _candle_to_bar(self._instrument, candle)
-                    self._last_yielded = candle_time
-                    yield bar
-            except Exception as exc:  # 継続運用のためログだけ出して次 tick に進む
-                logger.warning("live_feed.poll_error", error=str(exc))
+            except OandaAuthError:
+                # 認証情報の誤りは再試行で解決しないので fail-fast。
+                raise
+            except (OandaRateLimitError, OandaServerError, httpx.TransportError) as exc:
+                logger.warning("live_feed.transient_error", error=str(exc))
+                self._stop_event.wait(timeout=self._poll_interval)
+                continue
+            except Exception as exc:
+                logger.error("live_feed.unexpected_error", error=str(exc))
+                raise
+
+            for candle in resp.candles:
+                if not candle.complete:
+                    continue
+                candle_time = to_utc(candle.time)
+                if self._last_yielded is not None and candle_time <= self._last_yielded:
+                    continue
+                bar = _candle_to_bar(self._instrument, candle)
+                self._last_yielded = candle_time
+                yield bar
             self._stop_event.wait(timeout=self._poll_interval)
 
     def stop(self) -> None:
@@ -105,8 +147,8 @@ def _candle_to_bar(instrument: str, candle: Candle) -> PriceBar:
 
 def seconds_until_next_bar(now: datetime, bar_interval: timedelta = timedelta(minutes=1)) -> float:
     """次バー確定時刻までの秒数。Live polling のスリープ間隔ヒントに使う。"""
-    now_utc = to_utc(now)
-    seconds_into = now_utc.timestamp() % bar_interval.total_seconds()
+    now_utc_dt = to_utc(now)
+    seconds_into = now_utc_dt.timestamp() % bar_interval.total_seconds()
     remaining = bar_interval.total_seconds() - seconds_into
     return remaining
 
