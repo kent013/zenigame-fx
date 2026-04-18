@@ -126,6 +126,10 @@ uv run python scripts/walk_forward.py \
 
 train でグリッドサーチ → best params を test で評価、fold を重ねて汎化性能を測定。`overfit_score` でカーブフィッティング度合いを確認できる。
 
+**推奨**:
+- `--step-days` は `--test-days` 以下にすること（超えると fold に穴が空く、警告ログは出るが skip されない）
+- `overfit_score` は train の total_pnl が正のときのみ定義される（train 損失のケースでは None）
+
 ### 3.4 アンサンブル評価
 
 ```bash
