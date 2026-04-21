@@ -107,14 +107,22 @@ zenigame 側のファイルは `.claude/settings.local.json` の `additionalDire
 
 ## .claude/ 設定の現状
 
-zenigame からコピーした skills 群（`.claude/skills/zenigame-*`）はすべて zenigame 固有のインフラ（systemd ワーカー、Alpha Factory、J-Quants etc.）に依存している。**zenigame-fx のインフラが整備されていない現段階では、これらの skill は機能しない。**
+`.claude/skills/` 配下は以下の三層構成:
+
+1. **`zenigame-fx-*`**（移植・新設済み）: zenigame-fx 環境で動く正式 skill 群（autopilot, codex-vscode, codex-review, alpha-design, todo-add, todo-close, implement, update-docs, improve-cycle 他）
+2. **`zenigame-*`**（流用そのまま）: zenigame 由来でまだ移植中・参考保持の skill 群。zenigame-fx 用 inflastructure 整備後に zenigame-fx-* 版へ順次置き換える
+3. **`_archived/zenigame-*`**（退避済み）: zenigame 固有インフラ（Dramatiq, systemd, Discord, J-Quants）依存で zenigame-fx では動作しないため `_archived/` プレフィックス配下に退避し、Claude Code の skill 候補一覧から除外（実地検証済み: 2026-04-21）
+
+退避済み 7 件:
+- `zenigame-enqueue-task`, `zenigame-manage-alert`, `zenigame-manage-timer`, `zenigame-restart-worker`, `zenigame-troubleshoot-worker`, `zenigame-primitive-ic-eval`, `zenigame-primitive-ic-sync`
+
+復活条件・退避理由は `.claude/skills/_archived/README.md` を参照。
 
 方針:
-- zenigame-fx の機能が育つにつれて、必要な skill を個別に新設する（`zenigame-fx-*` 名前空間）
-- zenigame 固有の skill を流用する必要はない。設計パターンだけ参考にして、zenigame-fx 用に書き直す
-- 混乱を避けるため、実装が進んだ段階で zenigame-* skill は削除するか `.claude/skills/_archived/` に退避する
-
-`.claude/hooks/bash-permissions.py` は汎用的なので残す。
+- 新設の zenigame-fx-* は `zenigame-fx-codex-review` の使命・禁止事項を継承する
+- zenigame-* 残存分は zenigame-fx-* 版を整備したタイミングで削除 or `_archived/` 退避
+- `.claude/hooks/bash-permissions.py` は汎用的なので残す
+- 移植進捗は `devnotes/20260421-1850-fx-skill-port/master-plan.md` を参照
 
 ---
 
