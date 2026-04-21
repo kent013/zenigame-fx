@@ -22,3 +22,6 @@ reports/backtests/
 reports/walk-forwards/
 reports/ensembles/
 reports/ga-runs/
+docs/oanda/jp-v1/
+docs/oanda/v20/
+docs/oanda/shared/
