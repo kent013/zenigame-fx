@@ -75,6 +75,48 @@ def test_iter_range_paginates_and_stops_at_end(client: OandaClient) -> None:
 
 
 @respx.mock
+def test_iter_range_continues_when_second_page_is_one_short(client: OandaClient) -> None:
+    """OANDA は includeFirst=false の応答で最大 count-1 本しか返さない仕様のため、
+    それを「終端」と誤判定して早期 return しない振る舞いを固定する。"""
+    first_page = {
+        "instrument": "USD_JPY",
+        "granularity": "M1",
+        "candles": [_candle(f"2026-04-01T00:{m:02d}:00.000000000Z") for m in range(0, 5)],
+    }
+    # includeFirst=false の 2 ページ目は意図的に count-1 (=4) 本
+    second_page = {
+        "instrument": "USD_JPY",
+        "granularity": "M1",
+        "candles": [_candle(f"2026-04-01T00:{m:02d}:00.000000000Z") for m in range(5, 9)],
+    }
+    # 3 ページ目は真の終端（count-1 未満 = 1 本のみ）
+    third_page = {
+        "instrument": "USD_JPY",
+        "granularity": "M1",
+        "candles": [_candle("2026-04-01T00:09:00.000000000Z")],
+    }
+    route = respx.get(f"{BASE_URL}/v3/instruments/USD_JPY/candles").mock(
+        side_effect=[
+            Response(200, json=first_page),
+            Response(200, json=second_page),
+            Response(200, json=third_page),
+        ]
+    )
+
+    plan = HistoricalRange(
+        instrument="USD_JPY",
+        start=datetime(2026, 4, 1, 0, 0, 0, tzinfo=UTC),
+        end=datetime(2026, 4, 1, 1, 0, 0, tzinfo=UTC),
+        chunk_count=5,
+    )
+    candles = list(CandleFetcher(client).iter_range(plan))
+
+    assert route.call_count == 3
+    # 全ページの full set が返る（重複なし、欠落なし）
+    assert [c.time.minute for c in candles] == list(range(0, 10))
+
+
+@respx.mock
 def test_iter_range_skips_incomplete_bars(client: OandaClient) -> None:
     page = {
         "instrument": "USD_JPY",
@@ -176,4 +218,5 @@ def test_store_bars_skips_incomplete_and_missing_sides() -> None:
     written = store_bars(session, pair_id=1, candles=candles)
     assert written == 2
     session.commit.assert_called_once()
-    assert session.execute.call_count == 2
+    # バルク UPSERT なので session.execute は 1 回のみ
+    assert session.execute.call_count == 1

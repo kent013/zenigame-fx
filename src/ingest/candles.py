@@ -80,8 +80,10 @@ class CandleFetcher:
                 if candle.complete:
                     yield candle
 
-            # count 未満の応答 = OANDA が利用可能なバーを出し切った = 取得終端
-            if len(response_candles) < plan.chunk_count:
+            # 「ほぼ空」応答 = 終端。includeFirst=false の時は from のバーが除外されるため
+            # 実際の上限は chunk_count - 1 本になる点に注意（判定を緩める）。
+            effective_limit = plan.chunk_count - (0 if include_first else 1)
+            if len(response_candles) < effective_limit:
                 return
 
             last_time = to_utc(response_candles[-1].time)
@@ -121,34 +123,51 @@ class CandleFetcher:
         return chunk_end <= now_utc() - CACHE_FRESHNESS_MARGIN
 
 
+_UPDATABLE_COLUMNS = (
+    "open_bid",
+    "high_bid",
+    "low_bid",
+    "close_bid",
+    "open_ask",
+    "high_ask",
+    "low_ask",
+    "close_ask",
+    "volume",
+    "complete",
+)
+
+
 def store_bars(session: Session, pair_id: int, candles: Iterable[Candle]) -> int:
-    """`complete=true` かつ bid/ask 両方が揃っているバーを price_bar_m1 に UPSERT する。戻り値は書き込み件数。"""
-    count = 0
+    """`complete=true` かつ bid/ask 両方が揃っているバーを price_bar_m1 に一括 UPSERT する。戻り値は書き込み件数。"""
+    rows: list[dict] = []
     for candle in candles:
         if not candle.complete:
             continue
         if candle.bid is None or candle.ask is None:
             continue
-        values = {
-            "pair_id": pair_id,
-            "bar_time": to_utc(candle.time),
-            "open_bid": candle.bid.o,
-            "high_bid": candle.bid.h,
-            "low_bid": candle.bid.l,
-            "close_bid": candle.bid.c,
-            "open_ask": candle.ask.o,
-            "high_ask": candle.ask.h,
-            "low_ask": candle.ask.l,
-            "close_ask": candle.ask.c,
-            "volume": candle.volume,
-            "complete": candle.complete,
-        }
-        stmt = insert(PriceBarM1).values(**values)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["pair_id", "bar_time"],
-            set_={k: v for k, v in values.items() if k not in ("pair_id", "bar_time")},
+        rows.append(
+            {
+                "pair_id": pair_id,
+                "bar_time": to_utc(candle.time),
+                "open_bid": candle.bid.o,
+                "high_bid": candle.bid.h,
+                "low_bid": candle.bid.l,
+                "close_bid": candle.bid.c,
+                "open_ask": candle.ask.o,
+                "high_ask": candle.ask.h,
+                "low_ask": candle.ask.l,
+                "close_ask": candle.ask.c,
+                "volume": candle.volume,
+                "complete": candle.complete,
+            }
         )
-        session.execute(stmt)
-        count += 1
+    if not rows:
+        return 0
+    stmt = insert(PriceBarM1).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["pair_id", "bar_time"],
+        set_={col: getattr(stmt.excluded, col) for col in _UPDATABLE_COLUMNS},
+    )
+    session.execute(stmt)
     session.commit()
-    return count
+    return len(rows)
