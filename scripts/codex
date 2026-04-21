@@ -1,0 +1,33 @@
+#!/bin/sh
+# codex: Launch Codex CLI using the OpenAI ChatGPT VSCode extension's native binary.
+# Dynamically finds the latest installed version so it follows extension updates.
+# Supports local (~/.vscode) and remote (~/.vscode-server) installations on
+# macOS arm64 / Linux arm64 / Linux x64.
+
+OS=$(uname -s)
+ARCH=$(uname -m)
+
+case "$OS/$ARCH" in
+  Darwin/arm64)              BIN_SUB="bin/macos-aarch64/codex" ;;
+  Darwin/x86_64)             BIN_SUB="bin/macos-x64/codex" ;;
+  Linux/aarch64|Linux/arm64) BIN_SUB="bin/linux-aarch64/codex" ;;
+  Linux/x86_64)              BIN_SUB="bin/linux-x64/codex" ;;
+  *) echo "Error: Unsupported platform: $OS/$ARCH" >&2; exit 1 ;;
+esac
+
+CODEX=""
+for base in "$HOME/.vscode-server/extensions" "$HOME/.vscode/extensions"; do
+  [ -d "$base" ] || continue
+  for ext in $(ls -d "$base"/openai.chatgpt-* 2>/dev/null | sort -V); do
+    candidate="$ext/$BIN_SUB"
+    [ -x "$candidate" ] && CODEX="$candidate"
+  done
+done
+
+if [ -z "$CODEX" ]; then
+  echo "Error: OpenAI ChatGPT VSCode extension (codex binary for $OS/$ARCH) not found." >&2
+  echo "Install it from VSCode marketplace first." >&2
+  exit 1
+fi
+
+exec "$CODEX" "$@"

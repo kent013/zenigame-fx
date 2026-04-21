@@ -1,0 +1,24 @@
+#!/bin/sh
+# claude: Launch Claude Code using the Anthropic VSCode extension's native binary.
+# Dynamically finds the latest installed version so it follows extension updates.
+# Supports local (~/.vscode) and remote (~/.vscode-server) installations.
+
+CLAUDE=""
+for base in "$HOME/.vscode-server/extensions" "$HOME/.vscode/extensions"; do
+  [ -d "$base" ] || continue
+  for ext in $(ls -d "$base"/anthropic.claude-code-* 2>/dev/null | sort -V); do
+    candidate="$ext/resources/native-binary/claude"
+    [ -x "$candidate" ] && CLAUDE="$candidate"
+  done
+done
+
+if [ -z "$CLAUDE" ]; then
+  echo "Error: Claude Code VSCode extension not found." >&2
+  echo "Install it from VSCode marketplace first." >&2
+  exit 1
+fi
+
+export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
+#export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=75
+
+exec "$CLAUDE" "$@"
