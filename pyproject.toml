@@ -49,6 +49,9 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "integration: requires running container (Docker/Postgres testcontainer)",
+]
 
 [build-system]
 requires = ["hatchling"]
