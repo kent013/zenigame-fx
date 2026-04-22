@@ -9,6 +9,7 @@
 | T003 | port-rename-only zenigame-* skill 4 件を zenigame-fx-* に | skill-port | Medium | 2026-04-22 10:24 | 3b5eb5f |
 | T004 | FRED ingest 実装 (VIX/DXY/金利日足) | data-ingest | High | 2026-04-22 11:43 | c7d3c59 |
 | T005 | OANDA CFD instrument 疎通試験 | data-ingest | Medium | 2026-04-22 13:05 | 1ea6a6b |
+| T006 | 統計検定最小セット実装 (DSR/fold sign/block bootstrap) | statistics | Critical | 2026-04-22 14:10 JST | e2434c0 |
 
 ## Obsoleted
 
