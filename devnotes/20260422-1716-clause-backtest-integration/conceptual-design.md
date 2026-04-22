@@ -1,0 +1,323 @@
+# Conceptual Design: Clause backtest integration (T009)
+
+**作成日時**: 2026-04-22 17:16 (JST)
+**更新**: 2026-04-22 18:05 (JST) — Codex conceptual-review Round 1 NEEDS_REVISION 対応
+**TODO**: T009（autopilot cycle 9）
+**前提**: T007 (clause-genome-structure) / T008 (clause-ga-operators) マージ済
+
+## 0. 背景
+
+T007 で DSL が Clause ベースに刷新され、`DslStrategy` は `PrimitiveEvaluator` 注入型になった。
+T008 で GA operators / runner を Clause 対応にし、evaluator 外部注入で fitness.py の復活を
+本 TODO に委譲した。本 TODO の責務は:
+
+1. `run_backtest` を新 `DslStrategy` を前提とする形で整える（API 後方互換は保つ）
+2. spread フィルタ / holding cost (swap proxy) / session close の 3 種のコスト・絶対制約を導入
+3. `evaluate_genome` を `PrimitiveEvaluator` 注入型で復活
+
+## 1. 目的
+
+- Clause Genome を使った fitness 計算を end-to-end で成立させる（`genome → DslStrategy → run_backtest → compute_metrics → fitness`）
+- **TC 絶対制約** (`docs/alpha_factory/terminology.md#tc`) を fitness に反映する第一弾として spread フィルタ / holding cost を導入
+- イントラデイ絶対制約 (North Star) を engine 側の `session_close_utc_hours` と EOD で **冗長担保**
+
+## 2. スコープ
+
+### 含む
+
+1. `BacktestConfig` 拡張:
+   - `max_spread_bps: Decimal | None`（None は無効、約定前フィルタ）
+   - `holding_cost_per_day_bps: Decimal`（デフォルト `Decimal("0")`、bar ごと線形按分で cash 控除）
+     - **命名変更**: Round 1 レビュー #5 対応。本 TODO は「rollover event 正確再現」ではなく
+       「保有時間に比例した holding cost proxy」であることを名前で明示。
+       旧称 `swap_cost_per_day_bps` は廃止。
+   - `session_close_utc_hours: frozenset[int]`（空集合は無効）
+   - `bar_minutes: int`（デフォルト 1、M1 前提の明示フィールド）
+2. `run_backtest(bars, strategy, broker, config)` のシグネチャは **据え置き**
+   （`primitive_evaluator` 引数は追加しない。evaluator は `DslStrategy` コンストラクタで bake-in）
+3. `MockBroker` 拡張:
+   - `set_spread_filter(max_spread_bps: Decimal | None)` で engine から伝達
+   - `submit` 内で open 系シグナルのみ「**前 bar までに観測済みの close spread**」と照合して reject
+   - `apply_bar_holding_cost(bar, per_day_bps, bar_minutes)` で bar 単位控除
+4. `evaluate_genome` 復活（`PrimitiveEvaluator` 注入、3 metric 対応、metric 不能時と例外時をログで分離）
+5. `tests/dsl/test_dsl_strategy.py` / `test_warmup_boundary.py` の skip 解除
+6. `tests/backtest/test_engine_clause.py` / `tests/ga/test_fitness_evaluate.py` 新規
+7. `tests/dsl/conftest.py` に `DummyPrimitiveEvaluator` fixture
+
+### 含まない（後続 TODO 委譲）
+
+- `config/alpha_factory/default.yaml` への spread / holding_cost 値の実配線（Phase 2I: run-ga-full-rewrite）
+- 実プリミティブ実装（T010 primitives-registry）
+- Stage Gate への接続（T011 stage-gate-implementation）
+- slippage（本 TODO は spread + holding_cost のみ、slippage は Phase 2H で別 TODO 化予定）
+- 実 rollover swap（日付境界固定課金・水曜 3 日分など）の精密再現は将来 TODO
+
+## 3. 設計方針
+
+### 3.1 spread フィルタ（約定前フィルタ、no-lookahead）
+
+**観測契約（Round 1 レビュー #1 対応）**:
+- 判定に使う値: **前バー（発注が観測された最後の bar）の close spread_bps**
+- 理由: シグナルが発生したのは「前バー close 時点」であり、そこから得られる情報のみが
+  「約定前に戦略主体が持てる最良の推定値」。次バー open で実際にどの spread で約定するかは
+  未観測（look-ahead）。よって前バー close spread を採用する。
+- `PriceBar.spread_close: Decimal` は既に domain に定義済み。bps 化は
+  `spread_bps = spread_close / mid_close × 10000`, `mid_close = (ask.close + bid.close) / 2`
+- `MockBroker` は `mark_to_market(bar)` で最後の bar を内部保持している。このタイミングで
+  `_last_close_spread_bps` を内部計算し、次バーの `fill_pending` 直前に参照する。
+
+**適用タイミングと効果**:
+- `fill_pending(bar)` の先頭で、**pending の open 系シグナル** について
+  `self._last_close_spread_bps > max_spread_bps` なら **当該シグナルを drop** する
+  （pending から除去して約定しない、ログは `broker.submit.rejected_by_spread` で残す）
+- `pending` の順序で処理するので、同一 bar の close 系シグナルは reject されず通常通り約定
+- `max_spread_bps` が None なら上記チェックはスキップ
+
+**エッジケース**:
+- 最初の bar（`_last_close_spread_bps` 未計算）: pending は空のため実害なし。防御的に
+  「前 bar 未観測なら reject しない」default を採る（戦略初 bar の open は稀）
+- mid=0 ガード: `mid_close <= 0` なら spread 計算せず `reject=False`（防御）
+
+### 3.2 holding cost proxy（bar 単位の equity 控除）
+
+**命名と意味（Round 1 レビュー #5 対応）**:
+- 本 TODO の範囲では、保有時間に対する **holding cost proxy**（保有コスト近似）として扱う
+- 実 swap (OANDA rollover) の正確な再現ではない。日付境界固定課金・水曜 3 倍・side 別 swap 等は
+  将来 TODO。本 TODO は「保有時間に比例する cost を fitness に反映する」最小実装
+- config キー名も `holding_cost_per_day_bps` に統一。Swap/Rollover 固有再現は将来拡張時に
+  `rollover_schedule` 等の別フィールドを追加する
+
+**仕様**:
+- `holding_cost_per_day_bps: Decimal`（デフォルト 0、正の値を想定、負は未対応で raise）
+- 各 bar `mark_to_market` 直後で開いているポジションがあれば:
+  ```
+  per_bar_bps = holding_cost_per_day_bps × (bar_minutes / 1440)
+  cost_amount = Σ (|notional_home| × per_bar_bps / 10000)  over open positions
+  cash -= cost_amount
+  ```
+- `|notional_home|` は `notional_home_currency(units, entry_price, quote_is_home=True)` を使う
+  （既存 `src/broker/margin.py` のヘルパ）
+- `bar_minutes` は `BacktestConfig.bar_minutes` から伝達。M1 デフォルトで既存テストを壊さない
+
+### 3.3 session close（イントラデイ絶対制約、engine 不変条件）
+
+**不変条件強化（Round 1 レビュー #2, #4 対応）**:
+- `session_close_utc_hours` が空 **かつ** `bars` 全体が単一 UTC date（`is_eod` が常に False）の場合
+  → **`ValueError` で即 fail**（warning から昇格）
+  - 根拠: North Star の「イントラデイ絶対制約」はソフト警告ではなく engine 不変条件
+  - 検証タイミング: `run_backtest` 冒頭で bars を一覧化した直後
+  - 例外メッセージで「session_close_utc_hours を設定するか、bars を複数 UTC date に跨らせる」ことを示唆
+
+**発動タイミング（pending open の抜け道封鎖、Round 1 レビュー #2）**:
+1. **`bar.bar_time.hour in session_close_utc_hours` の bar に入ったら最初に:**
+   - pending のうち open 系シグナルを drop（reject ログ `session_close.reject_pending_open`）
+   - pending の close 系シグナルはそのまま fill（既存保有を決済する方向は通す）
+2. 次に `fill_pending(bar)`（open 系は既に drop 済み）
+3. 次に `mark_to_market(bar)` + holding cost 控除
+4. 次に `force_close_if_margin_call(bar)`
+5. **保有があれば `close_all(bar, reason="eod")` で session close**
+6. そのあと `strategy.on_bar(bar, snapshot)` を呼ぶ
+7. strategy から open 系シグナルが返っても submit せず drop（`session_close.drop_open_from_strategy` ログ）
+8. close 系シグナルは submit（※現実には close する position は既に無いので no-op）
+9. equity_curve 記録 + EOD 境界判定（既存）
+
+**順序の論理**:
+- pending を drop → fill → mark → session close → strategy の順にすることで
+  「session close bar で新規 open が成立する経路」を構造的に遮断
+- `strategy.on_bar` は session close 後の snapshot（= 保有 0）で判断するため、エントリー判断は出うるが
+  engine 側で submit を弾く
+
+### 3.4 4 段伝搬契約の明示（Round 1 レビュー #3）
+
+本 TODO では実配線しないが、概念設計に契約を明記する:
+
+```
+config/alpha_factory/default.yaml (Phase 2I で追加)
+  backtest:
+    max_spread_bps: <Decimal>
+    holding_cost_per_day_bps: <Decimal>
+    session_close_utc_hours: [<int>, ...]
+    bar_minutes: <int>
+    ↓ (yaml loader)
+src/ga/runner.py::GaConfig (Phase 2I で追加フィールド)
+  max_spread_bps, holding_cost_per_day_bps, session_close_utc_hours, bar_minutes
+    ↓ (GaConfig → BacktestConfig 変換、evaluate_genome 呼び出し時)
+src/backtest/engine.py::BacktestConfig (本 TODO で追加)
+  max_spread_bps, holding_cost_per_day_bps, session_close_utc_hours, bar_minutes
+    ↓ (run_backtest)
+consumers:
+  - MockBroker.set_spread_filter(max_spread_bps)
+  - MockBroker.apply_bar_holding_cost(bar, holding_cost_per_day_bps, bar_minutes)
+  - run_backtest ループの session close gate
+```
+
+**本 TODO で守るべき不変条件**:
+- `BacktestConfig` の新規フィールドは全て `default` を持つ（後方互換性のため既存呼び出しは無修正）
+- ドキュメント `docs/alpha_factory/clause-architecture.md` の「spread / swap 受け渡し契約」節を
+  本 TODO 完了時点の契約名（holding_cost_per_day_bps）に合わせて更新
+- 後続 TODO は `clause-architecture.md` を SSOT として参照する
+
+### 3.5 `fitness.py::evaluate_genome` 復活（例外と metric 不能を分離、Round 1 レビュー #6）
+
+```python
+_FAILURE_FITNESS = Decimal("-1000000000000")  # 既存
+
+def evaluate_genome(
+    genome: Genome,
+    bars: list[PriceBar],
+    meta: InstrumentMeta,
+    backtest_config: BacktestConfig,
+    primitive_evaluator: PrimitiveEvaluator,
+    *,
+    metric: FitnessMetric = "total_pnl",
+    warmup_bars: int = 0,
+    session_close_utc: time | None = None,
+) -> Decimal:
+    try:
+        strategy = DslStrategy(
+            genome, primitive_evaluator,
+            warmup_bars=warmup_bars,
+            session_close_utc=session_close_utc,
+        )
+        broker = MockBroker(instrument_meta=meta)
+        result = run_backtest(bars, strategy, broker, backtest_config)
+        metrics = compute_metrics(result.trades, result.equity_curve)
+    except Exception as exc:
+        logger.warning(
+            "ga.fitness.system_failure", genome=genome.name, error=str(exc), error_type=type(exc).__name__,
+        )
+        return _FAILURE_FITNESS
+    if metric == "total_pnl":
+        return metrics.total_pnl
+    if metric == "sharpe":
+        if metrics.sharpe is None:
+            logger.info("ga.fitness.metric_unavailable", genome=genome.name, metric=metric, reason="insufficient_trades")
+            return _FAILURE_FITNESS
+        return metrics.sharpe
+    if metric == "calmar":
+        if metrics.calmar is None:
+            logger.info("ga.fitness.metric_unavailable", genome=genome.name, metric=metric, reason="flat_or_no_drawdown")
+            return _FAILURE_FITNESS
+        return metrics.calmar
+    raise ValueError(f"unknown metric: {metric}")
+```
+
+- **例外（system_failure）**: `warning` ログ、原因型を記録
+- **metric 不能（metric_unavailable）**: `info` ログ、理由を記録（sharpe 系は trade 不足、calmar は drawdown 0）
+- 両者とも戻り値は `_FAILURE_FITNESS` だがログ分離で debug 可能
+- sharpe / calmar は既に `BacktestMetrics` が `Decimal | None` で保持しているため、二重変換なし
+
+## 4. コード変更サマリ
+
+| Path | 変更 | 理由 |
+|------|------|------|
+| `src/backtest/engine.py` | `BacktestConfig` フィールド 4 追加 / `run_backtest` に session close 前フック + holding cost step / 入口での session 絶対制約バリデーション | 絶対制約と TC 反映 |
+| `src/broker/mock.py` | `set_spread_filter`, `_last_close_spread_bps` 更新, `submit` 時 pending 格納（filter は fill 時）, `fill_pending` で open 系 reject, `apply_bar_holding_cost` メソッド | spread フィルタと holding cost |
+| `src/ga/fitness.py` | `evaluate_genome` 復活（例外 / metric 不能分離） | 本 TODO の主眼 |
+| `tests/dsl/test_dsl_strategy.py` | skip 解除 + ヒステリシス / time_stop / session close / warmup / spread 抑制の統合テスト | 実体化 |
+| `tests/dsl/test_warmup_boundary.py` | skip 解除 + warmup 期間テスト | 実体化 |
+| `tests/backtest/test_engine_clause.py` | 新規 | 統合テスト |
+| `tests/ga/test_fitness_evaluate.py` | 新規 | fitness 回路検証 |
+| `tests/dsl/conftest.py` | 新規: DummyPrimitiveEvaluator fixture | テスト共通化 |
+| `docs/alpha_factory/clause-architecture.md` | backtest 統合節追加（spread フィルタ / holding cost / session close） | SSOT 更新 |
+| `docs/alpha_factory/stage-gates.md` | 「backtest は Clause 構造前提」を 1 行追加 | 前提明示 |
+| `docs/alpha_factory/terminology.md` | 「spread フィルタ」「holding cost proxy」「session close」用語追加または補強 | 用語集補充 |
+
+## 5. テスト観点
+
+### 5.1 tests/dsl/test_dsl_strategy.py (skip 解除)
+
+- ヒステリシス遷移（θ_on / θ_off 境界、long / short 対称性）
+- warmup 期間中は発注なし（`DslStrategy.warmup_bars` 分は空 list）
+- time_stop 到達で強制クローズ
+- `session_close_utc` 引数で強制クローズ（DslStrategy 内部 fail-safe）
+- `snapshot.positions` から保有 side / entry_time を同期（engine が force close した場合の追従）
+
+### 5.2 tests/dsl/test_warmup_boundary.py (skip 解除)
+
+- `warmup_bars=3` で idx=0,1,2 は空 list、idx=3 から評価
+- `warmup_bars=0` のとき最初の bar から評価
+
+### 5.3 tests/backtest/test_engine_clause.py (新規)
+
+- Clause Genome + DummyPrimitiveEvaluator で run_backtest 実行 → trade 発生
+- `max_spread_bps` 超過 bar の翌 bar では open シグナルがスキップ（engine fill_pending で reject）
+- `session_close_utc_hours={21}` で 21 時台 bar 到達時に強制クローズ、さらに同 bar の pending open は drop
+- `holding_cost_per_day_bps` で N bar 保有時 total_pnl から `N × per_bar_bps × notional` 相当が控除
+- `session_close_utc_hours` 空 かつ bars が単一 UTC date の場合、`run_backtest` 冒頭で `ValueError` を raise
+
+### 5.4 tests/ga/test_fitness_evaluate.py (新規)
+
+- `total_pnl` metric で正常系
+- `sharpe` / `calmar` metric で `BacktestMetrics` から Decimal 取得
+- evaluator が例外を raise した場合に `_FAILURE_FITNESS` 返却（ログは system_failure）
+- `metrics.sharpe` / `calmar` が None のとき `_FAILURE_FITNESS` 返却（ログは metric_unavailable）
+
+## 6. 未解決事項・要議論
+
+### 6.1 bar_minutes のハードコーディング
+
+現 MVP は M1 前提で `bar_minutes=1` デフォルト。M5 / M15 対応は concept レベルでは既に対応済
+（フィールド化）。実ランで M5 を使う場合の bars の時刻差とフィールド値の一貫性チェックは
+後続 TODO で追加（本 TODO は test で M1 固定）。
+
+### 6.2 holding cost の負値
+
+本 TODO: 正値のみ（`holding_cost_per_day_bps >= 0`）。
+将来の rollover swap 正確化 TODO で、long / short 別・正負混在対応を計画。
+
+### 6.3 session_close_utc_hours と DslStrategy.session_close_utc の二重性
+
+- engine 側 `session_close_utc_hours`（set of int）: 絶対強制、pending open drop を含む強い不変条件
+- DslStrategy 側 `session_close_utc`（time | None）: Strategy レベルの fail-safe（後方互換、T007 導入済）
+- 両者が同時に設定されても動作に矛盾はない（engine 側が先に発動）
+- ドキュメントで「engine 側が primary、DslStrategy 側は fail-safe」と明記
+
+### 6.4 spread bps の計算タイミング
+
+`MockBroker.mark_to_market(bar)` で毎 bar 更新する。`_last_close_spread_bps` は optional（初期 None）。
+None の場合は reject しない（デフォルト通過）。
+
+## 7. 関連先行研究 (要確認フラグ付き)
+
+- FX spread の日内変動: Ranaldo (2009) "Segmentation and time-of-day patterns in foreign exchange markets"
+  （Journal of Banking and Finance）— アジア / 欧州 / ロンドン / NY セッション別の spread 典型値
+  （要確認: 現代の HFT 環境で論文値が妥当かは OANDA ヒストリカル spread の実測で裏取り）
+- OANDA rollover spec: OANDA Pricing & Execution（公式）— 22:00 UTC で swap 付与、水曜 3 日分
+  （要確認: OANDA Japan ドキュメントの値は英文版と乖離する可能性あり）
+
+これらは本 TODO の実装値自体には影響しない（テストは合成値）。後続で config 化する際の典型値の
+設定根拠として残す。
+
+## 8. Risks と軽減策
+
+| Risk | 軽減 |
+|------|------|
+| 既存 `tests/backtest/test_engine.py` が BacktestConfig 追加で collection エラー | 新フィールドを optional defaults 付きで追加、bars が複数日を跨ぐ既存テストは絶対制約 check を通る |
+| spread 計算で division by zero (`mid = 0`) | FX 価格は正値で保証、ただし防御的に `if mid > 0` ガード |
+| holding cost 控除で cash がマイナスに振れる | margin call が発動（既存機構）、fitness に反映されていれば OK |
+| bar の tz が UTC でない場合 session_close の h 判定がずれる | `PriceBar.bar_time` は OANDA 取り込み時点で UTC 固定（既存契約）、テストは UTC datetime を生成 |
+| 既存 `test_engine.py` の bars が単一 UTC date で絶対制約 check に引っかかる | 既存テストの bars は `day=1 → day=2` で既に跨いでいる（test_eod_force_close_on_day_boundary）。test_fills_at_next_bar_open_not_current / test_end_of_run_closes_remaining_position は単一 UTC date → 既存 test は `session_close_utc_hours=frozenset()` かつ単一 date でも `is_eod=True` を含むので check 通過する必要あり。→ **検証方針**: 「single UTC date かつ session 空 → raise」は「bars 全体が同一 UTC date」判定なので、1 bar だけでも日跨ぎがあれば通る。既存テストは `day=1 day=2` 形式で日跨ぎしているので引っかからない。single-date の既存テストは session_close_utc_hours か別手段で回避（詳細設計で個別対応） |
+
+## 9. 実装順序（概要）
+
+1. `BacktestConfig` 拡張（後方互換 default 付き + bar_minutes 明示）
+2. `MockBroker` に spread filter / holding cost API 追加
+3. `run_backtest` ループに session close step と冒頭バリデーション追加
+4. `evaluate_genome` 復活（例外 / metric 不能分離ログ）
+5. `tests/dsl/` の skip 解除と新テスト追加
+6. `tests/backtest/test_engine_clause.py` / `tests/ga/test_fitness_evaluate.py` 新規
+7. `tests/dsl/conftest.py` に `DummyPrimitiveEvaluator` 追加
+8. 既存 `tests/backtest/test_engine.py` の bars が absolute-constraint check を通るか確認 / 必要最小修正
+9. ドキュメント 3 本更新
+10. `uv run pytest` / `uv run mypy` / `uv run ruff` で clean 確認
+
+## 10. 成功条件
+
+- `uv run pytest tests/ -v` で DSL / backtest / GA 全てが pass、残 skip は T007/T008 時点の
+  `tests/dsl/test_serialize.py`（後続 TODO）と OANDA credentials 依存テストのみ
+- `uv run mypy src/` / `uv run ruff check src/ tests/` が clean
+- `evaluate_genome` が `DummyPrimitiveEvaluator` で 3 metric 全て Decimal 値を返せる
+- 既存 `tests/backtest/test_engine.py` が最小修正（or 無修正）で pass
+- `docs/alpha_factory/clause-architecture.md` の「spread / swap 受け渡し契約」節が
+  本 TODO の新契約名（holding_cost_per_day_bps）で更新

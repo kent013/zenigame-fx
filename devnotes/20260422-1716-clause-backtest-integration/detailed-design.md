@@ -1,0 +1,1238 @@
+# Detailed Design: Clause backtest integration (T009)
+
+**作成日時**: 2026-04-22 18:20 (JST)
+**更新**: 2026-04-22 19:10 (JST) — Codex design-review Round 1 NEEDS_REVISION 対応
+**概念設計**: `conceptual-design.md`（APPROVED_WITH_COMMENTS, Round 2）
+**TODO**: T009
+
+## 0. Round 2 コンセプト・Round 1 詳細レビュー対応
+
+### Round 2 コンセプトコメント反映
+
+| Round 2 コメント | 詳細設計での対応 |
+|-----------------|-----------------|
+| #1 session_close_utc_hours が hour 粒度のみだと強すぎる | 詳細設計 §2 の `BacktestConfig` docstring で「hour 粒度。HH:MM 粒度は将来 TODO」と明記 |
+| #2 Phase 2I での旧キー移行 | 詳細設計 §5.3 と `docs/alpha_factory/clause-architecture.md` 改訂で明示 |
+| #3 4 段伝搬の Phase 2I 受け入れ条件 | `docs/alpha_factory/clause-architecture.md` 改訂時に「4 段全て実配線テスト必須」を追記 |
+| #4 単日 bars + 空 session_close の即 fail の硬さ | `BacktestConfig` docstring に「これは意図的ポリシー」と明記、`run_backtest` の docstring にも |
+
+### Round 1 詳細レビュー対応（NEEDS_REVISION）
+
+| Round 1 指摘 | 対応方針 |
+|--------------|---------|
+| #1 重大: `holding_cost` が `total_pnl` に反映されない | **§3.6 と §5.4 を大幅修正**: holding cost を `Trade.pnl` 単位に織り込む代わりに、`Trade` の総和 `total_pnl` を計算した後で `compute_metrics` の呼び出し経路に調整する。**具体案**: holding cost を「合成 close out 時に当該ポジションの pnl に直接控除する」形にし、`Trade.pnl` から cost 分を差し引く。`broker._close_one` を改修し、ポジション保有中に累積した holding cost を `Trade.pnl` から引いて record する。metrics 側は変更せず既存契約を維持。 |
+| #2 中: `test_session_close_drops_pending_open` の期待が弱い | テストで `len(result.trades) == 0` と `len(broker.open_positions) == 0` を強制、pending open の抜け道が残ると必ず fail する強条件に変更 |
+| #3 中: `run_backtest` が validate 前に deposit で副作用汚染 | 冒頭 `validate → deposit` の順序を入れ替え、絶対制約 check を `deposit` より先に置く |
+| #4 中: `max_spread_bps < 0` の validate 不足 | `BacktestConfig.__post_init__` に `max_spread_bps is not None and max_spread_bps < 0` で raise |
+| #5 軽中: `evaluate_genome` の `try/except` スコープ境界 | `strategy = DslStrategy(...)` および `broker = MockBroker(...)` の初期化を try 外に出し、`run_backtest`/`compute_metrics` のみを try 内に入れる。ただし「初期化 raise は caller のバグ」と明記し、caller 側で捕捉されない想定の場合 `try 内に含める` ほうが fitness 評価ループが壊れないので一長一短。→ 本設計は fitness 評価ループを止めないことを優先し、try を `strategy / broker 初期化` から `compute_metrics` まで含む現状のまま維持する。ただし docstring に明記し、log の `error_type` で初期化エラーと ranktime エラーを区別可能にする |
+
+## 1. モジュール一覧
+
+| Path | 新規/更新 | 行数目安 |
+|------|----------|---------|
+| `src/backtest/engine.py` | 更新 | +80 (合計 ~160) |
+| `src/broker/mock.py` | 更新 | +60 (合計 ~260) |
+| `src/ga/fitness.py` | 書き換え | ~60 |
+| `tests/dsl/conftest.py` | 新規 | ~50 |
+| `tests/dsl/test_dsl_strategy.py` | 書き換え（skip 解除） | ~250 |
+| `tests/dsl/test_warmup_boundary.py` | 書き換え（skip 解除） | ~80 |
+| `tests/backtest/test_engine_clause.py` | 新規 | ~220 |
+| `tests/ga/test_fitness_evaluate.py` | 新規 | ~180 |
+| `tests/backtest/test_engine.py` | 最小修正（session_close 絶対制約 check 対応） | +少 |
+| `docs/alpha_factory/clause-architecture.md` | 更新（spread/swap 節を holding_cost 節へ） | ~30 差分 |
+| `docs/alpha_factory/stage-gates.md` | 更新（Clause 前提一行追加） | ~2 |
+| `docs/alpha_factory/terminology.md` | 更新（spread フィルタ / holding cost proxy 用語） | ~20 |
+
+## 2. `src/backtest/engine.py` 詳細
+
+### 2.1 `BacktestConfig` 拡張
+
+```python
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from datetime import datetime
+from decimal import Decimal
+
+import structlog
+
+from src.broker.mock import MockBroker
+from src.broker.orders import Trade
+from src.domain.price import PriceBar
+from src.strategy.base import Strategy
+
+logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class BacktestConfig:
+    """Backtest 実行設定。
+
+    North Star (イントラデイ絶対制約) を engine レベルで担保するため、以下のいずれかが
+    必ず有効である必要がある:
+      - session_close_utc_hours が非空（hour 粒度での強制クローズ）
+      - bars が複数 UTC date に跨る（既存 EOD 強制クローズが発動）
+    両方が無効な場合、run_backtest 冒頭で ValueError raise（意図的ポリシー: 短時間単日の
+    backtest であっても「イントラデイを設計で担保する」方針の厳密化）。
+
+    Attributes:
+        instrument: 銘柄 ID。
+        start: 実行開始時刻。
+        end: 実行終了時刻。
+        initial_cash: 初期資金（home currency）。
+        leverage: レバレッジ倍率（open シグナル時 submit で validate）。
+        max_spread_bps: Decimal | None
+            スプレッドフィルタ上限（bps）。None で無効。
+            判定は「前バー close spread」で行う（no-lookahead）。
+        holding_cost_per_day_bps: Decimal
+            保有コスト proxy（bps/day）。bar ごと線形按分で cash 控除。
+            デフォルト 0。負値禁止（raise ValueError）。
+            本 TODO は rollover swap の正確再現ではなく holding cost proxy。
+        session_close_utc_hours: frozenset[int]
+            hour 粒度の強制クローズ時刻集合（UTC）。空集合で無効。
+            HH:MM 粒度は将来 TODO（本 TODO は hour のみ）。
+        bar_minutes: int
+            bar の時間幅（分単位）。デフォルト 1（M1 前提）。holding cost 按分に使用。
+    """
+
+    instrument: str
+    start: datetime
+    end: datetime
+    initial_cash: Decimal
+    leverage: int
+    max_spread_bps: Decimal | None = None
+    holding_cost_per_day_bps: Decimal = Decimal("0")
+    session_close_utc_hours: frozenset[int] = field(default_factory=frozenset)
+    bar_minutes: int = 1
+
+    def __post_init__(self) -> None:
+        if self.holding_cost_per_day_bps < 0:
+            raise ValueError(
+                f"holding_cost_per_day_bps must be >= 0: {self.holding_cost_per_day_bps}"
+            )
+        if self.max_spread_bps is not None and self.max_spread_bps < 0:
+            raise ValueError(
+                f"max_spread_bps must be >= 0 when set: {self.max_spread_bps}"
+            )
+        if self.bar_minutes < 1:
+            raise ValueError(f"bar_minutes must be >= 1: {self.bar_minutes}")
+        for h in self.session_close_utc_hours:
+            if not 0 <= h <= 23:
+                raise ValueError(
+                    f"session_close_utc_hours contains out-of-range value: {h}"
+                )
+```
+
+### 2.2 `run_backtest` 改訂
+
+```python
+def run_backtest(
+    bars: Iterable[PriceBar],
+    strategy: Strategy,
+    broker: MockBroker,
+    config: BacktestConfig,
+) -> BacktestResult:
+    """Backtest を実行。Clause DslStrategy 前提（evaluator は strategy に bake-in 済）。
+
+    Raises:
+        ValueError:
+            session_close_utc_hours が空 かつ bars が単一 UTC date の場合
+            （イントラデイ絶対制約違反）。
+    """
+    bars_list = list(bars)
+
+    # 入口: イントラデイ絶対制約の事前検証（deposit より先に実施、Round 1 詳細レビュー #3 対応）
+    if not config.session_close_utc_hours:
+        unique_dates = {b.bar_time.date() for b in bars_list}
+        if len(unique_dates) <= 1:
+            raise ValueError(
+                "Intraday absolute constraint violation: bars span a single UTC date "
+                "and session_close_utc_hours is empty. Provide session_close_utc_hours "
+                "or ensure bars span multiple UTC dates."
+            )
+
+    broker.deposit(config.initial_cash)
+    broker.set_spread_filter(config.max_spread_bps)
+
+    equity_curve: list[tuple[datetime, Decimal]] = []
+
+    for i, bar in enumerate(bars_list):
+        # 0. session close bar なら pending の open 系シグナルを先頭で drop
+        if bar.bar_time.hour in config.session_close_utc_hours:
+            n_dropped = broker.drop_pending_open(reason="session_close.reject_pending_open")
+            if n_dropped:
+                logger.info(
+                    "backtest.session_close.drop_pending",
+                    n_dropped=n_dropped,
+                    bar_time=bar.bar_time.isoformat(),
+                )
+
+        # 1. pending fill（spread filter は broker.fill_pending 内部で適用）
+        broker.fill_pending(bar)
+
+        # 2. mark-to-market + holding cost
+        broker.mark_to_market(bar)
+        if config.holding_cost_per_day_bps > 0:
+            broker.apply_bar_holding_cost(
+                bar,
+                per_day_bps=config.holding_cost_per_day_bps,
+                bar_minutes=config.bar_minutes,
+            )
+
+        # 3. margin call
+        broker.force_close_if_margin_call(bar)
+
+        # 4. session close: 該当時刻で保有を全クローズ
+        if bar.bar_time.hour in config.session_close_utc_hours and broker.open_positions:
+            broker.close_all(bar, reason="eod")
+
+        # 5. strategy 判断
+        snapshot = broker.snapshot()
+        signals = strategy.on_bar(bar, snapshot)
+        session_closed_bar = bar.bar_time.hour in config.session_close_utc_hours
+        for signal in signals:
+            if session_closed_bar and signal.kind in ("open_long", "open_short"):
+                logger.info(
+                    "backtest.session_close.drop_open_from_strategy",
+                    genome_signal=signal.kind,
+                    bar_time=bar.bar_time.isoformat(),
+                )
+                continue
+            broker.submit(signal, leverage=config.leverage)
+
+        # 6. EOD 強制クローズ（既存）
+        next_bar = bars_list[i + 1] if i + 1 < len(bars_list) else None
+        is_eod = next_bar is None or next_bar.bar_time.date() != bar.bar_time.date()
+        if is_eod and broker.open_positions:
+            broker.close_all(bar, reason="eod")
+
+        # 7. equity curve 記録
+        equity_curve.append((bar.bar_time, broker.snapshot().equity))
+
+    if broker.open_positions and bars_list:
+        broker.close_all(bars_list[-1], reason="end_of_run")
+
+    logger.info(
+        "backtest.finished",
+        instrument=config.instrument,
+        bars=len(bars_list),
+        trades=len(broker.trades),
+        final_equity=str(broker.snapshot().equity),
+    )
+    return BacktestResult(config=config, trades=broker.trades, equity_curve=equity_curve)
+```
+
+### 2.3 既存テスト互換性
+
+- `test_fills_at_next_bar_open_not_current` と `test_end_of_run_closes_remaining_position`:
+  bars が単一 UTC date のため絶対制約 check で raise する。**最小修正方針**:
+  両テストの bars を 2 日跨りに延長する（もしくは `session_close_utc_hours={23}` 付与で回避）。
+  既存 test の意図が「EOD」「約定」なので、test データを増補する方が素直。
+- `test_eod_force_close_on_day_boundary`: bars が 2 日跨りなので絶対制約 check を通る。
+
+## 3. `src/broker/mock.py` 詳細
+
+### 3.1 追加 state
+
+```python
+class MockBroker:
+    def __init__(self, ...) -> None:
+        ...  # 既存
+        self._max_spread_bps: Decimal | None = None
+        self._last_close_spread_bps: Decimal | None = None
+```
+
+### 3.2 新規 / 更新メソッド
+
+```python
+    # ---- spread filter -----------------------------------------------------
+
+    def set_spread_filter(self, max_spread_bps: Decimal | None) -> None:
+        """engine から呼ばれる。None で無効。"""
+        self._max_spread_bps = max_spread_bps
+
+    def drop_pending_open(self, reason: str = "session_close") -> int:
+        """pending の open_long / open_short を drop して件数を返す。
+
+        Args:
+            reason: ログ用の理由文字列。
+
+        Returns:
+            drop 件数。
+        """
+        before = len(self._pending)
+        self._pending = [
+            (sig, lev) for (sig, lev) in self._pending
+            if sig.kind not in ("open_long", "open_short")
+        ]
+        dropped = before - len(self._pending)
+        if dropped:
+            logger.info("broker.drop_pending_open", reason=reason, n=dropped)
+        return dropped
+
+    # ---- holding cost ------------------------------------------------------
+
+    def apply_bar_holding_cost(
+        self,
+        bar: PriceBar,
+        *,
+        per_day_bps: Decimal,
+        bar_minutes: int,
+    ) -> Decimal:
+        """bar 単位で holding cost を cash から控除、かつ各 position に累計。
+
+        per_bar_bps = per_day_bps × (bar_minutes / 1440)
+        cost_i = |notional_home_i| × per_bar_bps / 10000   （i = 各 open position）
+        total_cost = Σ cost_i
+
+        効果（Round 1 詳細レビュー #1 対応）:
+          - self._cash -= total_cost（equity に即時反映）
+          - 各 position の累計 holding cost を self._holding_cost_by_position[pos.id] に加算
+          - 将来 _close_one で Trade.pnl から「当該 position の累計 holding cost」を差し引く
+            → total_pnl = sum(trade.pnl) が holding cost 反映済みの値になる
+
+        Returns:
+            控除された総額（正値）。
+        """
+        if per_day_bps <= 0 or bar_minutes <= 0 or not self._positions:
+            return Decimal(0)
+        per_bar_bps = per_day_bps * Decimal(bar_minutes) / Decimal(1440)
+        total_cost = Decimal(0)
+        for pos in self._positions.values():
+            notional = notional_home_currency(
+                units=pos.units,
+                price_quote_per_base=pos.entry_price,
+                quote_is_home=True,
+            )
+            cost = notional * per_bar_bps / Decimal(10000)
+            total_cost += cost
+            self._holding_cost_by_position[pos.id] = (
+                self._holding_cost_by_position.get(pos.id, Decimal(0)) + cost
+            )
+        if total_cost > 0:
+            self._cash -= total_cost
+        return total_cost
+```
+
+### 3.2.1 `_close_one` 改修（Round 1 詳細レビュー #1 対応）
+
+holding cost を `Trade.pnl` に織り込むため、既存 `_close_one` を以下のように改修:
+
+```python
+    def _close_one(self, position_id: int, bar: PriceBar, exit_kind: str, reason: ExitReason) -> Trade | None:
+        pos = self._positions.pop(position_id, None)
+        if pos is None:
+            return None
+        exit_price = self._exit_price(pos.side, bar, exit_kind)
+        raw_pnl = self._realized_pnl(pos, exit_price)
+        # 累積 holding cost を pnl から差し引く（正味 pnl として Trade.pnl に記録）
+        cost_accum = self._holding_cost_by_position.pop(pos.id, Decimal(0))
+        net_pnl = raw_pnl - cost_accum
+        # cash は apply_bar_holding_cost で既に cost を減算済みなので、raw_pnl のみ加算
+        # （二重控除を避ける）
+        self._cash += raw_pnl
+        trade = Trade(
+            position_id=pos.id,
+            instrument=pos.instrument,
+            side=pos.side,
+            units=pos.units,
+            entry_price=pos.entry_price,
+            entry_time=pos.entry_time,
+            exit_price=exit_price,
+            exit_time=bar.bar_time,
+            pnl=net_pnl,  # ← holding cost 反映済み
+            exit_reason=reason,
+        )
+        self._trades.append(trade)
+        return trade
+```
+
+**契約**:
+- `Trade.pnl` は「holding cost 反映後の正味 pnl」
+- `cash` の推移は `apply_bar_holding_cost` で控除 + `_close_one` で raw_pnl 加算
+  （`Trade.pnl` から `cost_accum` を引いても `cash` には反映しない、二重控除回避）
+- 結果として `sum(Trade.pnl) = sum(raw_pnl) - sum(all cost) = final_cash - initial_cash`
+  （定常状態で一致）
+
+**`__init__` に追加**:
+```python
+    self._holding_cost_by_position: dict[int, Decimal] = {}
+```
+
+### 3.3 `fill_pending` 更新（spread filter）
+
+```python
+    def fill_pending(self, bar: PriceBar) -> list[Trade]:
+        if bar.pair_name != self._meta.oanda_name:
+            raise ValueError(f"bar instrument {bar.pair_name} != broker {self._meta.oanda_name}")
+
+        # spread filter: 前バー close spread で判定
+        if (
+            self._max_spread_bps is not None
+            and self._last_close_spread_bps is not None
+            and self._last_close_spread_bps > self._max_spread_bps
+        ):
+            before = len(self._pending)
+            self._pending = [
+                (sig, lev) for (sig, lev) in self._pending
+                if sig.kind not in ("open_long", "open_short")
+            ]
+            rejected = before - len(self._pending)
+            if rejected:
+                logger.info(
+                    "broker.submit.rejected_by_spread",
+                    n_rejected=rejected,
+                    last_close_spread_bps=str(self._last_close_spread_bps),
+                    max_spread_bps=str(self._max_spread_bps),
+                )
+
+        trades: list[Trade] = []
+        for signal, leverage in self._pending:
+            ...  # 既存処理
+        self._pending.clear()
+        return trades
+```
+
+### 3.4 `mark_to_market` 更新（spread 計算）
+
+```python
+    def mark_to_market(self, bar: PriceBar) -> None:
+        if bar.pair_name != self._meta.oanda_name:
+            raise ValueError(f"bar instrument {bar.pair_name} != broker {self._meta.oanda_name}")
+        self._last_bar = bar
+        # close spread bps を更新（次バーでの filter に使う）
+        mid_close = (bar.ask.close + bar.bid.close) / Decimal(2)
+        if mid_close > 0:
+            spread_bps = (bar.ask.close - bar.bid.close) / mid_close * Decimal(10000)
+            self._last_close_spread_bps = spread_bps
+        # mid_close <= 0 の場合は更新しない（防御）
+```
+
+### 3.5 spread filter タイミングの明確化
+
+**注意**: spread filter 判定は `fill_pending` の冒頭 → 既存フロー `fill_pending → mark_to_market` なので、
+現在 bar の filter に使う `_last_close_spread_bps` は「前バーの mark_to_market で更新された値」。
+最初の bar では `_last_close_spread_bps is None` のため reject しない（defensive default）。
+これは lookahead 回避と一致（前バーまでに観測可能な情報のみ使用）。
+
+## 4. `src/ga/fitness.py` 詳細
+
+```python
+"""GA fitness 評価（T009）。Clause Genome → DslStrategy → run_backtest → metrics → fitness."""
+
+from __future__ import annotations
+
+from datetime import time
+from decimal import Decimal
+from typing import Literal
+
+import structlog
+
+from src.backtest.engine import BacktestConfig, run_backtest
+from src.backtest.metrics import compute_metrics
+from src.broker.mock import InstrumentMeta, MockBroker
+from src.domain.price import PriceBar
+from src.dsl.genome import Genome
+from src.dsl.strategy import DslStrategy, PrimitiveEvaluator
+
+logger = structlog.get_logger(__name__)
+
+FitnessMetric = Literal["total_pnl", "sharpe", "calmar"]
+
+_FAILURE_FITNESS = Decimal("-1000000000000")  # -1e12 相当
+
+
+def evaluate_genome(
+    genome: Genome,
+    bars: list[PriceBar],
+    meta: InstrumentMeta,
+    backtest_config: BacktestConfig,
+    primitive_evaluator: PrimitiveEvaluator,
+    *,
+    metric: FitnessMetric = "total_pnl",
+    warmup_bars: int = 0,
+    session_close_utc: time | None = None,
+) -> Decimal:
+    """Clause Genome を評価して fitness を返す。
+
+    例外時は warning ログ (system_failure)、metric 不能時は info ログ (metric_unavailable) で
+    分離してから `_FAILURE_FITNESS` を返す（後続分析で原因特定可能）。
+    """
+    try:
+        strategy = DslStrategy(
+            genome,
+            primitive_evaluator,
+            warmup_bars=warmup_bars,
+            session_close_utc=session_close_utc,
+        )
+        broker = MockBroker(instrument_meta=meta)
+        result = run_backtest(bars, strategy, broker, backtest_config)
+        metrics = compute_metrics(result.trades, result.equity_curve)
+    except Exception as exc:
+        logger.warning(
+            "ga.fitness.system_failure",
+            genome=genome.name,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return _FAILURE_FITNESS
+
+    if metric == "total_pnl":
+        return metrics.total_pnl
+    if metric == "sharpe":
+        if metrics.sharpe is None:
+            logger.info(
+                "ga.fitness.metric_unavailable",
+                genome=genome.name,
+                metric=metric,
+                reason="insufficient_trades_or_zero_std",
+            )
+            return _FAILURE_FITNESS
+        return metrics.sharpe
+    if metric == "calmar":
+        if metrics.calmar is None:
+            logger.info(
+                "ga.fitness.metric_unavailable",
+                genome=genome.name,
+                metric=metric,
+                reason="flat_equity_or_no_drawdown",
+            )
+            return _FAILURE_FITNESS
+        return metrics.calmar
+    raise ValueError(f"unknown metric: {metric}")
+```
+
+## 5. テスト詳細
+
+### 5.1 `tests/dsl/conftest.py` 新規
+
+```python
+"""DslStrategy / 関連テスト共通 fixture。"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+
+import pytest
+
+from src.domain.price import PriceBar
+from src.dsl.genome import SignalConfig
+
+
+class ScriptedPrimitiveEvaluator:
+    """bar index ごとに primitive 名→値辞書を事前設定する stub。
+
+    使用例:
+        ev = ScriptedPrimitiveEvaluator({
+            0: {"TrendEMA": 0.8},
+            1: {"TrendEMA": 0.9},
+        })
+    """
+
+    def __init__(self, script: Mapping[int, Mapping[str, float]]) -> None:
+        self._script = dict(script)
+
+    def evaluate(
+        self, bars: list[PriceBar], idx: int, signal: SignalConfig
+    ) -> float:
+        vals = self._script.get(idx, {})
+        if signal.name in vals:
+            return float(vals[signal.name])
+        # 未指定 name は 0.0 を返す（中立）
+        return 0.0
+
+
+class ConstantPrimitiveEvaluator:
+    """常に固定値を返す stub（warmup テスト用）。"""
+
+    def __init__(self, value: float = 0.0) -> None:
+        self._value = float(value)
+
+    def evaluate(
+        self, bars: list[PriceBar], idx: int, signal: SignalConfig
+    ) -> float:
+        return self._value
+
+
+@pytest.fixture
+def scripted_evaluator_factory():
+    """scripted evaluator を作る factory fixture."""
+
+    def _make(script: Mapping[int, Mapping[str, float]]) -> ScriptedPrimitiveEvaluator:
+        return ScriptedPrimitiveEvaluator(script)
+
+    return _make
+
+
+@pytest.fixture
+def constant_evaluator_factory():
+    def _make(value: float = 0.0) -> ConstantPrimitiveEvaluator:
+        return ConstantPrimitiveEvaluator(value)
+
+    return _make
+```
+
+### 5.2 `tests/dsl/test_dsl_strategy.py` 書き直し
+
+```python
+"""Clause DslStrategy の統合テスト（T009）。"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import UTC, datetime, time, timedelta
+from decimal import Decimal
+
+import pytest
+
+from src.broker.orders import OrderSignal, PortfolioSnapshot, Position
+from src.domain.price import Ohlc, PriceBar
+from src.dsl.genome import (
+    ClauseConfig,
+    Genome,
+    PositionConfig,
+    RiskConfig,
+    SignalConfig,
+)
+from src.dsl.strategy import DslStrategy
+from tests.dsl.conftest import ScriptedPrimitiveEvaluator
+
+
+def _bar(minute: int, *, day: int = 1, hour: int = 0) -> PriceBar:
+    bt = datetime(2026, 4, day, hour, 0, 0, tzinfo=UTC) + timedelta(minutes=minute)
+    return PriceBar(
+        pair_name="USD_JPY",
+        bar_time=bt,
+        bid=Ohlc(Decimal("154.00"), Decimal("154.01"), Decimal("153.99"), Decimal("154.00")),
+        ask=Ohlc(Decimal("154.01"), Decimal("154.02"), Decimal("154.00"), Decimal("154.01")),
+        volume=10,
+        complete=True,
+    )
+
+
+def _genome(
+    *, entry_th: float = 0.5, exit_th: float = 0.2, time_stop_min: int = 0
+) -> Genome:
+    return Genome(
+        name="g",
+        units=10000,
+        clauses=(
+            ClauseConfig(
+                directional=(SignalConfig(name="D1", weight=1.0),),
+                local_gate=(),
+                weight=1.0,
+            ),
+        ),
+        position=PositionConfig(
+            entry_threshold=entry_th,
+            exit_threshold=exit_th,
+            max_pos=1,
+            time_stop_min=time_stop_min,
+        ),
+        risk=RiskConfig(stop_atr=2.0, take_atr=3.0),
+    )
+
+
+def _empty_snapshot() -> PortfolioSnapshot:
+    return PortfolioSnapshot(
+        cash=Decimal("1000000"), equity=Decimal("1000000"),
+        margin_used=Decimal(0), margin_level_pct=None, positions=(),
+    )
+
+
+def _snapshot_with_position(side: str, entry_time: datetime) -> PortfolioSnapshot:
+    pos = Position(
+        id=1, instrument="USD_JPY", side=side, units=10000,
+        entry_price=Decimal("154.00"), entry_time=entry_time,
+        entry_margin=Decimal("5000"), leverage=10,
+    )
+    return PortfolioSnapshot(
+        cash=Decimal("1000000"), equity=Decimal("1000000"),
+        margin_used=Decimal("5000"), margin_level_pct=Decimal("2000"), positions=(pos,),
+    )
+
+
+class TestHysteresis:
+    def test_entry_long_at_theta_on(self):
+        ev = ScriptedPrimitiveEvaluator({0: {"D1": 0.5}})
+        strat = DslStrategy(_genome(entry_th=0.5, exit_th=0.2), ev)
+        out = strat.on_bar(_bar(0), _empty_snapshot())
+        assert len(out) == 1 and out[0].kind == "open_long"
+
+    def test_entry_short_at_theta_on(self):
+        ev = ScriptedPrimitiveEvaluator({0: {"D1": -0.5}})
+        strat = DslStrategy(_genome(entry_th=0.5, exit_th=0.2), ev)
+        out = strat.on_bar(_bar(0), _empty_snapshot())
+        assert len(out) == 1 and out[0].kind == "open_short"
+
+    def test_no_entry_below_theta_on(self):
+        ev = ScriptedPrimitiveEvaluator({0: {"D1": 0.3}})
+        strat = DslStrategy(_genome(entry_th=0.5, exit_th=0.2), ev)
+        out = strat.on_bar(_bar(0), _empty_snapshot())
+        assert out == []
+
+    def test_hold_between_theta_off_and_theta_on(self):
+        # composite=0.3、long 保有、θ_off=0.2 < 0.3 < θ_on=0.5 → 何もしない
+        ev = ScriptedPrimitiveEvaluator({0: {"D1": 0.3}})
+        strat = DslStrategy(_genome(entry_th=0.5, exit_th=0.2), ev)
+        out = strat.on_bar(_bar(0), _snapshot_with_position("long", _bar(0).bar_time))
+        assert out == []
+
+    def test_exit_long_below_theta_off(self):
+        ev = ScriptedPrimitiveEvaluator({0: {"D1": 0.1}})  # < exit_th=0.2
+        strat = DslStrategy(_genome(entry_th=0.5, exit_th=0.2), ev)
+        out = strat.on_bar(_bar(0), _snapshot_with_position("long", _bar(0).bar_time))
+        assert len(out) == 1 and out[0].kind == "close_position"
+
+    def test_exit_short_when_neg_composite_below_theta_off(self):
+        # short 保有、composite=-0.1、-composite=0.1 < exit_th=0.2 → close
+        ev = ScriptedPrimitiveEvaluator({0: {"D1": -0.1}})
+        strat = DslStrategy(_genome(entry_th=0.5, exit_th=0.2), ev)
+        out = strat.on_bar(_bar(0), _snapshot_with_position("short", _bar(0).bar_time))
+        assert len(out) == 1 and out[0].kind == "close_position"
+
+
+class TestTimeStop:
+    def test_time_stop_forces_close(self):
+        ev = ScriptedPrimitiveEvaluator({})  # 値は使わない（保有中 exit 判定に落ちる前）
+        genome = _genome(time_stop_min=60)
+        strat = DslStrategy(genome, ev)
+        entry_time = datetime(2026, 4, 1, 0, 0, tzinfo=UTC)
+        # 60 分後 bar
+        out = strat.on_bar(_bar(60), _snapshot_with_position("long", entry_time))
+        assert len(out) == 1 and out[0].kind == "close_position"
+
+    def test_time_stop_not_triggered_before(self):
+        ev = ScriptedPrimitiveEvaluator({0: {"D1": 0.3}})  # θ_off < 0.3 < θ_on で hold
+        genome = _genome(entry_th=0.5, exit_th=0.2, time_stop_min=60)
+        strat = DslStrategy(genome, ev)
+        entry_time = datetime(2026, 4, 1, 0, 0, tzinfo=UTC)
+        out = strat.on_bar(_bar(59), _snapshot_with_position("long", entry_time))
+        assert out == []
+
+
+class TestSessionClose:
+    def test_session_close_forces_close(self):
+        ev = ScriptedPrimitiveEvaluator({})
+        strat = DslStrategy(
+            _genome(), ev, session_close_utc=time(21, 0)
+        )
+        # 21:00 UTC bar
+        bar = _bar(0, hour=21)
+        out = strat.on_bar(bar, _snapshot_with_position("long", bar.bar_time))
+        assert len(out) == 1 and out[0].kind == "close_position"
+
+    def test_session_close_none_no_force(self):
+        ev = ScriptedPrimitiveEvaluator({0: {"D1": 0.3}})
+        strat = DslStrategy(_genome(entry_th=0.5, exit_th=0.2), ev)  # session_close_utc=None
+        bar = _bar(0, hour=21)
+        # composite=0.3 で θ_off<composite<θ_on なので hold
+        out = strat.on_bar(bar, _snapshot_with_position("long", bar.bar_time))
+        assert out == []
+```
+
+### 5.3 `tests/dsl/test_warmup_boundary.py` 書き直し
+
+```python
+"""warmup_bars 境界テスト（T009）."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import pytest
+
+from src.broker.orders import PortfolioSnapshot
+from src.domain.price import Ohlc, PriceBar
+from src.dsl.genome import ClauseConfig, Genome, PositionConfig, RiskConfig, SignalConfig
+from src.dsl.strategy import DslStrategy
+from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+
+def _bar(minute: int) -> PriceBar:
+    bt = datetime(2026, 4, 1, tzinfo=UTC) + timedelta(minutes=minute)
+    return PriceBar(
+        pair_name="USD_JPY",
+        bar_time=bt,
+        bid=Ohlc(Decimal("154.00"), Decimal("154.01"), Decimal("153.99"), Decimal("154.00")),
+        ask=Ohlc(Decimal("154.01"), Decimal("154.02"), Decimal("154.00"), Decimal("154.01")),
+        volume=10,
+        complete=True,
+    )
+
+
+def _genome_strong_entry() -> Genome:
+    return Genome(
+        name="g", units=10000,
+        clauses=(
+            ClauseConfig(
+                directional=(SignalConfig(name="D1", weight=1.0),),
+                local_gate=(), weight=1.0,
+            ),
+        ),
+        position=PositionConfig(entry_threshold=0.5, exit_threshold=0.2, max_pos=1, time_stop_min=0),
+        risk=RiskConfig(stop_atr=2.0, take_atr=3.0),
+    )
+
+
+def _snap() -> PortfolioSnapshot:
+    return PortfolioSnapshot(
+        cash=Decimal("1e6"), equity=Decimal("1e6"),
+        margin_used=Decimal(0), margin_level_pct=None, positions=(),
+    )
+
+
+class TestWarmup:
+    def test_warmup_three_bars_no_signal(self):
+        ev = ConstantPrimitiveEvaluator(value=1.0)  # 常に上 → θ_on 超過
+        strat = DslStrategy(_genome_strong_entry(), ev, warmup_bars=3)
+        # idx 0,1,2 は warmup 中で空
+        assert strat.on_bar(_bar(0), _snap()) == []
+        assert strat.on_bar(_bar(1), _snap()) == []
+        assert strat.on_bar(_bar(2), _snap()) == []
+        # idx 3 から評価
+        out = strat.on_bar(_bar(3), _snap())
+        assert len(out) == 1 and out[0].kind == "open_long"
+
+    def test_warmup_zero_no_delay(self):
+        ev = ConstantPrimitiveEvaluator(value=1.0)
+        strat = DslStrategy(_genome_strong_entry(), ev, warmup_bars=0)
+        out = strat.on_bar(_bar(0), _snap())
+        assert len(out) == 1 and out[0].kind == "open_long"
+```
+
+### 5.4 `tests/backtest/test_engine_clause.py` 新規
+
+```python
+"""Clause DslStrategy + run_backtest 統合テスト（T009）."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import pytest
+
+from src.backtest.engine import BacktestConfig, run_backtest
+from src.broker.mock import MockBroker
+from src.domain.price import Ohlc, PriceBar
+from src.dsl.genome import ClauseConfig, Genome, PositionConfig, RiskConfig, SignalConfig
+from src.dsl.strategy import DslStrategy
+from tests._helpers import usd_jpy_meta
+from tests.dsl.conftest import ScriptedPrimitiveEvaluator
+
+
+def _bar(
+    minute: int, *, hour: int = 0, day: int = 1,
+    bid_close: str = "154.00", ask_close: str = "154.01",
+    bid_open: str | None = None, ask_open: str | None = None,
+) -> PriceBar:
+    bt = datetime(2026, 4, day, hour, 0, 0, tzinfo=UTC) + timedelta(minutes=minute)
+    bid_o = Decimal(bid_open or bid_close)
+    ask_o = Decimal(ask_open or ask_close)
+    bid_c = Decimal(bid_close)
+    ask_c = Decimal(ask_close)
+    return PriceBar(
+        pair_name="USD_JPY",
+        bar_time=bt,
+        bid=Ohlc(bid_o, max(bid_o, bid_c), min(bid_o, bid_c), bid_c),
+        ask=Ohlc(ask_o, max(ask_o, ask_c), min(ask_o, ask_c), ask_c),
+        volume=10,
+        complete=True,
+    )
+
+
+def _one_clause_genome() -> Genome:
+    return Genome(
+        name="g", units=10000,
+        clauses=(
+            ClauseConfig(
+                directional=(SignalConfig(name="D1", weight=1.0),),
+                local_gate=(), weight=1.0,
+            ),
+        ),
+        position=PositionConfig(entry_threshold=0.5, exit_threshold=0.2, max_pos=1, time_stop_min=0),
+        risk=RiskConfig(stop_atr=2.0, take_atr=3.0),
+    )
+
+
+def _cfg(
+    *, max_spread_bps: Decimal | None = None,
+    holding_cost_per_day_bps: Decimal = Decimal("0"),
+    session_close_utc_hours: frozenset[int] = frozenset(),
+    bar_minutes: int = 1,
+) -> BacktestConfig:
+    return BacktestConfig(
+        instrument="USD_JPY",
+        start=datetime(2026, 4, 1, tzinfo=UTC),
+        end=datetime(2026, 4, 3, tzinfo=UTC),
+        initial_cash=Decimal("1000000"),
+        leverage=10,
+        max_spread_bps=max_spread_bps,
+        holding_cost_per_day_bps=holding_cost_per_day_bps,
+        session_close_utc_hours=session_close_utc_hours,
+        bar_minutes=bar_minutes,
+    )
+
+
+class TestClauseDslStrategyIntegration:
+    def test_basic_entry_and_exit(self):
+        # bar0: composite=1.0 (long entry)、bar1: composite=0.1 (exit_long < 0.2)
+        ev = ScriptedPrimitiveEvaluator({0: {"D1": 1.0}, 1: {"D1": 0.1}, 2: {"D1": 0.1}})
+        strat = DslStrategy(_one_clause_genome(), ev)
+        bars = [
+            _bar(0, day=1),
+            _bar(1, day=1, bid_open="154.05", ask_open="154.06"),
+            _bar(0, day=2),
+        ]
+        cfg = _cfg(session_close_utc_hours=frozenset({23}))  # session_close 発動なし hours
+        broker = MockBroker(instrument_meta=usd_jpy_meta())
+        result = run_backtest(bars, strat, broker, cfg)
+        # 1 trade 発生（entry bar0 close シグナル → bar1 open 約定 → bar2 で 2nd eval... ただし day=2 移行で EOD クローズされる可能性）
+        assert len(result.trades) >= 1
+
+
+class TestSpreadFilter:
+    def test_open_rejected_when_previous_bar_spread_exceeds(self):
+        # bar0: wide spread (bid_close=153.99, ask_close=154.11 = 12 bps)
+        # bar1: strategy wants open_long (composite >= theta_on)
+        # bar2: 約定予定だが bar1 の close spread で reject
+        ev = ScriptedPrimitiveEvaluator({
+            0: {"D1": 0.0},
+            1: {"D1": 1.0},  # 発注
+            2: {"D1": 0.0},  # hold (flat)
+        })
+        strat = DslStrategy(_one_clause_genome(), ev)
+        # bar1 close spread: (154.11-153.99)/154.05 × 10000 = 7.79 bps
+        bars = [
+            _bar(0, day=1),
+            _bar(1, day=1, bid_close="153.99", ask_close="154.11"),  # wide
+            _bar(2, day=1, bid_open="154.00", ask_open="154.02"),
+            _bar(0, day=2),
+        ]
+        cfg = _cfg(max_spread_bps=Decimal("5"), session_close_utc_hours=frozenset({23}))
+        broker = MockBroker(instrument_meta=usd_jpy_meta())
+        result = run_backtest(bars, strat, broker, cfg)
+        # spread filter で reject → trade 0、open_positions 0
+        assert len(result.trades) == 0
+        assert len(broker.open_positions) == 0
+
+    def test_open_accepted_when_previous_bar_spread_within(self):
+        ev = ScriptedPrimitiveEvaluator({0: {"D1": 0.0}, 1: {"D1": 1.0}, 2: {"D1": 0.0}})
+        strat = DslStrategy(_one_clause_genome(), ev)
+        bars = [
+            _bar(0, day=1),
+            _bar(1, day=1),  # narrow spread (154.00/154.01 = 0.65 bps)
+            _bar(2, day=1, bid_open="154.00", ask_open="154.02"),
+            _bar(0, day=2),
+        ]
+        cfg = _cfg(max_spread_bps=Decimal("5"), session_close_utc_hours=frozenset({23}))
+        broker = MockBroker(instrument_meta=usd_jpy_meta())
+        result = run_backtest(bars, strat, broker, cfg)
+        assert len(result.trades) + len(broker.open_positions) >= 1
+
+
+class TestSessionCloseEngine:
+    def test_session_close_hour_forces_close(self):
+        # 20:00 で open、21:00 で session close
+        ev = ScriptedPrimitiveEvaluator({
+            0: {"D1": 1.0},  # 20:00 UTC, entry
+            1: {"D1": 0.3},  # 20:01 UTC, hold (θ_off < 0.3 < θ_on)
+            60: {"D1": 0.3},  # 21:00 UTC, session close hour
+        })
+        strat = DslStrategy(_one_clause_genome(), ev)
+        bars = [
+            _bar(0, hour=20, day=1),
+            _bar(1, hour=20, day=1, bid_open="154.00", ask_open="154.01"),
+            _bar(60, hour=20, day=1),  # 21:00 UTC
+            _bar(0, day=2),
+        ]
+        cfg = _cfg(session_close_utc_hours=frozenset({21}))
+        broker = MockBroker(instrument_meta=usd_jpy_meta())
+        result = run_backtest(bars, strat, broker, cfg)
+        # session close で強制クローズされているはず
+        # trades 内 reason="eod" のものが存在
+        eod_trades = [t for t in result.trades if t.exit_reason == "eod"]
+        assert len(eod_trades) >= 1
+
+    def test_session_close_drops_pending_open(self):
+        # bar 3 で open シグナル → bar 4 (21:00) で session close 発動 → pending open drop
+        # Round 1 詳細レビュー #2: 強条件で pending open 抜け道を検出
+        ev = ScriptedPrimitiveEvaluator({
+            3: {"D1": 1.0},
+            4: {"D1": 0.0},
+        })
+        strat = DslStrategy(_one_clause_genome(), ev)
+        bars = [
+            _bar(0, hour=20, day=1),
+            _bar(1, hour=20, day=1),
+            _bar(2, hour=20, day=1),
+            _bar(3, hour=20, day=1),  # open signal emitted here, pending
+            _bar(60, hour=20, day=1),  # 21:00 UTC → session close, pending open dropped
+            _bar(0, day=2),
+        ]
+        cfg = _cfg(session_close_utc_hours=frozenset({21}))
+        broker = MockBroker(instrument_meta=usd_jpy_meta())
+        result = run_backtest(bars, strat, broker, cfg)
+        # pending open は drop されたので bar4 (21:00) で約定せず、trades は空
+        assert len(result.trades) == 0
+        assert len(broker.open_positions) == 0
+
+
+class TestHoldingCost:
+    def test_holding_cost_reflected_in_total_pnl(self):
+        # Round 1 詳細レビュー #1 対応: holding cost が Trade.pnl に織り込まれることを強条件で検証
+        # holding_cost_per_day_bps=1440 → per_bar_bps = 1 bps
+        # entry bar は bar1 open 約定、exit bar は bar4 open 約定と想定
+        # apply_bar_holding_cost は bar1, bar2, bar3 の mark_to_market で 3 bar 分控除想定
+        # bar4 で exit 約定 → _close_one で pnl から cost_accum を引いて Trade.pnl に記録
+        ev = ScriptedPrimitiveEvaluator({
+            0: {"D1": 1.0},  # entry signal → bar1 open 約定
+            1: {"D1": 0.3}, 2: {"D1": 0.3}, 3: {"D1": 0.3},
+            4: {"D1": 0.1},  # exit signal → bar5 open 約定
+        })
+        bars = [
+            _bar(0, day=1),
+            _bar(1, day=1, bid_open="154.05", ask_open="154.06"),  # entry
+            _bar(2, day=1),
+            _bar(3, day=1),
+            _bar(4, day=1),
+            _bar(5, day=1, bid_open="154.04", ask_open="154.05"),  # exit
+            _bar(0, day=2),
+        ]
+
+        # without holding cost
+        strat_no = DslStrategy(_one_clause_genome(), ScriptedPrimitiveEvaluator({
+            0: {"D1": 1.0}, 1: {"D1": 0.3}, 2: {"D1": 0.3}, 3: {"D1": 0.3},
+            4: {"D1": 0.1},
+        }))
+        cfg_no_cost = _cfg(session_close_utc_hours=frozenset({23}))
+        broker_no_cost = MockBroker(instrument_meta=usd_jpy_meta())
+        r_no = run_backtest(bars, strat_no, broker_no_cost, cfg_no_cost)
+
+        # with holding cost
+        strat_cost = DslStrategy(_one_clause_genome(), ScriptedPrimitiveEvaluator({
+            0: {"D1": 1.0}, 1: {"D1": 0.3}, 2: {"D1": 0.3}, 3: {"D1": 0.3},
+            4: {"D1": 0.1},
+        }))
+        cfg_cost = _cfg(
+            holding_cost_per_day_bps=Decimal("1440"),
+            session_close_utc_hours=frozenset({23}),
+        )
+        broker_cost = MockBroker(instrument_meta=usd_jpy_meta())
+        r_cost = run_backtest(bars, strat_cost, broker_cost, cfg_cost)
+
+        # 両者で trade 1 件、holding cost 有りの pnl が no-cost より **負方向に大きい**
+        assert len(r_no.trades) == 1 and len(r_cost.trades) == 1
+        assert r_cost.trades[0].pnl < r_no.trades[0].pnl
+        # total_pnl も同様に差が出る（Trade.pnl に反映）
+        from src.backtest.metrics import compute_metrics
+        m_no = compute_metrics(r_no.trades, r_no.equity_curve)
+        m_cost = compute_metrics(r_cost.trades, r_cost.equity_curve)
+        assert m_cost.total_pnl < m_no.total_pnl
+
+
+class TestIntradayAbsoluteConstraint:
+    def test_single_date_empty_session_close_raises(self):
+        bars = [_bar(0, day=1), _bar(1, day=1)]
+        ev = ScriptedPrimitiveEvaluator({})
+        strat = DslStrategy(_one_clause_genome(), ev)
+        broker = MockBroker(instrument_meta=usd_jpy_meta())
+        cfg = _cfg()  # empty session_close_utc_hours, single-date bars
+        with pytest.raises(ValueError, match="Intraday absolute constraint"):
+            run_backtest(bars, strat, broker, cfg)
+
+    def test_multi_date_bars_without_session_close_ok(self):
+        bars = [_bar(0, day=1), _bar(0, day=2)]
+        ev = ScriptedPrimitiveEvaluator({})
+        strat = DslStrategy(_one_clause_genome(), ev)
+        broker = MockBroker(instrument_meta=usd_jpy_meta())
+        cfg = _cfg()  # empty session_close_utc_hours OK because multi-date
+        run_backtest(bars, strat, broker, cfg)  # should not raise
+
+    def test_session_close_with_single_date_ok(self):
+        bars = [_bar(0, day=1), _bar(60 * 21, day=1)]  # 00:00 + 21:00
+        ev = ScriptedPrimitiveEvaluator({})
+        strat = DslStrategy(_one_clause_genome(), ev)
+        broker = MockBroker(instrument_meta=usd_jpy_meta())
+        cfg = _cfg(session_close_utc_hours=frozenset({21}))
+        run_backtest(bars, strat, broker, cfg)  # should not raise
+```
+
+### 5.5 `tests/ga/test_fitness_evaluate.py` 新規
+
+```python
+"""evaluate_genome テスト（T009）."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import pytest
+
+from src.backtest.engine import BacktestConfig
+from src.domain.price import Ohlc, PriceBar
+from src.dsl.genome import ClauseConfig, Genome, PositionConfig, RiskConfig, SignalConfig
+from src.ga.fitness import _FAILURE_FITNESS, evaluate_genome
+from tests._helpers import usd_jpy_meta
+from tests.dsl.conftest import ConstantPrimitiveEvaluator, ScriptedPrimitiveEvaluator
+
+
+def _bar(minute: int, *, day: int = 1, hour: int = 0) -> PriceBar:
+    bt = datetime(2026, 4, day, hour, 0, 0, tzinfo=UTC) + timedelta(minutes=minute)
+    return PriceBar(
+        pair_name="USD_JPY", bar_time=bt,
+        bid=Ohlc(Decimal("154.00"), Decimal("154.01"), Decimal("153.99"), Decimal("154.00")),
+        ask=Ohlc(Decimal("154.01"), Decimal("154.02"), Decimal("154.00"), Decimal("154.01")),
+        volume=10, complete=True,
+    )
+
+
+def _genome() -> Genome:
+    return Genome(
+        name="g", units=10000,
+        clauses=(
+            ClauseConfig(
+                directional=(SignalConfig(name="D1", weight=1.0),),
+                local_gate=(), weight=1.0,
+            ),
+        ),
+        position=PositionConfig(entry_threshold=0.5, exit_threshold=0.2, max_pos=1, time_stop_min=0),
+        risk=RiskConfig(stop_atr=2.0, take_atr=3.0),
+    )
+
+
+def _cfg() -> BacktestConfig:
+    return BacktestConfig(
+        instrument="USD_JPY",
+        start=datetime(2026, 4, 1, tzinfo=UTC),
+        end=datetime(2026, 4, 3, tzinfo=UTC),
+        initial_cash=Decimal("1000000"),
+        leverage=10,
+        session_close_utc_hours=frozenset({23}),
+    )
+
+
+def _bars_two_days() -> list[PriceBar]:
+    bars = [_bar(i, day=1) for i in range(5)]
+    bars.append(_bar(0, day=2))
+    return bars
+
+
+class TestTotalPnl:
+    def test_returns_decimal(self):
+        ev = ConstantPrimitiveEvaluator(value=0.0)  # no entry
+        v = evaluate_genome(
+            _genome(), _bars_two_days(), usd_jpy_meta(), _cfg(), ev, metric="total_pnl",
+        )
+        assert isinstance(v, Decimal)
+        assert v == Decimal(0)  # no trades → pnl 0
+
+
+class TestSharpe:
+    def test_returns_failure_when_insufficient_trades(self):
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        v = evaluate_genome(
+            _genome(), _bars_two_days(), usd_jpy_meta(), _cfg(), ev, metric="sharpe",
+        )
+        # equity curve のリターンが全部 0 → std=0 → sharpe None → FAILURE
+        assert v == _FAILURE_FITNESS
+
+
+class TestCalmar:
+    def test_returns_failure_when_no_drawdown(self):
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        v = evaluate_genome(
+            _genome(), _bars_two_days(), usd_jpy_meta(), _cfg(), ev, metric="calmar",
+        )
+        # DD = 0 → calmar None → FAILURE
+        assert v == _FAILURE_FITNESS
+
+
+class TestSystemFailure:
+    def test_exception_returns_failure(self):
+        class ExplodingEvaluator:
+            def evaluate(self, bars, idx, signal):
+                raise RuntimeError("boom")
+
+        ev = ExplodingEvaluator()
+        v = evaluate_genome(
+            _genome(), _bars_two_days(), usd_jpy_meta(), _cfg(), ev, metric="total_pnl",
+        )
+        assert v == _FAILURE_FITNESS
+
+
+class TestMetricUnknown:
+    def test_unknown_metric_returns_failure_via_exception_path(self):
+        # unknown metric は ValueError を raise するが evaluate_genome は
+        # try/except の外で raise する（system_failure パスではない）。
+        # 仕様: evaluate_genome の最後の raise は unchecked
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        with pytest.raises(ValueError):
+            evaluate_genome(
+                _genome(), _bars_two_days(), usd_jpy_meta(), _cfg(), ev, metric="bogus",  # type: ignore
+            )
+```
+
+### 5.6 既存 `tests/backtest/test_engine.py` の修正
+
+```python
+# test_fills_at_next_bar_open_not_current と
+# test_end_of_run_closes_remaining_position の bars に day=2 の 1 bar を足す、
+# もしくは BacktestConfig に session_close_utc_hours={23} を付与
+# → 最小修正として後者を選ぶ（意図は変えず absolute constraint を満たす）
+```
+
+具体的には、`BacktestConfig(..., session_close_utc_hours=frozenset({23}))` を 2 箇所に追加。
+
+## 6. 実装順序
+
+1. `src/backtest/engine.py`: BacktestConfig 拡張、run_backtest 改訂
+2. `src/broker/mock.py`: set_spread_filter / drop_pending_open / apply_bar_holding_cost / mark_to_market 更新 / fill_pending 更新
+3. `src/ga/fitness.py`: evaluate_genome 復活
+4. `tests/dsl/conftest.py`: fixture 追加
+5. `tests/dsl/test_dsl_strategy.py`: 書き直し
+6. `tests/dsl/test_warmup_boundary.py`: 書き直し
+7. `tests/backtest/test_engine_clause.py`: 新規
+8. `tests/ga/test_fitness_evaluate.py`: 新規
+9. `tests/backtest/test_engine.py`: 最小修正
+10. `uv run pytest tests/dsl/ tests/backtest/ tests/ga/ -v` で pass 確認
+11. `uv run pytest` 全体実行、残 skip 確認
+12. `uv run mypy src/` / `uv run ruff check src/ tests/` clean
+13. docs 更新 3 本
+
+## 7. 後続 TODO への受け渡し
+
+- **primitives-registry (T010)**: 本 TODO 提供の `PrimitiveEvaluator` Protocol が fitness 回路で
+  既に使われているため、T010 で `RegistryEvaluator` を実装すれば差し込み可能
+- **stage-gate-implementation (T011)**: 本 TODO の `evaluate_genome` が 3 metric を返せるため
+  Stage A での `total_pnl` スクリーニング、Stage B での `sharpe`、Stage C での live_criteria
+  check (trade_count 含む) に接続可能
+- **run-ga-full-rewrite (Phase 2I)**: `config/alpha_factory/default.yaml` から
+  `backtest.max_spread_bps`, `backtest.holding_cost_per_day_bps`, `backtest.session_close_utc_hours`,
+  `backtest.bar_minutes` を読み、`GaConfig` にフィールド追加、`evaluate_genome` 呼び出し時に
+  `BacktestConfig` を組み立てる。4 段伝搬の実配線テストを追加。
+
+## 8. Risks と軽減策
+
+| Risk | 軽減 |
+|------|------|
+| `tests/backtest/test_engine.py` の single-date test が絶対制約違反で落ちる | session_close_utc_hours={23} を追加（意図を変えない最小修正） |
+| holding cost 控除で cash マイナス → margin call | 既存 margin call 機構が動作、fitness に反映されていれば設計通り |
+| spread filter が最初の bar で誤動作 | `_last_close_spread_bps is None` 時は reject しない defensive default |
+| session_close_utc_hours を hour 単位で指定する制約 | docstring に HH:MM 粒度は将来 TODO と明記、Round 2 コメント #1 対応 |
+| `test_engine.py` の既存 test 修正でレグレッション | diff 最小、引数追加のみ |
+
+## 9. 成功条件（再掲）
+
+- `uv run pytest tests/ -v` で DSL / backtest / GA 全て pass、残 skip は
+  `tests/dsl/test_serialize.py`（後続 TODO）と OANDA credentials テストのみ
+- `uv run mypy src/` clean
+- `uv run ruff check src/ tests/` clean
+- `evaluate_genome` が 3 metric 全て動作
+- 既存 `tests/backtest/test_engine.py` が最小修正で pass
+- `docs/alpha_factory/clause-architecture.md` の spread/swap 節が holding_cost 節へ更新
