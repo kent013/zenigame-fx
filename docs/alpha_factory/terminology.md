@@ -102,6 +102,30 @@ zenigame-fx Alpha Factory の全ドキュメントから参照される横断用
 
 `<a id="anchor-pair"></a>` Anchor Pair — (ii-lite) で target と並走評価するアンカー通貨ペア。target ごとに 2 本固定。
 
+### FRED
+
+`<a id="fred"></a>` FRED — Federal Reserve Economic Data。St. Louis Fed が提供する公開経済データ API。zenigame-fx では VIX / DXY / Treasury yields / breakeven 等の日足マクロ指標を `macro_index_daily` テーブルへ取り込む（`scripts/fetch_fred.py`）。primitive M5 VIXRegimeGate / P7 RiskOnOffProxy 等の前提データ。
+
+### VIXCLS
+
+`<a id="vixcls"></a>` VIXCLS — CBOE Volatility Index Daily Close（[FRED](#fred) シリーズ ID）。S&P 500 オプションのインプライド・ボラティリティ指数。リスク回避指標として M5 VIXRegimeGate 等で利用。
+
+### DTWEXBGS
+
+`<a id="dtwexbgs"></a>` DTWEXBGS — Nominal Broad U.S. Dollar Index, Daily（[FRED](#fred) シリーズ ID）。米ドルの貿易加重指数（Broad）。USD ペアの方向感に利用。
+
+### DGS10 / DGS2
+
+`<a id="dgs10-dgs2"></a>` DGS10 / DGS2 — 10-Year / 2-Year Treasury Constant Maturity Rate, Daily（[FRED](#fred) シリーズ ID）。米国債利回り。利回り曲線スプレッド（DGS10 - DGS2）等に利用。
+
+### T10YIE
+
+`<a id="t10yie"></a>` T10YIE — 10-Year Breakeven Inflation Rate, Daily（[FRED](#fred) シリーズ ID）。10 年物名目国債と TIPS の利回り差から導出される期待インフレ率。
+
+### macro_index_daily
+
+`<a id="macro-index-daily"></a>` macro_index_daily — [FRED](#fred) 日足マクロ指標を保持するテーブル（`series_id`, `date`, `value NULL`, `fetched_at` の 4 主要列 + 一意制約 `(series_id, date)`）。**T+1 利用原則**: `date=D` の値は `D+1` 以降の primitive 判断にのみ使う（look-ahead bias 防止）。
+
 ## SSOT 参照
 
 本ファイル自身が用語の SSOT。`config/alpha_factory/default.yaml` への参照は無い。

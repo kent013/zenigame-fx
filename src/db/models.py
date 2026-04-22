@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -102,3 +103,30 @@ class EconomicEventRow(Base):
 
     def __repr__(self) -> str:
         return f"<EconomicEventRow(event_time={self.event_time}, currency={self.currency}, name={self.name})>"
+
+
+class MacroIndexDaily(Base):
+    """FRED 由来の日足マクロ指標 (VIX / DXY / Treasury yields / breakeven 等)。
+
+    `date` は FRED の observations[].date を素直に保持する。`available_at` は持たないため、
+    primitive 側は T+1 利用原則を守ること（look-ahead bias 防止）。
+    """
+
+    __tablename__ = "macro_index_daily"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    series_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    value: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("series_id", "date", name="uq_macro_index_daily_series_date"),
+        Index("ix_macro_index_daily_series_date", "series_id", "date"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<MacroIndexDaily(series_id={self.series_id}, date={self.date}, value={self.value})>"
