@@ -73,6 +73,39 @@ target ペアごとに 2 アンカーを**固定**割当（実行時に変動さ
 - [migration-triggers.md](migration-triggers.md) — Shadow → Hard 移行条件
 - [concepts/cross-pair-evaluation-shadow.md](concepts/cross-pair-evaluation-shadow.md)
 
+## External Data 戦略（CFD 取得可否ベース）
+
+primitive P7-P12 が要求する CFD 系データ (S&P 500 / WTI / Gold / Copper / 米国債 / 日経) の取得経路は OANDA CFD 疎通試験 (T005) の実測結果で確定する。
+
+### 試験結果（2026-04-22 実測）
+
+| 試験 instrument | verdict | candle_count |
+|---|---|---|
+| SPX500_USD | OK | 10 |
+| WTICO_USD | OK | 10 |
+| XAU_USD | OK | 10 |
+| XCU_USD | OK | 10 |
+| JP225_USD | OK | 10 |
+| USB10Y_USD | OK | 10 |
+| USB02Y_USD | OK | 10 |
+
+**全 7 instrument が OANDA live 口座で M1 candles 取得可能**（仮説 H1「米国規制で 403」を REJECT、H2「全アクセス可能」を CONFIRM）。
+
+### 戦略
+
+| 状態 | 戦略 | 現状 |
+|---|---|---|
+| **全 OK** | OANDA で M1 candles を取り込み、FX と同じ ingest パイプラインを拡張 | **適用** |
+| 部分 OK | OK 分は OANDA、不可分は FRED 日足代替 + FX 派生指標 | n/a |
+| 全不可 | FRED + 自前計算 primitive 強化のみ | n/a |
+
+### 注記（観測 vs 解釈）
+
+verdict は観測事実のみ。account 区分・契約状態・地域規制等の変更で結果が変わる可能性がある。本戦略採用時も再走行で結果が変動した場合は別経路へ切り替える前提で設計する。
+
+実測レポート: `devnotes/20260422-1149-oanda-cfd-probe/probe-report.md`
+
 ## 関連 TODO
 
 - 未着手（Phase 2H: `src/alpha_factory/cross_pair.py`）
+- 後続: OANDA CFD ingest pipeline 拡張（T005 実測結果に基づく別 TODO 化）

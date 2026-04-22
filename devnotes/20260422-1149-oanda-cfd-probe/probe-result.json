@@ -1,0 +1,69 @@
+{
+  "probed_at": "2026-04-22T03:47:29.076419+00:00",
+  "base_url": "https://api-fxtrade.oanda.com",
+  "results": [
+    {
+      "instrument": "SPX500_USD",
+      "status_code": 200,
+      "verdict": "OK",
+      "candle_count": 10,
+      "first_candle_time": "2026-04-22T03:38:00+00:00",
+      "error_message": null
+    },
+    {
+      "instrument": "WTICO_USD",
+      "status_code": 200,
+      "verdict": "OK",
+      "candle_count": 10,
+      "first_candle_time": "2026-04-22T03:38:00+00:00",
+      "error_message": null
+    },
+    {
+      "instrument": "XAU_USD",
+      "status_code": 200,
+      "verdict": "OK",
+      "candle_count": 10,
+      "first_candle_time": "2026-04-22T03:38:00+00:00",
+      "error_message": null
+    },
+    {
+      "instrument": "XCU_USD",
+      "status_code": 200,
+      "verdict": "OK",
+      "candle_count": 10,
+      "first_candle_time": "2026-04-22T03:38:00+00:00",
+      "error_message": null
+    },
+    {
+      "instrument": "JP225_USD",
+      "status_code": 200,
+      "verdict": "OK",
+      "candle_count": 10,
+      "first_candle_time": "2026-04-22T03:38:00+00:00",
+      "error_message": null
+    },
+    {
+      "instrument": "USB10Y_USD",
+      "status_code": 200,
+      "verdict": "OK",
+      "candle_count": 10,
+      "first_candle_time": "2026-04-22T02:53:00+00:00",
+      "error_message": null
+    },
+    {
+      "instrument": "USB02Y_USD",
+      "status_code": 200,
+      "verdict": "OK",
+      "candle_count": 10,
+      "first_candle_time": "2026-04-22T02:47:00+00:00",
+      "error_message": null
+    }
+  ],
+  "summary": {
+    "total": 7,
+    "ok": 7,
+    "forbidden": 0,
+    "not_found": 0,
+    "other": 0
+  }
+}
