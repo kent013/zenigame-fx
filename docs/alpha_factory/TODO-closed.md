@@ -1,0 +1,13 @@
+# Alpha Factory TODO (Closed/Obsoleted)
+
+## Closed
+
+| ID | タイトル | テーマ | 優先度 | 完了日時 | Run ID |
+|----|---------|-------|-------|---------|--------|
+| T001 | DROP 7 zenigame-* skills を _archived/ に退避 | skill-port | High | 2026-04-22 08:26 | 53bbe9a |
+| T002 | docs/alpha_factory/ 骨格ドキュメント 10 本作成 | infrastructure | High | 2026-04-22 09:29 JST | 700132a |
+
+## Obsoleted
+
+| ID | タイトル | テーマ | 優先度 | 廃止日時 | 理由 |
+|----|---------|-------|-------|---------|------|
