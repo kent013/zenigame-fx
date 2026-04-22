@@ -70,6 +70,22 @@ zenigame-fx Alpha Factory の全ドキュメントから参照される横断用
 
 `<a id="session-close"></a>` session close — DslStrategy の `session_close_utc` 引数で指定される UTC 時刻。`bar.bar_time.time() >= session_close_utc` で強制 close。`None` の場合は backtest engine 側の EOD 強制クローズに委譲する（両方無効は禁止）。
 
+### Complexity Penalty
+
+`<a id="complexity-penalty"></a>` Complexity Penalty — fitness に加算される size 罰則。`fitness_pen = fitness_raw - α × size_norm(genome)`。Luke & Panait (2006) の parsimony pressure に基づき、max_clause / max_depth hard cap と併用して bloat を抑制する。
+
+### size_norm
+
+`<a id="size-norm"></a>` size_norm — Clause Genome の構造的複雑性を `size_ref` で正規化した指標。形: `(nodes + 0.5 × max_width + 2 × (n_clause - 1) + 0.5 × gate_nodes) / size_ref`。`max_width` は 1 clause の幅最大値（深さではない、入れ子木構造ではないため）。
+
+### attempted-edits 契約
+
+`<a id="attempted-edits"></a>` attempted-edits 契約 — GA mutate の rate 意味論。`n_attempts ~ Binomial(n_edit_max, mutation_rate)` で編集試行回数を先引きする。`rate=0` で 0 attempts 確定、`rate=1` で `n_edit_max` attempts 確定。各 attempt は実行可能 kernel を一様選択。effective-diffs（実際に構造が変わった回数）は保証しない。
+
+### EvaluationResult
+
+`<a id="evaluation-result"></a>` EvaluationResult — `src/ga/runner.py` の frozen dataclass。`fitness_raw: float` + `meta: Mapping[str, object]`。`evaluator: Callable[[Genome], EvaluationResult]` が run_ga に外部注入される。NaN / inf の fitness_raw は runner 側で `-math.inf` に置換。
+
 ### Tier
 
 `<a id="tier"></a>` Tier — スイムレーンの階層。Tier 1 = per-instrument GA、Graduation lane = 卒業個体の universal 探索。

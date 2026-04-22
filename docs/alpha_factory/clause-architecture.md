@@ -147,6 +147,73 @@ def enforce_consistency(genome: Genome) -> Genome:
 
 `genome_to_dict(g: Genome) -> dict[str, Any]` / `genome_from_dict(d) -> Genome`。JSON round-trip 保証。
 
+## GA operators 実装シグネチャ (T008 完了時点)
+
+Clause ベース Genome に対応した crossover / mutate / random_gen / runner を `src/ga/` に配置。
+
+### crossover (`src/ga/operators.py`)
+
+**実行可能 operator 集合から一様選択**（STGP 系譜、Montana 1995）。候補集合は空にならない
+（`position_swap` / `risk_swap` / `clause_swap` が always）。
+
+| operator | 前提条件 | 内容 |
+|----------|---------|------|
+| clause_point | `min(len(A.clauses), len(B.clauses)) >= 2` | 点交叉で clauses を分割・交換 |
+| clause_swap | always | 各親から clause を 1 本選び丸ごと swap |
+| directional_swap | 対応 clause に `len(directional) >= 2` が 1 組以上 | directional tuple の点交叉（max_depth を超えないよう trim 保護） |
+| gate_swap | 対応 clause の local_gate が片方でも非空 | clause の local_gate を丸ごと swap（max_depth 保護付き） |
+| position_swap | always | PositionConfig を親選択で swap |
+| risk_swap | always | RiskConfig を親選択で swap |
+
+各子は最後に `enforce_consistency` を通して最終正規化。
+
+### mutate (`src/ga/operators.py`)
+
+**attempted-edits 契約**: `n_attempts ~ Binomial(n_edit_max, mutation_rate)` で編集試行回数を
+先引きし、各試行で実行可能 kernel を一様選択。
+
+- `mutation_rate=0` → 0 attempts（完全 no-op）
+- `mutation_rate=1` → `n_edit_max` attempts 確定（default K=3）
+- effective-diffs 保証は提供しない（weight perturb で σ 正規分布から元値が引かれる等の no-op あり）
+
+kernel 一覧: `weight_perturb / params_perturb / signal_add / signal_del / clause_add / clause_del
+/ position_perturb / risk_perturb`。構造不変条件（directional>=1、clauses>=1、max_depth / max_clause
+hard cap）は各 kernel が前提条件で守る。
+
+### random_gen (`src/ga/random_gen.py`)
+
+Clause 構造の初期個体生成。`PrimitiveSpec(id, category, domain, param_schema)` を受け取り
+category で slot（directional / local_gate）を制約:
+
+- directional slot → category=`directional` の primitive のみ
+- local_gate slot → category=`modulator` の primitive のみ
+
+生成後に `enforce_consistency` を通す（bounded retry 3 回）。
+
+### complexity penalty (`src/ga/complexity.py`)
+
+```
+nodes       = Σ(len(c.directional) + len(c.local_gate))
+max_width   = max(len(c.directional) + len(c.local_gate))  # 幅（深さではない）
+n_clause    = len(clauses)
+gate_nodes  = Σ len(c.local_gate)
+size_norm   = (nodes + 0.5 × max_width + 2 × (n_clause - 1) + 0.5 × gate_nodes) / size_ref
+fitness_pen = fitness_raw - α × size_norm
+```
+
+default: `α=0.03, size_ref=10.0`（暫定、後続 TODO で SSOT 化）。
+Luke & Panait 2006 の parsimony pressure（hard cap + size 罰則の併用）に基づく。
+
+### runner (`src/ga/runner.py`)
+
+`run_ga(evaluator, config, *, registry)` で evaluator を外部注入。
+`evaluator: Callable[[Genome], EvaluationResult]` で `EvaluationResult(fitness_raw, meta)`
+を返す。NaN / inf は runner 側で `-math.inf` に置換。`Individual` は
+`genome / fitness_raw / fitness_pen / meta` を保持。
+
+T008 時点では `evaluate_genome` は NotImplementedError のまま（T009 clause-backtest-integration
+で復活）。テスト用の dummy primitive registry は `src/ga/_dummy_registry.py`（T010 で置換）。
+
 ## spread / swap 受け渡し契約 (後続 clause-backtest-integration TODO)
 
 ```python
@@ -188,4 +255,5 @@ class BacktestConfig:  # 既存 + 追加予定フィールド
 ## 関連 TODO
 
 - **T007 (Closed)**: Clause ベース Genome 構造に再構築（本ドキュメントの実装関数シグネチャ節）
-- 未着手: clause-ga-operators, clause-backtest-integration, primitives-registry
+- **T008 (Closed)**: Clause-aware GA operators（crossover/mutate/random_gen/runner + complexity penalty）
+- 未着手: clause-backtest-integration (T009), primitives-registry (T010)
