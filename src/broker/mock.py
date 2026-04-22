@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import cast
 
+import structlog
+
 from src.broker.margin import notional_home_currency, required_margin, validate_leverage
 from src.broker.orders import (
     ExitReason,
@@ -14,6 +16,8 @@ from src.broker.orders import (
     Trade,
 )
 from src.domain.price import PriceBar
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,11 @@ class MockBroker:
         self._pending: list[tuple[OrderSignal, int]] = []
         self._next_position_id = 1
         self._last_bar: PriceBar | None = None
+        # T009: spread filter (前バー close spread で reject)
+        self._max_spread_bps: Decimal | None = None
+        self._last_close_spread_bps: Decimal | None = None
+        # T009: holding cost 累計（position_id → 累積 cost）
+        self._holding_cost_by_position: dict[int, Decimal] = {}
 
     # ---- public API -------------------------------------------------------
 
@@ -62,9 +71,55 @@ class MockBroker:
                 raise ValueError("open signals require units > 0")
         self._pending.append((signal, leverage))
 
+    def set_spread_filter(self, max_spread_bps: Decimal | None) -> None:
+        """engine から呼ばれる。None で無効。"""
+        if max_spread_bps is not None and max_spread_bps < 0:
+            raise ValueError(f"max_spread_bps must be >= 0 when set: {max_spread_bps}")
+        self._max_spread_bps = max_spread_bps
+
+    def drop_pending_open(self, reason: str = "session_close") -> int:
+        """pending の open_long / open_short を drop して件数を返す。
+
+        Args:
+            reason: ログ用の理由文字列。
+
+        Returns:
+            drop 件数。
+        """
+        before = len(self._pending)
+        self._pending = [
+            (sig, lev) for (sig, lev) in self._pending
+            if sig.kind not in ("open_long", "open_short")
+        ]
+        dropped = before - len(self._pending)
+        if dropped:
+            logger.info("broker.drop_pending_open", reason=reason, n=dropped)
+        return dropped
+
     def fill_pending(self, bar: PriceBar) -> list[Trade]:
         if bar.pair_name != self._meta.oanda_name:
             raise ValueError(f"bar instrument {bar.pair_name} != broker {self._meta.oanda_name}")
+
+        # T009: spread filter（前バー close spread で reject）
+        if (
+            self._max_spread_bps is not None
+            and self._last_close_spread_bps is not None
+            and self._last_close_spread_bps > self._max_spread_bps
+        ):
+            before = len(self._pending)
+            self._pending = [
+                (sig, lev) for (sig, lev) in self._pending
+                if sig.kind not in ("open_long", "open_short")
+            ]
+            rejected = before - len(self._pending)
+            if rejected:
+                logger.info(
+                    "broker.submit.rejected_by_spread",
+                    n_rejected=rejected,
+                    last_close_spread_bps=str(self._last_close_spread_bps),
+                    max_spread_bps=str(self._max_spread_bps),
+                )
+
         trades: list[Trade] = []
         for signal, leverage in self._pending:
             if signal.kind == "open_long":
@@ -86,6 +141,55 @@ class MockBroker:
         if bar.pair_name != self._meta.oanda_name:
             raise ValueError(f"bar instrument {bar.pair_name} != broker {self._meta.oanda_name}")
         self._last_bar = bar
+        # T009: 次バー fill_pending で参照される close spread bps を更新
+        mid_close = (bar.ask.close + bar.bid.close) / Decimal(2)
+        if mid_close > 0:
+            spread_bps = (bar.ask.close - bar.bid.close) / mid_close * Decimal(10000)
+            self._last_close_spread_bps = spread_bps
+        # mid_close <= 0 の場合は更新しない（防御）
+
+    def apply_bar_holding_cost(
+        self,
+        bar: PriceBar,
+        *,
+        per_day_bps: Decimal,
+        bar_minutes: int,
+    ) -> Decimal:
+        """bar 単位で holding cost を cash から控除、かつ各 position に累計。
+
+        per_bar_bps = per_day_bps × (bar_minutes / 1440)
+        cost_i = |notional_home_i| × per_bar_bps / 10000   （i = 各 open position）
+        total_cost = Σ cost_i
+
+        効果:
+          - self._cash -= total_cost（equity に即時反映）
+          - 各 position の累計 holding cost を self._holding_cost_by_position[pos.id] に加算
+          - _close_one で Trade.pnl から「当該 position の累計 holding cost」を差し引く
+            → total_pnl = sum(trade.pnl) が holding cost 反映済みの値になる
+
+        Returns:
+            控除された総額（正値）。
+        """
+        if per_day_bps <= 0 or bar_minutes <= 0 or not self._positions:
+            return Decimal(0)
+        if bar.pair_name != self._meta.oanda_name:
+            raise ValueError(f"bar instrument {bar.pair_name} != broker {self._meta.oanda_name}")
+        per_bar_bps = per_day_bps * Decimal(bar_minutes) / Decimal(1440)
+        total_cost = Decimal(0)
+        for pos in self._positions.values():
+            notional = notional_home_currency(
+                units=pos.units,
+                price_quote_per_base=pos.entry_price,
+                quote_is_home=True,
+            )
+            cost = notional * per_bar_bps / Decimal(10000)
+            total_cost += cost
+            self._holding_cost_by_position[pos.id] = (
+                self._holding_cost_by_position.get(pos.id, Decimal(0)) + cost
+            )
+        if total_cost > 0:
+            self._cash -= total_cost
+        return total_cost
 
     def force_close_if_margin_call(self, bar: PriceBar) -> list[Trade]:
         snap = self._snapshot_at(bar)
@@ -147,8 +251,13 @@ class MockBroker:
         if pos is None:
             return None
         exit_price = self._exit_price(pos.side, bar, exit_kind)
-        pnl = self._realized_pnl(pos, exit_price)
-        self._cash += pnl
+        raw_pnl = self._realized_pnl(pos, exit_price)
+        # T009: 累積 holding cost を pnl から差し引いて Trade.pnl に net_pnl として記録
+        # cash は apply_bar_holding_cost で既に cost を減算済みなので、raw_pnl のみ加算
+        # （二重控除を回避）。
+        cost_accum = self._holding_cost_by_position.pop(pos.id, Decimal(0))
+        net_pnl = raw_pnl - cost_accum
+        self._cash += raw_pnl
         trade = Trade(
             position_id=pos.id,
             instrument=pos.instrument,
@@ -158,7 +267,7 @@ class MockBroker:
             entry_time=pos.entry_time,
             exit_price=exit_price,
             exit_time=bar.bar_time,
-            pnl=pnl,
+            pnl=net_pnl,
             exit_reason=reason,
         )
         self._trades.append(trade)

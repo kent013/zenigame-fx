@@ -61,6 +61,9 @@ def _execute_single(args: tuple[list[PriceBar], InstrumentMeta, GridSearchConfig
         end=gsconfig.end,
         initial_cash=gsconfig.initial_cash,
         leverage=gsconfig.leverage,
+        # T009: grid_search は短期 bars を扱う想定のため、イントラデイ絶対制約を
+        # session_close_utc_hours={23} で担保（既存挙動の維持）。
+        session_close_utc_hours=frozenset({23}),
     )
     result = run_backtest(bars, strategy, broker, bconfig)
     metrics = compute_metrics(result.trades, result.equity_curve)

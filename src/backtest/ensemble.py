@@ -111,6 +111,9 @@ def run_ensemble(
             end=config.end,
             initial_cash=alloc,
             leverage=config.leverage,
+            # T009: ensemble は同一 bars で複数 strategy を並走評価する想定。
+            # session_close_utc_hours={23} でイントラデイ絶対制約を担保。
+            session_close_utc_hours=frozenset({23}),
         )
         result = run_backtest(bars, strategy, broker, bconfig)
         metrics = compute_metrics(result.trades, result.equity_curve)

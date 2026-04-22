@@ -142,6 +142,22 @@ zenigame-fx Alpha Factory の全ドキュメントから参照される横断用
 
 `<a id="tc"></a>` TC — Transaction Cost。スプレッド・スリッページ・手数料・スワップを合算した取引コスト。本プロジェクトでは fitness に必ず反映する（絶対制約）。
 
+### Spread Filter
+
+`<a id="spread-filter"></a>` Spread Filter — `BacktestConfig.max_spread_bps` で指定する約定前フィルタ（T009 導入）。`MockBroker.fill_pending` 冒頭で「前バー close spread_bps」が上限を超えていればその bar の pending open 系シグナルを reject。判定値は「前バー close 時点の観測値」のみを使い lookahead を回避する。`None` で無効。
+
+### Holding Cost Proxy
+
+`<a id="holding-cost-proxy"></a>` Holding Cost Proxy — `BacktestConfig.holding_cost_per_day_bps` で指定する保有時間比例コスト（T009 導入、旧名 `swap_cost_per_day_bps` から改名）。bar 単位で `per_bar_bps = per_day_bps × bar_minutes / 1440` を按分し `|notional|` に乗じた額を cash から控除、同時に position 単位で累計して `_close_one` 時に `Trade.pnl` から差し引く（net_pnl）。不変条件: `sum(Trade.pnl) == final_cash - initial_cash`。実 rollover swap（日付境界固定・水曜 3 倍・side 別）の精密再現は将来 TODO。
+
+### Session Close (engine)
+
+`<a id="session-close-engine"></a>` Session Close (engine) — `BacktestConfig.session_close_utc_hours: frozenset[int]`（T009 導入）。hour 粒度で該当時刻 bar に入った際、pending open drop → fill_pending → mark + holding cost → margin call → 保有があれば `close_all(reason="eod")` → strategy.on_bar → strategy からの open 系 drop の順で処理する。DslStrategy の `session_close_utc: time | None` は fail-safe（engine 側が primary）。HH:MM 粒度は将来 TODO。
+
+### Intraday Absolute Constraint
+
+`<a id="intraday-absolute-constraint"></a>` Intraday Absolute Constraint — North Star「イントラデイ絶対制約」の engine レベル担保（T009 導入）。`run_backtest` 冒頭で `session_close_utc_hours` が非空か `bars` が複数 UTC date に跨るかのどちらかが成立しなければ `ValueError`。短時間単日 backtest であっても例外なくイントラデイ強制クローズを担保する意図的ポリシー。
+
 ### IC
 
 `<a id="ic"></a>` IC — Information Coefficient。signal 値と将来リターンの順位相関（Spearman）。プリミティブ評価の基本指標。

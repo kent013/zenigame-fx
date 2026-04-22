@@ -214,26 +214,100 @@ Luke & Panait 2006 の parsimony pressure（hard cap + size 罰則の併用）�
 T008 時点では `evaluate_genome` は NotImplementedError のまま（T009 clause-backtest-integration
 で復活）。テスト用の dummy primitive registry は `src/ga/_dummy_registry.py`（T010 で置換）。
 
-## spread / swap 受け渡し契約 (後続 clause-backtest-integration TODO)
+## backtest 統合 (T009 完了時点)
+
+T009 `clause-backtest-integration` で `src/backtest/engine.py` / `src/broker/mock.py` /
+`src/ga/fitness.py` を Clause 対応にした。以下が実装契約:
+
+### BacktestConfig 新規フィールド
 
 ```python
 @dataclass(frozen=True)
-class BacktestConfig:  # 既存 + 追加予定フィールド
+class BacktestConfig:
     instrument: str
     start: datetime
     end: datetime
     initial_cash: Decimal
     leverage: int
-    # 以下は clause-backtest-integration TODO で追加
-    # max_spread_bps: Decimal | None = None
-    # swap_cost_per_day_bps: Decimal = Decimal(0)
+    max_spread_bps: Decimal | None = None           # T009 追加
+    holding_cost_per_day_bps: Decimal = Decimal(0)  # T009 追加（旧名 swap_cost_per_day_bps 廃止）
+    session_close_utc_hours: frozenset[int] = frozenset()  # T009 追加（hour 粒度）
+    bar_minutes: int = 1                            # T009 追加（holding cost 按分）
 ```
 
-- 単位: 両方 bps（basis point、1/10000）
-- 適用時点:
-  - `max_spread_bps`: `MockBroker.submit` 時点で spread_bps 計算、超過なら reject（約定前フィルタ）
-  - `swap_cost_per_day_bps`: `mark_to_market` ごとに日次按分で equity 控除（fitness 反映）
-- 4 段伝搬: `config/alpha_factory/default.yaml` → `GaConfig` → `BacktestConfig` → `MockBroker`
+### spread フィルタ（前バー close spread、no-lookahead）
+
+- 判定値: 「前バー close spread_bps」= `(ask.close - bid.close) / mid_close × 10000`
+- 適用タイミング: `MockBroker.fill_pending` 冒頭で `_last_close_spread_bps > max_spread_bps`
+  ならその bar の pending open 系シグナルを drop（reject）
+- 初期 bar（前バー未観測）は reject しない（defensive default）
+- `max_spread_bps=None` で無効
+
+### holding cost proxy（保有時間比例コスト）
+
+- 本 TODO は「保有時間に比例する cost」を fitness に反映する proxy 実装。
+  実 OANDA rollover swap（日付境界固定・水曜 3 倍・side 別）の精密再現は将来 TODO
+- 単位: bps/day（正値のみ。負値は `__post_init__` で raise）
+- 適用: 各 bar `mark_to_market` 直後で `MockBroker.apply_bar_holding_cost(bar, per_day_bps, bar_minutes)`
+  - `per_bar_bps = per_day_bps × (bar_minutes / 1440)`
+  - `cost_i = |notional_home_i| × per_bar_bps / 10000`（各 open position）
+  - `cash -= Σ cost_i` に即時反映
+  - 各 position の累計 holding cost を `MockBroker._holding_cost_by_position[pos.id]` に加算
+- `_close_one` で `Trade.pnl = raw_pnl - cost_accum` として **Trade.pnl に cost 反映済みの
+  net_pnl を記録**（cash は raw_pnl で加算、二重控除回避）
+- 不変条件: `sum(Trade.pnl) == final_cash - initial_cash`
+
+### session close（hour 粒度、engine 絶対制約）
+
+- `session_close_utc_hours: frozenset[int]`（hour 粒度、HH:MM 粒度は将来 TODO）
+- 発動タイミング（bar.bar_time.hour が集合に含まれる場合、順序を厳守）:
+  1. pending の open 系シグナルを drop
+  2. `fill_pending(bar)`（open 系は既に drop 済み）
+  3. `mark_to_market(bar)` + holding cost
+  4. margin call check
+  5. 保有があれば `close_all(bar, reason="eod")`
+  6. `strategy.on_bar` を呼ぶ（snapshot は全クローズ後）
+  7. strategy から open 系シグナルが返っても submit せず drop
+  8. close 系シグナルは submit
+- strategy 内 `session_close_utc: time | None` は fail-safe（engine 側が primary）
+
+### イントラデイ絶対制約（North Star）
+
+`run_backtest` 冒頭で以下のいずれかが有効でないと `ValueError`:
+- `session_close_utc_hours` が非空
+- `bars` が複数 UTC date に跨る（既存 EOD 強制クローズ）
+
+両方無効は「意図的ポリシー」として禁止。短時間単日 backtest も例外なく
+イントラデイ強制クローズを担保する。
+
+### `evaluate_genome` （`src/ga/fitness.py`、T009 復活）
+
+```python
+def evaluate_genome(
+    genome: Genome,
+    bars: list[PriceBar],
+    meta: InstrumentMeta,
+    backtest_config: BacktestConfig,
+    primitive_evaluator: PrimitiveEvaluator,
+    *,
+    metric: FitnessMetric = "total_pnl",  # total_pnl / sharpe / calmar
+    warmup_bars: int = 0,
+    session_close_utc: time | None = None,
+) -> Decimal: ...
+```
+
+- 例外発生時: `warning` ログ (`ga.fitness.system_failure`) + `_FAILURE_FITNESS` (-1e12)
+- metric 不能時（sharpe None / calmar None）: `info` ログ (`ga.fitness.metric_unavailable`)
+  + `_FAILURE_FITNESS`
+- `total_pnl` は `Trade.pnl` 合計（holding cost 反映済み）を返す
+
+### 4 段伝搬契約（Phase 2I で実配線予定）
+
+本 TODO では `BacktestConfig` の新規フィールド宣言までを実装。`config/alpha_factory/
+default.yaml` → `GaConfig` → `BacktestConfig` → `MockBroker` の 4 段伝搬は
+`run-ga-full-rewrite` (Phase 2I) で実配線する。旧キー `swap_cost_per_day_bps` は
+`holding_cost_per_day_bps` へ改名されており、Phase 2I の yaml loader で明示エラーまたは
+互換読込ポリシーを決める必要がある。4 段すべての実配線テストを受け入れ条件に含める。
 
 ## SSOT 参照
 
@@ -256,4 +330,5 @@ class BacktestConfig:  # 既存 + 追加予定フィールド
 
 - **T007 (Closed)**: Clause ベース Genome 構造に再構築（本ドキュメントの実装関数シグネチャ節）
 - **T008 (Closed)**: Clause-aware GA operators（crossover/mutate/random_gen/runner + complexity penalty）
-- 未着手: clause-backtest-integration (T009), primitives-registry (T010)
+- **T009 (Closed)**: backtest engine を Clause DslStrategy に対応 + spread/holding cost コスト反映 + fitness 復活
+- 未着手: primitives-registry (T010), stage-gate-implementation (T011)

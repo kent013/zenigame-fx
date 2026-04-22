@@ -120,6 +120,9 @@ def _run_test(
         end=slice_.test_end,
         initial_cash=config.initial_cash,
         leverage=config.leverage,
+        # T009: walk-forward は短期 slice を評価する想定のため、
+        # session_close_utc_hours={23} でイントラデイ絶対制約を担保。
+        session_close_utc_hours=frozenset({23}),
     )
     result = run_backtest(test_bars, strategy, broker, bconfig)
     return compute_metrics(result.trades, result.equity_curve)
