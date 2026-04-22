@@ -1,60 +1,89 @@
+"""Clause ベース Genome 構造（T007）。
+
+旧フラット式（entry_long/entry_short/exit_long/exit_short の Expr ツリー 4 本）を
+本 TODO で置き換える。Clause = directional × local_gate × weight を 1-3 個持ち、
+composite score を介してヒステリシス判定で売買する。
+
+仕様根拠:
+- docs/alpha_factory/clause-architecture.md
+- devnotes/20260421-1850-fx-skill-port/debate-synthesis.md
+- devnotes/20260422-1423-clause-genome-structure/detailed-design.md
+
+学術引用:
+- Jacobs, R. A., Jordan, M. I., Nowlan, S. J., & Hinton, G. E. (1991).
+  Adaptive mixtures of local experts. Neural Computation, 3(1), 79-87.
+- Jordan, M. I., & Jacobs, R. A. (1994). Hierarchical mixtures of experts and
+  the EM algorithm. Neural Computation, 6(2), 181-214.
+- Koza, J. R. (1992). Genetic Programming. MIT Press.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from src.broker.orders import OrderSignal, PortfolioSnapshot
-from src.domain.price import PriceBar
-from src.dsl.ast import Expr
-from src.dsl.eval import EvalContext, evaluate, max_lookback
+
+@dataclass(frozen=True)
+class SignalConfig:
+    """単一 primitive の呼び出し定義。
+
+    Attributes:
+        name: primitive ID（例: "F1", "M1"）。後続 TODO で PrimitiveRegistry 登録値と一致必須。
+        weight: directional の場合 [0.1, 2.0] の正、local_gate の場合 [-2.0, 2.0]。
+        params: primitive 固有パラメータ（fast/slow 窓、閾値など）。
+                生成時に defensive copy される（shared reference 遮断）。
+    """
+
+    name: str
+    weight: float
+    params: dict[str, float | int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # frozen dataclass でも object.__setattr__ で内部書き換え可能。
+        # 外部 dict と reference を共有しないよう dict(...) でコピー。
+        object.__setattr__(self, "params", dict(self.params))
+
+
+@dataclass(frozen=True)
+class ClauseConfig:
+    """1 clause = directional 群 × local_gate 群 × clause_weight."""
+
+    directional: tuple[SignalConfig, ...]
+    local_gate: tuple[SignalConfig, ...]
+    weight: float
+
+
+@dataclass(frozen=True)
+class PositionConfig:
+    """ポジション開閉パラメータ。
+
+    entry_threshold > exit_threshold（ヒステリシス必須、enforce_consistency で保証）。
+    time_stop_min == 0 で time_stop 無効。
+    """
+
+    entry_threshold: float
+    exit_threshold: float
+    max_pos: int
+    time_stop_min: int
+
+
+@dataclass(frozen=True)
+class RiskConfig:
+    """リスク管理パラメータ（ATR 係数）。"""
+
+    stop_atr: float
+    take_atr: float
 
 
 @dataclass(frozen=True)
 class Genome:
+    """Clause ベース合成ゲノム。
+
+    1 ゲノム = 1 通貨ペア用の signal generator。Clause を 1-3 個持ち、
+    composite score 化してヒステリシス判定で発注する。
+    """
+
     name: str
     units: int
-    entry_long: Expr
-    entry_short: Expr
-    exit_long: Expr
-    exit_short: Expr
-
-
-class DslStrategy:
-    """Genome を評価しながらシグナルを出す Strategy。1 ポジション制約（MVP）。"""
-
-    def __init__(self, genome: Genome) -> None:
-        self._genome = genome
-        self._bars: list[PriceBar] = []
-        self._warmup = max(
-            max_lookback(genome.entry_long),
-            max_lookback(genome.entry_short),
-            max_lookback(genome.exit_long),
-            max_lookback(genome.exit_short),
-        )
-
-    @property
-    def genome(self) -> Genome:
-        return self._genome
-
-    def warmup_bars(self) -> int:
-        return self._warmup
-
-    def on_bar(self, bar: PriceBar, snapshot: PortfolioSnapshot) -> list[OrderSignal]:
-        self._bars.append(bar)
-        # warmup_bars() が返す値と同じバー数が揃った時点から評価を開始する。
-        # 修正前は `<=` により 1 本余計に待機していた（Phase 4f audit Bug #1）。
-        if len(self._bars) < self._warmup:
-            return []
-        ctx = EvalContext(bars=self._bars, i=len(self._bars) - 1)
-
-        if snapshot.positions:
-            pos = snapshot.positions[0]
-            exit_expr = self._genome.exit_long if pos.side == "long" else self._genome.exit_short
-            if bool(evaluate(exit_expr, ctx)):
-                return [OrderSignal(kind="close_position", position_id=pos.id)]
-            return []
-
-        if bool(evaluate(self._genome.entry_long, ctx)):
-            return [OrderSignal(kind="open_long", units=self._genome.units)]
-        if bool(evaluate(self._genome.entry_short, ctx)):
-            return [OrderSignal(kind="open_short", units=self._genome.units)]
-        return []
+    clauses: tuple[ClauseConfig, ...]
+    position: PositionConfig
+    risk: RiskConfig

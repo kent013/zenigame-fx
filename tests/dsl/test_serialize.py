@@ -1,24 +1,19 @@
+"""T007: 旧 Expr serialize (expr_to_dict/from_dict) のテスト。本 TODO で serialize 側が
+Clause 構造に置き換わり、旧 API が削除されたため一時 skip。
+
+新 Genome の serialize round-trip テストは `test_genome_clause.py` の
+`test_genome_roundtrip_through_dict` にある。
+"""
+
 from __future__ import annotations
 
-from src.dsl.samples import bollinger_genome, ma_crossover_genome
-from src.dsl.serialize import expr_from_dict, expr_to_dict, genome_from_dict, genome_to_dict
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="T007: legacy Expr serialize tests; new clause round-trip in test_genome_clause.py"
+)
 
 
-def test_bollinger_genome_roundtrip_through_dict() -> None:
-    original = bollinger_genome(window=20, k=2.0, units=5000)
-    payload = genome_to_dict(original)
-    restored = genome_from_dict(payload)
-    assert original == restored
-    assert genome_to_dict(restored) == payload
-
-
-def test_ma_crossover_genome_roundtrip_through_dict() -> None:
-    original = ma_crossover_genome(fast=5, slow=20, units=10000)
-    payload = genome_to_dict(original)
-    restored = genome_from_dict(payload)
-    assert original == restored
-
-
-def test_expr_roundtrip_preserves_structure() -> None:
-    expr = bollinger_genome().entry_long
-    assert expr_from_dict(expr_to_dict(expr)) == expr
+def test_legacy_expr_serialize_placeholder() -> None:
+    """Visible skip marker for pytest report."""
+    raise AssertionError("placeholder — should be skipped")

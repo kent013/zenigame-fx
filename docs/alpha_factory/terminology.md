@@ -34,6 +34,42 @@ zenigame-fx Alpha Factory の全ドキュメントから参照される横断用
 
 `<a id="modulator"></a>` Modulator — local_gate / global_gate を構成するプリミティブ群（ATRRegimeGate / SessionGate / VIXRegimeGate 等）。方向性を生まず、他 signal の効力を調整する。
 
+### SignalConfig
+
+`<a id="signal-config"></a>` SignalConfig — `src/dsl/genome.py` の frozen dataclass。`name`（primitive ID）+ `weight`（directional: [0.1, 2.0] / gate: [-2.0, 2.0]）+ `params`（primitive 固有パラメータ辞書）の 3 フィールド。生成時に `__post_init__` で `params` を defensive copy する。
+
+### ClauseConfig
+
+`<a id="clause-config"></a>` ClauseConfig — `src/dsl/genome.py` の frozen dataclass。1 clause を表現する `directional: tuple[SignalConfig, ...]` + `local_gate: tuple[SignalConfig, ...]` + `weight: float` の 3 フィールド。
+
+### PositionConfig
+
+`<a id="position-config"></a>` PositionConfig — `src/dsl/genome.py` の frozen dataclass。`entry_threshold`（θ_on）/ `exit_threshold`（θ_off）/ `max_pos` / `time_stop_min`。`enforce_consistency` で `entry > exit` を保証。
+
+### RiskConfig
+
+`<a id="risk-config"></a>` RiskConfig — `src/dsl/genome.py` の frozen dataclass。`stop_atr` / `take_atr` の ATR 係数。
+
+### Hysteresis (ヒステリシス)
+
+`<a id="hysteresis"></a>` Hysteresis — Composite Score が `entry_threshold` (θ_on) を超えてエントリー、`exit_threshold` (θ_off) を下回って決済する 2 閾値方式。`θ_on > θ_off` 必須（enforce_consistency で強制）。チャタリング抑止（Schmitt trigger の金融時系列応用）。
+
+### PrimitiveEvaluator
+
+`<a id="primitive-evaluator"></a>` PrimitiveEvaluator — `src/dsl/strategy.py` で定義される Protocol。`evaluate(bars, idx, signal) -> float` を実装する primitive 評価インターフェース。実装本体は後続 TODO `primitives-registry` の `RegistryEvaluator` で提供される。
+
+### enforce_consistency
+
+`<a id="enforce-consistency"></a>` enforce_consistency — `src/dsl/enforce.py` の pure function。Genome に対して weight clip / dedupe / directional 空 Clause 除去 / Position 閾値 swap / NaN・inf reject 等のルールを適用し、有効な Genome を返す（または ValueError を raise）。GA operators の後処理で呼ばれる想定。有限実数入力で冪等。
+
+### time_stop
+
+`<a id="time-stop"></a>` time_stop — PositionConfig.`time_stop_min` で指定される強制クローズ時間（分）。`0` で無効。イントラデイ前提（North Star 絶対制約）を個体レベルで担保するための要素。
+
+### session close
+
+`<a id="session-close"></a>` session close — DslStrategy の `session_close_utc` 引数で指定される UTC 時刻。`bar.bar_time.time() >= session_close_utc` で強制 close。`None` の場合は backtest engine 側の EOD 強制クローズに委譲する（両方無効は禁止）。
+
 ### Tier
 
 `<a id="tier"></a>` Tier — スイムレーンの階層。Tier 1 = per-instrument GA、Graduation lane = 卒業個体の universal 探索。
