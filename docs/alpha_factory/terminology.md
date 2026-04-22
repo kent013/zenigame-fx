@@ -56,7 +56,39 @@ zenigame-fx Alpha Factory の全ドキュメントから参照される横断用
 
 ### PrimitiveEvaluator
 
-`<a id="primitive-evaluator"></a>` PrimitiveEvaluator — `src/dsl/strategy.py` で定義される Protocol。`evaluate(bars, idx, signal) -> float` を実装する primitive 評価インターフェース。実装本体は後続 TODO `primitives-registry` の `RegistryEvaluator` で提供される。
+`<a id="primitive-evaluator"></a>` PrimitiveEvaluator — `src/dsl/strategy.py` で定義される Protocol。`evaluate(bars, idx, signal) -> float` を実装する primitive 評価インターフェース。実装本体は `RegistryEvaluator`（T010 で導入）で提供される。
+
+### PrimitiveSpec
+
+`<a id="primitive-spec"></a>` PrimitiveSpec — `src/alpha_factory/primitives/_base.py` の frozen dataclass（T010 で導入）。1 primitive の正式仕様。`id` / `name` / `category` / `domain` / `param_schema` / `required_data` / `compute` / `compute_all_bars` の 8 フィールド。`register()` 時に `validate_primitive_spec()` で不変条件検証を受ける。
+
+### ParamSpec
+
+`<a id="param-spec"></a>` ParamSpec — `src/alpha_factory/primitives/_base.py` の frozen dataclass（T010 で導入）。primitive parameter 1 個の range と型を宣言。`name` / `low` / `high` / `is_int` / `default` の 5 フィールド。`default` は None なら必須、値指定なら `[low, high]` 内必須。`is_int=True` なら `low/high/default` が整数値必須。
+
+### RegistryEvaluator
+
+`<a id="registry-evaluator"></a>` RegistryEvaluator — `src/alpha_factory/primitives/evaluator.py` のクラス（T010 で導入）。`PrimitiveEvaluator` Protocol の実装。`RegistryEvaluator(pair, aux_series=None)` で構築し、`evaluate(bars, idx, signal)` が `get_primitive(signal.name).compute(EvaluationContext(...))` を呼ぶ薄い adapter。状態（キャッシュ）は保持しない。
+
+### PrimitiveDomain
+
+`<a id="primitive-domain"></a>` PrimitiveDomain — `Literal["generic", "pair_specific"]`（T010 で導入）。`generic` は全ペアで利用可、`pair_specific` は `EvaluationContext.pair` を参照して特定ペア向けに最適化されたロジックを持つ。
+
+### PrimitiveCategory
+
+`<a id="primitive-category"></a>` PrimitiveCategory — `Literal["TREND_FOLLOW", "MEAN_REVERT", "NEUTRAL", "MODULATOR"]`（T010 で導入）。primitive の機能カテゴリ。`MODULATOR` は gate 役割（他 signal の効力を調整）、他 3 値は方向性を生む signal。`slot_from_category()` で GA slot（directional / local_gate）へ射影される。
+
+### EvaluationContext
+
+`<a id="evaluation-context"></a>` EvaluationContext — `src/alpha_factory/primitives/_base.py` の frozen dataclass（T010 で導入）。`PrimitiveSpec.compute` に渡される評価文脈。`bars` / `idx` / `pair` / `params` / `aux_series` の 5 フィールド。`aux_series` は `required_data` の非 OHLC キー（atr / spread / macro.* など）に対応する補助時系列の Mapping。骨格段階では空 Mapping 可、後続 TODO でロード実装追加。
+
+### slot_from_category
+
+`<a id="slot-from-category"></a>` slot_from_category — `src/alpha_factory/primitives/_base.py` の関数（T010 で導入）。PrimitiveCategory（4 値）を GA slot（`directional` / `local_gate` の 2 値）に射影。`MODULATOR → "local_gate"`、`TREND_FOLLOW / MEAN_REVERT / NEUTRAL → "directional"`。未知値は `ValueError` で fail-fast。
+
+### RequiredDataKey
+
+`<a id="required-data-key"></a>` RequiredDataKey — `PrimitiveSpec.required_data` の canonical 語彙（T010 で導入）。Literal: `ohlc / atr / spread / swap / calendar.session / calendar.economic_event / macro.vix / macro.dxy / macro.dgs10 / macro.dgs2 / macro.t10yie / macro.spx500`。加えて `cross_pair.<pair>` プレフィックス形式（`<pair>` 非空）を許容。検証関数 `is_valid_required_data(key)`。
 
 ### enforce_consistency
 

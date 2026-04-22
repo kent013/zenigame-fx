@@ -76,9 +76,32 @@
 
 ### Registry の役割
 
-- 全 32 プリミティブを `src/alpha_factory/primitives/_registry.py` で列挙
-- GA の random / mutate operator は registry から候補を抽選
-- 新規追加時は registry 登録 + テスト追加が必須
+**T010 時点の状態**: `src/alpha_factory/primitives/_registry.py` の registry（module-level dict）は **空**。契約（`PrimitiveSpec` / `ParamSpec` / `EvaluationContext` / `RegistryEvaluator`）のみ整備済。32 primitive は後続 TODO（T010-a/b/c）で段階的に登録する。
+
+**Bootstrap 手順**:
+
+- 各 primitive モジュールが import 時に `register(PrimitiveSpec(...))` を呼ぶ
+- production path（GA entry）は `ensure_registered()` を 1 回明示的に呼んでから `list_all()` / `get_primitive(id)` を使う
+- 骨格段階では `ensure_registered()` は no-op、登録件数は 0
+
+**登録時 validation**:
+
+- `register()` は `validate_primitive_spec()` で不変条件を検証（`id/name` 非空、`param_schema` 名重複禁止、`low <= high`、`default` の範囲・is_int 整合、`required_data` の canonical naming）
+- 重複 id は `ValueError`（silent override 禁止）
+- 並行 register/clear は `threading.Lock` で保護
+
+**category → slot 射影**:
+
+- `slot_from_category(category)` で 4 値 PrimitiveCategory（TREND_FOLLOW / MEAN_REVERT / NEUTRAL / MODULATOR）を 2 値 GaSlot（directional / local_gate）に射影
+- MODULATOR → `local_gate`、それ以外 → `directional`
+- 未知値は `ValueError` で fail-fast
+- GA random_gen は本関数経由で registry を参照する（tests/ga/ の移行は T010-d）
+
+**required_data の canonical 語彙**:
+
+- Literal: `ohlc`, `atr`, `spread`, `swap`, `calendar.session`, `calendar.economic_event`, `macro.vix`, `macro.dxy`, `macro.dgs10`, `macro.dgs2`, `macro.t10yie`, `macro.spx500`
+- プレフィックス許容: `cross_pair.<pair>`（`<pair>` 部分は非空必須）
+- 検証関数: `is_valid_required_data(key)`
 
 ## SSOT 参照
 
