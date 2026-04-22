@@ -48,9 +48,10 @@ class OandaClient:
         account_id: str | None = None,
         timeout: float = 10.0,
     ) -> None:
-        self._account_id = account_id or settings.oanda_account_id
-        self._base_url = base_url or settings.oanda_base_url
-        token = token or settings.oanda_api_token
+        # 明示的に渡された空文字列を settings へフォールスルーさせない（テストでも空文字を弾けるように）。
+        self._account_id = account_id if account_id is not None else settings.oanda_account_id
+        self._base_url = base_url if base_url is not None else settings.oanda_base_url
+        token = token if token is not None else settings.oanda_api_token
         # 空文字列のまま API を呼ぶと 401 で抜けるが、原因が分かりにくいので生成時に弾く。
         if not (self._account_id or "").strip():
             raise ValueError("oanda account id is required (set OANDA_ACCOUNT_ID in .env)")
