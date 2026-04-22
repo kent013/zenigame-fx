@@ -11,6 +11,7 @@
 | T005 | OANDA CFD instrument 疎通試験 | data-ingest | Medium | 2026-04-22 13:05 | 1ea6a6b |
 | T006 | 統計検定最小セット実装 (DSR/fold sign/block bootstrap) | statistics | Critical | 2026-04-22 14:10 JST | e2434c0 |
 | T007 | Clauseベース Genome 構造に再構築 | ga-architecture | Critical | 2026-04-22 15:30 JST | 22ddf7da0baa2e3ff61e06e6232c8d194d3efaa7 |
+| T008 | GA operators/random_gen/runner を Clause 対応に再実装 | ga-architecture | Critical | 2026-04-22 17:11 | bf976a1 |
 
 ## Obsoleted
 
