@@ -39,6 +39,8 @@ def test_fills_at_next_bar_open_not_current() -> None:
         end=datetime(2026, 4, 2, tzinfo=UTC),
         initial_cash=Decimal("1000000"),
         leverage=10,
+        # T009: 単一日 bars でもイントラデイ絶対制約を満たすため session_close_utc_hours を付与
+        session_close_utc_hours=frozenset({23}),
     )
     result = run_backtest(bars, strat, broker, config)
 
@@ -87,6 +89,8 @@ def test_end_of_run_closes_remaining_position() -> None:
         end=datetime(2026, 4, 2, tzinfo=UTC),
         initial_cash=Decimal("1000000"),
         leverage=10,
+        # T009: 単一日 bars でもイントラデイ絶対制約を満たすため session_close_utc_hours を付与
+        session_close_utc_hours=frozenset({23}),
     )
     result = run_backtest(bars, strat, broker, config)
     assert len(broker.open_positions) == 0

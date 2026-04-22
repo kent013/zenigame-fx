@@ -13,6 +13,12 @@ Stage A / B / C ゲートの構造・期間・通過条件・ペナルティ運�
 
 数値（窓長・通過率・閾値）は SSOT 参照。期間延長は強い根拠なしに行わない（禁止事項 #1）。
 
+**backtest 前提 (T009 以降)**: Stage A / B / C の全 評価フローは `src/backtest/engine.py`
+の Clause DslStrategy + `BacktestConfig` (max_spread_bps / holding_cost_per_day_bps /
+session_close_utc_hours / bar_minutes) を前提とする。spread フィルタ / holding cost /
+session close は engine 不変条件として fitness に反映される。
+詳細は [clause-architecture.md](clause-architecture.md#backtest-統合-t009-完了時点) を参照。
+
 ## 用語リンク
 
 本ドキュメントで使用する用語: [Stage A](terminology.md#stage-a), [Stage B](terminology.md#stage-b), [Stage C](terminology.md#stage-c), [Walk-Forward](terminology.md#walk-forward), [IS / OOS](terminology.md#is-oos), [DSR](terminology.md#dsr), [(ii-lite)](terminology.md#ii-lite), [TC](terminology.md#tc)
