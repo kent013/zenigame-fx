@@ -52,6 +52,122 @@ composite = Σ(cw_k × clause_score_k) / Σ|cw_k|
 - session close / time_stop による min/max 保有時間
 - spread / slippage / swap を fitness に反映（絶対制約）
 
+## 実装関数シグネチャ (T007 完了時点)
+
+`src/dsl/` に以下の pure function / dataclass / Protocol を配置する。
+
+### dataclass 群 (`src/dsl/genome.py`)
+
+```python
+@dataclass(frozen=True)
+class SignalConfig:
+    name: str                                       # primitive ID
+    weight: float                                   # directional [0.1, 2.0] / gate [-2.0, 2.0]
+    params: dict[str, float | int] = field(default_factory=dict)
+    # __post_init__ で defensive copy
+
+@dataclass(frozen=True)
+class ClauseConfig:
+    directional: tuple[SignalConfig, ...]
+    local_gate: tuple[SignalConfig, ...]
+    weight: float
+
+@dataclass(frozen=True)
+class PositionConfig:
+    entry_threshold: float   # θ_on
+    exit_threshold: float    # θ_off（θ_on > θ_off）
+    max_pos: int
+    time_stop_min: int       # 0 で無効
+
+@dataclass(frozen=True)
+class RiskConfig:
+    stop_atr: float
+    take_atr: float
+
+@dataclass(frozen=True)
+class Genome:
+    name: str
+    units: int
+    clauses: tuple[ClauseConfig, ...]   # 1-3 clause
+    position: PositionConfig
+    risk: RiskConfig
+```
+
+### composite 関数 (`src/dsl/composite.py`)
+
+```python
+def compute_dir_score(signals, values) -> float        # Σ(w×x) / Σ|w|、空/denom=0 → 0.0
+def compute_gate(signals, values) -> float             # Π gate、空 → 1.0
+def compute_clause_score(clause, values) -> float      # dir_score × gate
+def compute_composite(clauses, values_per_clause) -> float
+    # Σ(cw × cs) / Σ|cw|、len 不一致・空 → ValueError、denom=0 → 0.0
+```
+
+### Strategy と PrimitiveEvaluator (`src/dsl/strategy.py`)
+
+```python
+class PrimitiveEvaluator(Protocol):
+    def evaluate(self, bars: list[PriceBar], idx: int, signal: SignalConfig) -> float: ...
+
+class DslStrategy:
+    def __init__(
+        self, genome: Genome, evaluator: PrimitiveEvaluator, *,
+        warmup_bars: int = 0, session_close_utc: time | None = None,
+    ) -> None: ...
+    def warmup_bars(self) -> int: ...
+    def on_bar(self, bar: PriceBar, snapshot: PortfolioSnapshot) -> list[OrderSignal]: ...
+```
+
+ヒステリシス動作:
+- 無保有: `composite >= θ_on` → `open_long` / `-composite >= θ_on` → `open_short`
+- long 保有: `composite < θ_off` → `close_position`
+- short 保有: `-composite < θ_off` → `close_position`
+- `time_stop_min > 0` かつ経過時間 ≥ `time_stop_min` → 強制 close
+- `session_close_utc is not None` かつ `bar.bar_time.time() >= session_close_utc` → 強制 close
+
+**イントラデイ絶対制約の不変条件**: `session_close_utc is not None` **または** backtest engine 側の
+EOD 強制クローズ（`is_eod → close_all(reason="eod")`）のどちらかが必ず有効であること。
+
+### enforce_consistency (`src/dsl/enforce.py`)
+
+```python
+def enforce_consistency(genome: Genome) -> Genome:
+    # directional: abs + clip [0.1, 2.0]、同 name dedupe（後勝ち）
+    # local_gate: clip [-2.0, 2.0]、同 name dedupe、最大 1 本（|weight| 最大）
+    # directional 空 Clause は除去、全 Clause 消失で ValueError
+    # len(clauses) > 3 → |weight| Top 3 に絞る
+    # PositionConfig: entry > exit（違反時 swap、等号時 epsilon 分離）、max_pos ≥ 1、time_stop_min ≥ 0
+    # RiskConfig: stop_atr / take_atr ≥ 1e-6
+    # 全 weight / threshold / ATR に NaN/inf があれば ValueError
+```
+
+有限実数入力で冪等（`f(f(x)) == f(x)`）。
+
+### serialize (`src/dsl/serialize.py`)
+
+`genome_to_dict(g: Genome) -> dict[str, Any]` / `genome_from_dict(d) -> Genome`。JSON round-trip 保証。
+
+## spread / swap 受け渡し契約 (後続 clause-backtest-integration TODO)
+
+```python
+@dataclass(frozen=True)
+class BacktestConfig:  # 既存 + 追加予定フィールド
+    instrument: str
+    start: datetime
+    end: datetime
+    initial_cash: Decimal
+    leverage: int
+    # 以下は clause-backtest-integration TODO で追加
+    # max_spread_bps: Decimal | None = None
+    # swap_cost_per_day_bps: Decimal = Decimal(0)
+```
+
+- 単位: 両方 bps（basis point、1/10000）
+- 適用時点:
+  - `max_spread_bps`: `MockBroker.submit` 時点で spread_bps 計算、超過なら reject（約定前フィルタ）
+  - `swap_cost_per_day_bps`: `mark_to_market` ごとに日次按分で equity 控除（fitness 反映）
+- 4 段伝搬: `config/alpha_factory/default.yaml` → `GaConfig` → `BacktestConfig` → `MockBroker`
+
 ## SSOT 参照
 
 | 項目 | 参照キーパス（config/alpha_factory/default.yaml） |
@@ -71,4 +187,5 @@ composite = Σ(cw_k × clause_score_k) / Σ|cw_k|
 
 ## 関連 TODO
 
-- 未着手（Phase 2C: `src/dsl/` 再構築）
+- **T007 (Closed)**: Clause ベース Genome 構造に再構築（本ドキュメントの実装関数シグネチャ節）
+- 未着手: clause-ga-operators, clause-backtest-integration, primitives-registry
