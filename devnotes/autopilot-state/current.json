@@ -1,6 +1,6 @@
 {
   "started_at": "20260421-2242",
-  "last_updated_at": "20260422-1156",
+  "last_updated_at": "20260422-1832",
   "mode": "repeat",
   "max_cycles": 200,
   "audit_interval": 5,
@@ -16,68 +16,45 @@
       "content": "Codex 復活 (scripts/codex 経由)"
     },
     {
-      "added_at": "20260422-0945",
-      "content": "1 cycle ≈ 60-80 min。doc 系は Codex round を 2 で打ち切り、コード系は APPROVED まで合議"
-    },
-    {
-      "added_at": "20260422-1037",
-      "content": "サイクル 3 で 6 個ヘルパースクリプトの未実装を発見（snapshot_manager.py / cache_manager.py / cleanup_claude_sessions.py / extract_batch_metrics.py / compare_batch_runs.py / fx-calibrate-gate / fx-run-alpha-factory / fx-run-report skill）"
-    },
-    {
       "added_at": "20260422-1156",
-      "content": "サイクル 4 で FRED ingest 完了。3,905 rows DB 投入済 (VIX/DTWEXBGS/DGS10/DGS2/T10YIE × 3年)。次サイクル 5 は audit-interval (cycle 5 % 5 = 0) のため実装後に Phase 4A 実行"
+      "content": "サイクル 4 で FRED ingest 完了。3,905 rows 投入"
+    },
+    {
+      "added_at": "20260422-1310",
+      "content": "サイクル 5 audit 完了。2 既存 fail → c291a8e で別途修正済み (296 passed)"
+    },
+    {
+      "added_at": "20260422-1832",
+      "content": "サイクル 9 (T009 clause-backtest-integration) 起動 BG agent が **Anthropic API rate limit** に到達 (You've hit your limit · resets 9pm Asia/Tokyo)。worktree todo/T009 は実質作業ゼロのため削除済。21:00 以降に --resume で再開"
     }
   ],
-  "current_cycle": 5,
-  "current_phase": "phase-0",
-  "status": "running",
+  "current_cycle": 9,
+  "current_phase": "phase-1-aborted",
+  "status": "interrupted",
+  "interrupted_reason": "Anthropic API rate limit (BG agent), resets 21:00 JST",
   "cycles": [
+    {"cycle": 1, "phase_completed": "phase-4", "designed_topic": "archive-drop-skills", "merge_commit": "53bbe9a", "added_todo_ids": ["T001"]},
+    {"cycle": 2, "phase_completed": "phase-4", "designed_topic": "docs-alpha-factory-skeleton", "merge_commit": "700132a", "added_todo_ids": ["T002"]},
+    {"cycle": 3, "phase_completed": "phase-4", "designed_topic": "port-rename-only-skills", "merge_commit": "3b5eb5f", "added_todo_ids": ["T003"]},
+    {"cycle": 4, "phase_completed": "phase-4", "designed_topic": "fred-ingest-implementation", "merge_commit": "bef7e41", "added_todo_ids": ["T004"]},
+    {"cycle": 5, "phase_completed": "phase-4a", "designed_topic": "oanda-cfd-probe", "merge_commit": "da6ccbf", "added_todo_ids": ["T005"], "audit_report_path": "devnotes/20260422-1308-audit-cycle-5/audit-report.md"},
+    {"cycle": 6, "phase_completed": "phase-4", "designed_topic": "statistics-dsr-bootstrap", "merge_commit": "64cc189", "added_todo_ids": ["T006"]},
+    {"cycle": 7, "phase_completed": "phase-4", "designed_topic": "clause-genome-structure", "merge_commit": "aa0dfbb", "added_todo_ids": ["T007"]},
+    {"cycle": 8, "phase_completed": "phase-4", "designed_topic": "clause-ga-operators", "merge_commit": "269aae3", "added_todo_ids": ["T008"]},
     {
-      "cycle": 1,
-      "phase_completed": "phase-4",
-      "designed_topic": "archive-drop-skills",
-      "design_tmp_dir": "devnotes/20260421-2243-archive-drop-skills",
-      "added_todo_ids": ["T001"],
-      "implemented_todo_ids": ["T001"],
-      "merge_commit": "53bbe9a",
-      "started_at": "20260421-2242",
-      "ended_at": "20260422-0826"
-    },
-    {
-      "cycle": 2,
-      "phase_completed": "phase-4",
-      "designed_topic": "docs-alpha-factory-skeleton",
-      "design_tmp_dir": "devnotes/20260422-0845-docs-alpha-factory-skeleton",
-      "added_todo_ids": ["T002"],
-      "implemented_todo_ids": ["T002"],
-      "merge_commit": "700132a",
-      "started_at": "20260422-0827",
-      "ended_at": "20260422-0945"
-    },
-    {
-      "cycle": 3,
-      "phase_completed": "phase-4",
-      "designed_topic": "port-rename-only-skills",
-      "design_tmp_dir": "devnotes/20260422-0934-port-rename-only-skills",
-      "added_todo_ids": ["T003"],
-      "implemented_todo_ids": ["T003"],
-      "merge_commit": "3b5eb5f",
-      "design_codex_status": "conceptual: 3 ラウンド (Critical 解消後 Round 3 で進行); detailed: APPROVED Round 2",
-      "started_at": "20260422-0946",
-      "ended_at": "20260422-1037"
-    },
-    {
-      "cycle": 4,
-      "phase_completed": "phase-4",
-      "designed_topic": "fred-ingest-implementation",
-      "design_tmp_dir": "devnotes/20260422-1027-fred-ingest-implementation",
-      "added_todo_ids": ["T004"],
-      "implemented_todo_ids": ["T004"],
-      "merge_commit": "bef7e41",
-      "design_codex_status": "conceptual: APPROVED R3; detailed: APPROVED R3; impl: APPROVED R2 (全 APPROVED)",
-      "verified": "3,905 rows upserted (VIXCLS:781, DGS10:781, DGS2:781, DTWEXBGS:780, T10YIE:782)",
-      "started_at": "20260422-1038",
-      "ended_at": "20260422-1156"
+      "cycle": 9,
+      "phase_completed": "phase-1-aborted",
+      "designed_topic": "clause-backtest-integration",
+      "design_tmp_dir": null,
+      "added_todo_ids": [],
+      "implemented_todo_ids": [],
+      "merge_commit": null,
+      "error": "Anthropic API rate limit hit by BG agent (resets 21:00 JST)",
+      "started_at": "20260422-1759",
+      "ended_at": "20260422-1832"
     }
+  ],
+  "out_of_band_fixes": [
+    {"commit": "c291a8e", "message": "fix(api/oanda): preserve explicit empty-string args", "addressed": "audit-cycle-5 finding (2 pytest fails)"}
   ]
 }
