@@ -13,6 +13,7 @@
 | T007 | Clauseベース Genome 構造に再構築 | ga-architecture | Critical | 2026-04-22 15:30 JST | 22ddf7da0baa2e3ff61e06e6232c8d194d3efaa7 |
 | T008 | GA operators/random_gen/runner を Clause 対応に再実装 | ga-architecture | Critical | 2026-04-22 17:11 | bf976a1 |
 | T009 | backtest engine を Clause DslStrategy に対応 + fitness 復活 | ga-architecture | Critical | 2026-04-22 21:45 | 47c738d |
+| T010 | primitives registry + RegistryEvaluator 骨格 | primitives | High | 2026-04-22 22:34 | 25ba841872b2899fa22c7f8403ac8d2e1ea3a09a |
 
 ## Obsoleted
 
