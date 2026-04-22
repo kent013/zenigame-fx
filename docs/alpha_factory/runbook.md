@@ -123,6 +123,45 @@ docker exec zenigame-fx-db-1 psql -U zenigame_fx -d zenigame_fx -c \
 
 `macro_index_daily.date=D` の値は **`D+1` 以降の primitive 判断にのみ利用する**（T+1 利用原則）。当日 intraday 使用は look-ahead bias を生むため禁止。詳細は `devnotes/20260422-1027-fred-ingest-implementation/conceptual-design.md` §3。
 
+### 7. OANDA CFD instrument 疎通試験
+
+CFD 系 instrument (SPX500/WTI/XAU/XCU/JP225/USB10Y/USB02Y) が現 OANDA live 口座から candles 取得できるかを試験する。primitive P7-P12 実装の前提情報。
+
+#### 実行
+
+```bash
+uv run python scripts/oanda_cfd_probe.py
+```
+
+結果は `devnotes/20260422-1149-oanda-cfd-probe/probe-result.json` (生データ) と `probe-report.md` (整形レポート) に出力。stdout には各 instrument の verdict を逐次表示。
+
+#### Verdict 仕様
+
+| HTTP status | verdict | スクリプト挙動 |
+|---|---|---|
+| 200 | OK | 結果記録、続行 |
+| 401 | (fatal) | **即 abort, exit 1**, JSON/MD は書かない |
+| 403 | FORBIDDEN | 結果記録、続行 |
+| 404 | NOT_FOUND | 結果記録、続行 |
+| 5xx (retry 失敗後) / 429 / TransportError / その他 | OTHER | 結果記録、続行 |
+
+#### 観測 vs 解釈
+
+verdict は観測事実のみ。FORBIDDEN/NOT_FOUND は **現 live/account/environment での観測結果** であり、永久不可とは解釈しないこと。account 区分・契約状態・地域規制等の変更で結果が変わる可能性あり。
+
+#### 実測結果（2026-04-22）
+
+7 instrument すべて **verdict=OK, status=200, candle_count=10**（M1 candles 10 件取得成功）。仮説 H1「米国規制で 403」は **REJECT**、H2「全アクセス可能」が **CONFIRM**。
+
+参照: `devnotes/20260422-1149-oanda-cfd-probe/probe-report.md` / `probe-result.json`
+
+#### 失敗時
+
+| 失敗 | 対応 |
+|------|------|
+| Exit 1 + `[fatal] OANDA 401` | `OANDA_API_TOKEN` を `.env` で再確認 |
+| 全件 OTHER (5xx / TransportError) | 時間を置いて再実行 |
+
 ## SSOT 参照
 
 | 項目 | 参照キーパス（config/alpha_factory/default.yaml） |
