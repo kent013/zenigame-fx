@@ -119,7 +119,8 @@ def ensure_registered() -> None:
     """primitive モジュールの明示的 bootstrap 関数。
 
     T011 で `directional_generic` の 14 primitive、T012 で `modulator_generic`
-    の 6 primitive (M1-M6) を登録する（合計 20）。
+    の 6 primitive (M1-M6)、T013 で `pair_specific` の 12 primitive (P1-P12) を
+    登録する（合計 32）。
     冪等（複数回呼んでも 2 回目以降は既登録 spec は register_if_absent で skip）。
     並行呼び出しに対しては register_if_absent 内部 Lock で安全。
 
@@ -132,6 +133,10 @@ def ensure_registered() -> None:
     from src.alpha_factory.primitives.modulator_generic import (
         ensure_registered as _reg_modulator_generic,
     )
+    from src.alpha_factory.primitives.pair_specific import (
+        ensure_registered as _reg_pair_specific,
+    )
 
     _reg_directional_generic()
     _reg_modulator_generic()
+    _reg_pair_specific()

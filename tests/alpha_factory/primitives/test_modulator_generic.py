@@ -195,19 +195,20 @@ ALL_MODULATOR_SPECS = (M1_SPEC, M2_SPEC, M3_SPEC, M4_SPEC, M5_SPEC, M6_SPEC)
 
 
 class TestRegistryIntegration:
-    def test_all_20_registered(self):
+    def test_all_required_registered(self):
+        # T013 で P1-P12 も登録される (合計 32) ため、ID 集合で subset 検証
         specs = list_all()
-        assert len(specs) == 20
         ids = {s.id for s in specs}
-        expected = {f"F{i}" for i in range(1, 15)} | {
+        expected_subset = {f"F{i}" for i in range(1, 15)} | {
             f"M{i}" for i in range(1, 7)
         }
-        assert ids == expected
+        assert expected_subset.issubset(ids)
 
-    def test_modulator_count_is_6(self):
+    def test_modulator_count_includes_m1_to_m6(self):
+        # M1-M6 が MODULATOR として存在 (T013 で P6/P10/P11 も MODULATOR 追加)
         mods = list_by_category("MODULATOR")
-        assert len(mods) == 6
-        assert {s.id for s in mods} == {f"M{i}" for i in range(1, 7)}
+        mod_ids = {s.id for s in mods}
+        assert {f"M{i}" for i in range(1, 7)}.issubset(mod_ids)
 
     def test_each_modulator_retrievable(self):
         for i in range(1, 7):
@@ -219,10 +220,13 @@ class TestRegistryIntegration:
         assert all_specs() == ALL_MODULATOR_SPECS
         assert MODULATOR_SPECS == ALL_MODULATOR_SPECS
 
-    def test_all_generic_domain(self):
-        # F1-F14 + M1-M6 = 20 generic
-        assert len(list_by_domain("generic")) == 20
-        assert len(list_by_domain("pair_specific")) == 0
+    def test_generic_domain_contains_all_f_and_m(self):
+        # T013 で pair_specific 12 も追加されるが、generic は依然 F1-F14 + M1-M6
+        generic_ids = {s.id for s in list_by_domain("generic")}
+        expected_generic = {f"F{i}" for i in range(1, 15)} | {
+            f"M{i}" for i in range(1, 7)
+        }
+        assert generic_ids == expected_generic
 
 
 # ---------------------------------------------------------------------------

@@ -97,24 +97,72 @@ M3/M4/M5 の primitive は bar close 時点で観測される情報のみ参照�
 
 ### ペア特化 (12)
 
-| # | 名称 | 対象ペア |
-|---|------|---------|
-| 21 | LondonNYOverlapMomentum | EUR_USD |
-| 22 | IntradayRangeFade | EUR_USD |
-| 23 | TokyoOpenReversal | USD_JPY |
-| 24 | YenFixingBias | USD_JPY |
-| 25 | CrossPairTriangulation | EUR_JPY |
-| 26 | EuroHourVolRegime | EUR_JPY |
-| 27 | RiskOnOffProxy | AUD_JPY |
-| 28 | CommodityFlowBias | AUD_JPY |
-| 29 | OilPriceInverseFlow | USD_CAD |
-| 30 | NADataSurpriseGate | USD_CAD |
-| 31 | EmergingMarketStressGate | USD_ZAR |
-| 32 | GoldCorrelationBias | USD_ZAR |
+T013 で `src/alpha_factory/primitives/pair_specific.py` に実装・登録済。
+`domain="pair_specific"`、設計の起点は特定ペアだが他ペアでも crash しない（symbol-agnostic 計算）。
+出力域: directional は `[-1, +1]`、MODULATOR (P6/P10/P11) は `[0, 1]`。
+
+| ID | 名称 | 起点ペア | Category | 数式概要 | 主要パラメータ | 必要 aux データ |
+|----|------|---------|----------|----------|----------------|----------------|
+| P1 | LondonNYOverlapMomentum | EUR_USD | TREND_FOLLOW | UTC 13-17 帯内で `tanh(return_n / scale)` (帯外 0) | n[2,24], scale[1e-4,0.02] | なし |
+| P2 | IntradayRangeFade | EUR_USD | MEAN_REVERT | アジア時間 (0-7 UTC) range 外 NY (12-21 UTC) close で reversion | atr_n[7,28] | なし |
+| P3 | TokyoOpenReversal | USD_JPY | MEAN_REVERT | UTC 0-2 帯内で `-tanh(return_n / scale)` | n[1,12], scale[1e-4,0.02] | なし |
+| P4 | YenFixingBias | USD_JPY | TREND_FOLLOW | 仲値 (00:55 UTC) 前 + / 後 - の bar_time 距離 sigmoid | window_min[5,120], scale_min[1,30] | なし |
+| P5 | CrossPairTriangulation | EUR_JPY | MEAN_REVERT | `-tanh(zscore(EURJPY - EURUSD*USDJPY, n) / scale)` | z_n[20,200], scale[0.5,5] | aux_pair_bars[EUR_USD, USD_JPY] |
+| P6 | EuroHourVolRegime | EUR_JPY | MODULATOR | UTC 7-15 帯内で `sigmoid((atr_rel - threshold)/scale)` | atr_n[7,28], threshold_rel[1e-4,0.02], scale_rel[1e-5,0.01] | なし |
+| P7 | RiskOnOffProxy | AUD_JPY | TREND_FOLLOW | `tanh(2*(sigmoid(vix_threshold-vix)-0.5) + tanh(spx_mom/0.01))` | spx_n[2,48], vix_threshold[10,40], vix_scale[1,15], vix_staleness_days[1,30], spx_staleness_bars[1,500] | vix_snapshot + macro.spx500 |
+| P8 | CommodityFlowBias | AUD_JPY | TREND_FOLLOW | `tanh(copper_mom / scale)` (copper or commodity_index fallback) | mom_n[2,48], scale[1e-3,0.1], staleness_bars[1,500] | macro.copper OR macro.commodity_index |
+| P9 | OilPriceInverseFlow | USD_CAD | TREND_FOLLOW | `-tanh(wti_mom / scale)` (USD_CAD は WTI と逆相関) | mom_n[2,48], scale[1e-3,0.1], staleness_bars[1,500] | macro.wti |
+| P10 | NADataProximityGate | USD_CAD | MODULATOR | NA セッション (12-21 UTC) かつ USD/CAD イベント proximity で `1 - sigmoid((window_min - |Δt|)/scale_min)`、外 1.0 | window_min[5,120], scale_min[1,30], min_impact{1,2,3} | event_snapshot |
+| P11 | EmergingMarketStressGate | USD_ZAR | MODULATOR | `1 - 0.5*(sigmoid((vix - threshold)/scale) + sigmoid(dxy_mom/0.005))` | dxy_n[2,120], vix_threshold[10,40], vix_scale[1,15], vix_staleness_days[1,30], dxy_staleness_bars[1,500] | vix_snapshot + macro.dxy |
+| P12 | GoldCorrelationBias | USD_ZAR | TREND_FOLLOW | `-tanh(gold_mom / scale)` (ZAR は金順相関 → USD_ZAR 逆相関) | mom_n[2,48], scale[1e-3,0.1], staleness_bars[1,500] | macro.gold |
+
+**look-ahead 回避**:
+- P1-P4, P6: bar_time UTC 固定時刻 + 過去 close / Wilder ATR のみ
+- P5: aux_pair_bars[k][i].bar_time == bars[i].bar_time の strict 一致を assert（misalign は ValueError）
+- P7, P11: VIX は `bisect_left(pubs, bar_time)` で publication < bar_time 厳守、SPX/DXY は loader 責務 (bar-aligned forward-fill)
+- P8, P9, P10, P12: aux_series は loader 責務 (forward-fill) + `_stale_mask` で staleness_bars 超過を NaN
+
+**3 状態の挙動**:
+
+| 状態 | 検出 | 戻り値 (default) | strict_snapshot_required=True |
+|------|------|-------------------|-------------------------------|
+| MISSING_KEY | 必要 aux key 自体が無い | RuntimeWarning + 全 bar safe default (directional=0.0, P10=1.0, P6/P11=0.5) | RuntimeError fail-fast |
+| STALE_VALUE | aux_series NaN / aux_pair_bars[i] None / VIX 古い publication | 当該 bar NaN (compute は neutral 値に吸収) | 同左 |
+| MISALIGNMENT | aux_pair_bars 長さ不一致 / bar_time 不一致、aux_series 長さ不一致 | ValueError fail-fast | 同左 |
+
+**EvaluationContext 拡張** (T013、後方互換):
+- `aux_pair_bars: Mapping[str, Sequence[PriceBar | None]] = field(default_factory=dict)` — cross-pair primitive (P5) 用
+- `strict_snapshot_required` の意味を「snapshot + aux 全般の per-call strict」に拡張（field 名は維持、後方互換）
+
+**PrimitiveSpec 拡張** (T013、後方互換):
+- `optional_data_groups: tuple[tuple[str, ...], ...] = ()` — OR-semantics 依存。P8 は `(("macro.copper", "macro.commodity_index"),)` で「銅 OR 商品 index のいずれか必須」を表現
+- `validate_primitive_spec` で各 key を `is_valid_required_data` でチェック、required_data との重複も拒否
+
+**RegistryEvaluator 拡張** (T013):
+- `aux_pair_bars` / `event_snapshot` / `vix_snapshot` を kwarg で保持し EvaluationContext に流す
+- `strict_aux_required: bool = False` + `selected_primitive_ids: Iterable[str] | None = None` — 起動時 preflight verify
+  - 各 selected primitive の `required_data` + `optional_data_groups` を union し、provider 有無を確認
+  - 不足あれば `RuntimeError("required aux missing for selected primitives: ...")` で fail-fast
+  - production GA runner はこの flag を True にして「選択 primitive が required_data 未充足のまま走る」failure を起動時に検出する規約
+- `_BARS_PROVIDED_KEYS = frozenset({"ohlc", "atr", "spread", "swap", "calendar.session"})` — bars 自体で provide される key 集合 (preflight でスキップ)
+
+**新規 macro key** (T013、`RequiredDataKey` Literal + `_REQUIRED_DATA_LITERALS` 同期更新):
+- `macro.copper` (P8 1 次)
+- `macro.commodity_index` (P8 fallback)
+- `macro.wti` (P9)
+- `macro.gold` (P12)
+
+**aux データ ingest (本 TODO 範囲外)**:
+- OANDA CFD pipeline (XAU_USD, WTICO_USD, SPX500_USD, XCU_USD) は別 TODO
+- FRED 既存 ingest (DTWEXBGS=DXY) を loader で bar-aligned forward-fill する別 TODO
+- 本 TODO ではテストでモック注入し primitive ロジックのみ検証
+
+**実行タイミング規約**: zenigame-fx の backtest は `signal at close → execute next bar open`。
+P1-P12 は bar close 時点で観測される情報のみ参照する。
 
 ### Registry の役割
 
-**T012 時点の状態**: `src/alpha_factory/primitives/_registry.py` の registry に directional generic 14 個（F1-F14）と modulator generic 6 個（M1-M6）の合計 20 個が登録済。pair_specific 12 個（P1-P12）は未登録。`_registry.ensure_registered()` は `directional_generic.ensure_registered()` と `modulator_generic.ensure_registered()` の両方を呼ぶ。
+**T013 時点の状態**: `src/alpha_factory/primitives/_registry.py` の registry に directional generic 14 個（F1-F14）+ modulator generic 6 個（M1-M6）+ pair_specific 12 個（P1-P12）の合計 32 個が登録済。`_registry.ensure_registered()` は `directional_generic.ensure_registered()` + `modulator_generic.ensure_registered()` + `pair_specific.ensure_registered()` の 3 つを呼ぶ。
 
 `directional_generic.category_counts()` は **本モジュール固有の内訳** (F1-F14 のみ) を返し、`"MODULATOR": 0` は「directional モジュール内に MODULATOR は無い」の意。registry 全体の category 別 count は `_registry.list_by_category(category)` を使うこと。
 
@@ -141,8 +189,9 @@ M3/M4/M5 の primitive は bar close 時点で観測される情報のみ参照�
 
 **required_data の canonical 語彙**:
 
-- Literal: `ohlc`, `atr`, `spread`, `swap`, `calendar.session`, `calendar.economic_event`, `macro.vix`, `macro.dxy`, `macro.dgs10`, `macro.dgs2`, `macro.t10yie`, `macro.spx500`
-- プレフィックス許容: `cross_pair.<pair>`（`<pair>` 部分は非空必須）
+- Literal (T010 時点): `ohlc`, `atr`, `spread`, `swap`, `calendar.session`, `calendar.economic_event`, `macro.vix`, `macro.dxy`, `macro.dgs10`, `macro.dgs2`, `macro.t10yie`, `macro.spx500`
+- Literal (T013 追加): `macro.copper`, `macro.commodity_index`, `macro.wti`, `macro.gold`
+- プレフィックス許容: `cross_pair.<pair>`（`<pair>` 部分は非空必須、P5 で使用）
 - 検証関数: `is_valid_required_data(key)`
 
 ## SSOT 参照
@@ -159,4 +208,8 @@ M3/M4/M5 の primitive は bar close 時点で観測される情報のみ参照�
 
 ## 関連 TODO
 
-- 未着手（Phase 2D: 32 プリミティブ並列実装）
+- T011 (merged): 14 directional generic primitives (F1-F14)
+- T012 (merged): 6 modulator generic primitives (M1-M6)
+- T013 (本 TODO): 12 pair_specific primitives (P1-P12) + EvaluationContext 拡張 + preflight verify
+- 別 TODO: aux_series ingest pipeline (OANDA CFD, FRED 系列の bar-aligned forward-fill loader)
+- 別 TODO: `RegistryEvaluator` を GA backtest entry に組み込む際の `selected_primitive_ids` 抽出

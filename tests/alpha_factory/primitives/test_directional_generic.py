@@ -148,16 +148,35 @@ class TestRegistryIntegration:
         assert directional_ids.issubset(ids)
 
     def test_category_counts(self):
-        assert len(list_by_category("TREND_FOLLOW")) == 6
-        assert len(list_by_category("MEAN_REVERT")) == 5
-        assert len(list_by_category("NEUTRAL")) == 3
-        # MODULATOR は T012 で 6 個登録
-        assert len(list_by_category("MODULATOR")) == 6
+        # T013 で pair_specific も追加: TREND_FOLLOW (6+P1+P4+P7+P8+P9+P12=12),
+        # MEAN_REVERT (5+P2+P3+P5=8), NEUTRAL (3), MODULATOR (6+P6+P10+P11=9)
+        # 既存 generic 内訳を IDs 集合で verify (count を hard-code しない)
+        f_trend = {"F1", "F2", "F3", "F4", "F5", "F6"}
+        trend_ids = {s.id for s in list_by_category("TREND_FOLLOW")}
+        assert f_trend.issubset(trend_ids)
+        f_revert = {"F7", "F8", "F9", "F10", "F11"}
+        revert_ids = {s.id for s in list_by_category("MEAN_REVERT")}
+        assert f_revert.issubset(revert_ids)
+        f_neutral = {"F12", "F13", "F14"}
+        neutral_ids = {s.id for s in list_by_category("NEUTRAL")}
+        assert f_neutral == neutral_ids  # NEUTRAL は F のみ
+        m_mod = {f"M{i}" for i in range(1, 7)}
+        mod_ids = {s.id for s in list_by_category("MODULATOR")}
+        assert m_mod.issubset(mod_ids)
 
     def test_all_generic_domain(self):
-        # T012 で modulator 6 も generic に追加 → 合計 20
-        assert len(list_by_domain("generic")) == 20
-        assert len(list_by_domain("pair_specific")) == 0
+        # T012 で modulator 6 を generic に追加 → 合計 20
+        # T013 で pair_specific 12 を追加 (generic はそのまま)
+        generic_ids = {s.id for s in list_by_domain("generic")}
+        expected_generic = {f"F{i}" for i in range(1, 15)} | {
+            f"M{i}" for i in range(1, 7)
+        }
+        assert generic_ids == expected_generic
+        # pair_specific 件数は本テストでは緩く確認 (T013 後 12 個)
+        pair_specific_ids = {s.id for s in list_by_domain("pair_specific")}
+        # T013 後 P1-P12 が含まれる (本テストファイルは pair_specific 詳細を持たない)
+        for pid in (f"P{i}" for i in range(1, 13)):
+            assert pid in pair_specific_ids
 
     def test_each_id_retrievable(self):
         for i in range(1, 15):
