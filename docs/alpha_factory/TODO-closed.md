@@ -23,6 +23,7 @@
 | T017 | Swim lane manager (Tier 1 + Graduation) | swim-lane | Critical | 2026-04-23 23:20 | fa7824f |
 | T018 | run_ga.py 全面改修 (Phase 2 統合) | ga-architecture | Critical | 2026-04-23T23:58:00+09:00 | efaf365 |
 | T019 | MockBroker 非 JPY-quote 通貨ペア対応 | infrastructure | High | 2026-04-24 06:57 | 5cde521a6c55d131c08daa14992a398b6ef1d3d2 |
+| T020 | skill port: zenigame-fx-analyze-run | skill-port | High | 2026-04-24 07:45 | 819a3aa321e6fada603625b36c07c5b10ae8c1ca |
 
 ## Obsoleted
 
