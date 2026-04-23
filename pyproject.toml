@@ -16,6 +16,7 @@ dependencies = [
     "structlog",
     "pyyaml>=6.0.3",
     "numpy>=1.26",
+    "pyarrow>=24.0.0",
 ]
 
 [dependency-groups]

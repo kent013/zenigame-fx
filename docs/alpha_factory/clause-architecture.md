@@ -317,6 +317,55 @@ default.yaml` → `GaConfig` → `BacktestConfig` → `MockBroker` の 4 段伝�
 | ペナルティ α | Phase 2I で `ga.complexity_penalty.alpha_stage_a` / `alpha_stage_bc` 追加予定（未定義） |
 | ヒステリシス閾値 | Phase 2I で `ga.entry_threshold` / `exit_threshold` 追加予定（未定義） |
 
+## Genome Archive (T015)
+
+Stage A/B/C 評価結果を 1 個体 1 行として buffering し、Run 終了時に Parquet に
+flush する永続化基盤。詳細は [concepts/genome-archive-schema.md](concepts/genome-archive-schema.md)。
+
+### API 概観
+
+```python
+from src.alpha_factory.archive import GENOMES_SCHEMA, GenomeArchive
+
+archive = GenomeArchive(run_id="run_20260423_180000", run_number=1)
+archive.collect_stage_a(genome, lane_id, generation, stage_a_result,
+                          instrument="USD_JPY")
+archive.collect_stage_b(genome, lane_id, generation, stage_b_result)
+archive.collect_stage_c(genome, lane_id, generation, stage_c_result)
+archive.mark_graduated(lane_id, generation, individual_name)
+path = archive.flush()  # .cache/alpha_factory/runs/genomes_{run_id}.parquet
+```
+
+### 4 段伝搬契約
+
+`GENOMES_SCHEMA` (28 カラム) → `_create_row_template` (default 値) →
+`collect_stage_X` (StageResult.metrics["payload"] からマッピング) →
+`flush` (last-mile guard + pa.Table.from_pylist) のすべてでカラム抜けなし。
+
+import-time assert と flush 前 row-keys 検証で 2 段ガード。
+
+### 主キー / monotonic enrich
+
+- 主キー: `(lane_id, generation, individual_name)` 複合キー
+- 後段 stage 適用 → enrich 上書き
+- 同 stage 再 collect → 上書き + WARN
+- 前段 stage 逆流 → 無視 + WARN
+
+### Stage 別カラム射影
+
+| カラム | Stage A | Stage B | Stage C |
+|-------|--------|--------|--------|
+| stage_a_pass | ○ | - | - |
+| fitness_raw / fitness_pen | ○ | - | - |
+| stage_b_pass | - | ○ | - |
+| fold_sign_ratio | - | `fold_sign_ratio(oos_sharpes)` | - |
+| dsr | - | ○ (Phase 4 まで通常 None) | - |
+| sharpe | `sharpe_raw` | `is_full_sharpe` 上書き | `sharpe` 上書き |
+| total_pnl / trade_count | - / ○ | `is_full_*` で上書き | base 値で上書き |
+| stage_c_pass | - | - | ○ |
+| max_drawdown_pct | - | - | `max_drawdown_frac × 100` |
+| ii_lite_pass | - | - | `cross_pair.result.passed` (skipped → None) |
+
 ## 関連ドキュメント
 
 - [stage-gates.md](stage-gates.md) — α ペナルティの Stage 別運用
@@ -325,10 +374,12 @@ default.yaml` → `GaConfig` → `BacktestConfig` → `MockBroker` の 4 段伝�
 - [concepts/clause-genome-structure.md](concepts/clause-genome-structure.md)
 - [concepts/clause-ga-operators.md](concepts/clause-ga-operators.md)
 - [concepts/clause-backtest-integration.md](concepts/clause-backtest-integration.md)
+- [concepts/genome-archive-schema.md](concepts/genome-archive-schema.md) — GENOMES_SCHEMA 列意味論 SSOT
 
 ## 関連 TODO
 
 - **T007 (Closed)**: Clause ベース Genome 構造に再構築（本ドキュメントの実装関数シグネチャ節）
 - **T008 (Closed)**: Clause-aware GA operators（crossover/mutate/random_gen/runner + complexity penalty）
 - **T009 (Closed)**: backtest engine を Clause DslStrategy に対応 + spread/holding cost コスト反映 + fitness 復活
-- 未着手: primitives-registry (T010), stage-gate-implementation (T011)
+- **T015 (Closed)**: Genome archive Parquet 永続化基盤（GENOMES_SCHEMA + GenomeArchive）
+- 未着手: swim-lane-manager (T016), run-ga-full-rewrite (T017)

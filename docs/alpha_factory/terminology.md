@@ -246,6 +246,18 @@ zenigame-fx Alpha Factory の全ドキュメントから参照される横断用
 
 `<a id="reason-code"></a>` Reason Code — Stage 横断で canonical な失敗理由文字列（T014）。`StageResult.reason_codes: tuple[str, ...]` に格納し、archive / swim-lane の consumer が文字列パースせず set 比較できる設計。Stage 別の語彙は [stage-gates.md](stage-gates.md#reason-code-語彙-canonical) 参照。空タプルは通過を意味する。
 
+### Genome Archive
+
+`<a id="genome-archive"></a>` Genome Archive — `src/alpha_factory/archive.py::GenomeArchive`（T015）。1 Run 分の GA 個体評価結果（28 カラム）を buffering し、`flush()` で `.cache/alpha_factory/runs/genomes_{run_id}.parquet` に書き出す永続化基盤。主キーは複合キー `(lane_id, generation, individual_name)`。`collect_stage_a/b/c` で Stage 別に partial fill、`mark_graduated(lane_id, generation, individual_name)` で Tier 1 → Graduation lane 卒業 flag。
+
+### GENOMES_SCHEMA
+
+`<a id="genomes-schema"></a>` GENOMES_SCHEMA — `src/alpha_factory/archive.py` の `pyarrow.Schema`（T015）。28 カラム flat schema で、ネスト構造は `genome_json` (str) に集約。run_id / run_number / generation / individual_name / instrument / lane_id / parent_a / parent_b / genome_json / fitness_raw / fitness_pen / stage_a_pass / stage_b_pass / stage_c_pass / trade_count / total_pnl / sharpe / sortino / calmar / max_drawdown_pct / active_clause / n_nodes / bootstrap_ci_lower / bootstrap_ci_upper / fold_sign_ratio / dsr / ii_lite_pass / graduated。列意味論 SSOT: [concepts/genome-archive-schema.md](concepts/genome-archive-schema.md)。
+
+### Monotonic Enrich
+
+`<a id="monotonic-enrich"></a>` Monotonic Enrich — [Genome Archive](#genome-archive) の重複 collect ポリシー（T015）。各 row は内部に `_max_stage_seen ∈ {"", "A", "B", "C"}` を持ち、stage 順序（`{"":0,"A":1,"B":2,"C":3}`）に基づいて: 後段 stage 適用は enrich 上書き OK、同一 stage 再 collect は WARN + 上書き、前段 stage 逆流（B→A 等）は WARN + no-op。後段ほど rich な指標が prevail する設計。`_max_stage_seen` は in-memory 専用（Parquet には書かない）。
+
 ## SSOT 参照
 
 本ファイル自身が用語の SSOT。`config/alpha_factory/default.yaml` への参照は無い。
