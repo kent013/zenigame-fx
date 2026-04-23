@@ -85,6 +85,8 @@ def _stub_meta(pair: str = "EUR_JPY") -> InstrumentMeta:
         base_currency=base,
         quote_currency="JPY",
         margin_rate=Decimal("0.04"),
+        pip_size=Decimal("0.01"),
+        display_precision=3,
     )
 
 

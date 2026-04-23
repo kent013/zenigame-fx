@@ -55,10 +55,11 @@ __all__ = [
 # Anchor mapping (debate-synthesis.md SSOT)
 # ---------------------------------------------------------------------------
 
-# Phase 2 時点では MockBroker quote==JPY 制約のため、非 JPY-quote anchor を
-# 含む target は実 backtest 経由で構造的 pair_failure になる。本 TODO は
-# コードパス完全実装と monkeypatch ロジック検証に価値を絞り、実 backtest
-# による意味のある shadow 統計取得は MockBroker 拡張別 TODO に依存する。
+# T019 (2026-04-24) で MockBroker の home=JPY 固定制約が解消されたため、
+# 非 JPY-quote anchor を含む target (EUR_USD / USD_CAD 等) でも実 backtest
+# 経由で意味ある shadow 統計が取得可能になった (per-pair home モード)。
+# 詳細は docs/alpha_factory/cross-pair.md の「Phase 2 構造的制約 — T019
+# で解消」節 および devnotes/20260424-0517-mock-broker-multi-currency/ を参照。
 ANCHOR_PAIRS: Mapping[str, tuple[str, str]] = MappingProxyType(
     {
         "EUR_JPY": ("EUR_USD", "USD_JPY"),

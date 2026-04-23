@@ -233,6 +233,8 @@ def _meta_from_pair(pair: CurrencyPair) -> InstrumentMeta:
         base_currency=pair.base_currency,
         quote_currency=pair.quote_currency,
         margin_rate=pair.margin_rate,
+        pip_size=InstrumentMeta.default_pip_size_for_quote(pair.quote_currency),
+        display_precision=InstrumentMeta.default_display_precision_for_quote(pair.quote_currency),
     )
 
 

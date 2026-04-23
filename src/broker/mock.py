@@ -22,27 +22,96 @@ logger = structlog.get_logger(__name__)
 
 @dataclass(frozen=True)
 class InstrumentMeta:
-    """MockBroker が個別銘柄について把握しておくべき最小情報。"""
+    """MockBroker が個別銘柄について把握しておくべき最小情報。
+
+    SSOT 境界:
+        * ``src/domain/instrument.py::CurrencyPair`` は ingest / oanda 層 SSOT で、
+          pip_location / minimum_trade_size / maximum_order_units を含む
+          full pair catalog を保持する。
+        * ``InstrumentMeta`` は broker / backtest 層 SSOT で、P&L 計算・margin
+          検証・ログ表示に最低限必要な情報のみを保持する。
+          ``pip_size`` / ``display_precision`` は ``CurrencyPair`` から派生的に
+          コピーできる（``default_pip_size_for_quote`` / ``default_display_precision_for_quote``
+          ヘルパ参照）。
+
+    Phase 4 note (T019):
+        本 Phase では ``home=quote`` 前提の per-pair home モードで動作する
+        (``MockBroker(home_currency=None)`` で ``meta.quote_currency`` を自動採用)。
+        Phase 4 で ``home != quote`` をサポートする際は ``MockBroker`` 側で
+        ``fx_rate_provider`` (新規引数、未実装) を受け取り quote→home 換算を
+        実行する設計を予約済 (devnotes/20260424-0517-mock-broker-multi-currency)。
+
+    Attributes:
+        oanda_name: 銘柄 ID (例: ``USD_JPY``)。
+        base_currency: 基軸通貨 (例: ``USD``)。
+        quote_currency: 決済通貨 (例: ``JPY``)。
+        margin_rate: OANDA 業者側の最小マージン率。
+        pip_size: 1 pip の Decimal (OANDA 仕様: JPY-quote=0.01、USD-quote=0.0001)。
+            後方互換のため default は USD-quote の 0.0001。JPY-quote を扱う呼び出し
+            では明示指定または ``default_pip_size_for_quote`` 経由を推奨。
+        display_precision: 価格表示の小数点以下桁数 (JPY-quote=3、USD-quote=5)。
+    """
 
     oanda_name: str
     base_currency: str
     quote_currency: str
     margin_rate: Decimal  # OANDA 業者側の最小マージン率
+    pip_size: Decimal = Decimal("0.0001")
+    display_precision: int = 5
+
+    def __post_init__(self) -> None:
+        if self.pip_size <= 0:
+            raise ValueError(f"pip_size must be > 0: {self.pip_size}")
+        if self.display_precision < 0:
+            raise ValueError(f"display_precision must be >= 0: {self.display_precision}")
+
+    @staticmethod
+    def default_pip_size_for_quote(quote_currency: str) -> Decimal:
+        """quote currency から pip_size を自動決定する (OANDA 仕様)。"""
+        return Decimal("0.01") if quote_currency.upper() == "JPY" else Decimal("0.0001")
+
+    @staticmethod
+    def default_display_precision_for_quote(quote_currency: str) -> int:
+        """quote currency から display_precision を自動決定する (OANDA 仕様)。"""
+        return 3 if quote_currency.upper() == "JPY" else 5
 
 
 class MockBroker:
     def __init__(
         self,
         instrument_meta: InstrumentMeta,
-        home_currency: str = "JPY",
+        *,
+        home_currency: str | None = None,
         maintenance_margin_level_pct: Decimal = Decimal("100"),
     ) -> None:
-        if instrument_meta.quote_currency != home_currency:
+        """MockBroker を初期化する。
+
+        Args:
+            instrument_meta: 銘柄メタ情報。
+            home_currency: 口座 home 通貨。``None`` の場合は
+                ``instrument_meta.quote_currency`` を自動採用する (per-pair home モード、
+                T019 で導入)。明示指定した場合は ``meta.quote_currency`` と一致必須。
+                Phase 4 で ``fx_rate_provider`` を導入するまでは、不一致は
+                ``NotImplementedError`` を raise する (fail-fast)。
+            maintenance_margin_level_pct: マージンコール発動閾値 (%)。
+
+        Raises:
+            NotImplementedError: ``home_currency`` が明示指定され、かつ
+                ``meta.quote_currency`` と一致しない場合。Phase 4 で
+                ``fx_rate_provider`` を追加すれば解消される予定。
+        """
+        resolved_home = (
+            home_currency if home_currency is not None
+            else instrument_meta.quote_currency
+        )
+        if instrument_meta.quote_currency != resolved_home:
             raise NotImplementedError(
-                f"MVP supports only quote==home. got quote={instrument_meta.quote_currency}, home={home_currency}"
+                f"MockBroker phase 2 requires quote==home. "
+                f"got quote={instrument_meta.quote_currency}, home={resolved_home}. "
+                "Phase 4 will introduce fx_rate_provider for quote-to-home conversion."
             )
         self._meta = instrument_meta
-        self._home = home_currency
+        self._home = resolved_home
         self._maintenance_pct = maintenance_margin_level_pct
         self._cash = Decimal(0)
         self._positions: dict[int, Position] = {}

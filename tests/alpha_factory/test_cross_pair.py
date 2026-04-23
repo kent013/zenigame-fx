@@ -74,8 +74,10 @@ def _dummy_meta(pair: str) -> InstrumentMeta:
     return InstrumentMeta(
         oanda_name=pair,
         base_currency=base,
-        quote_currency="JPY",  # MockBroker 制約のため統一
+        quote_currency="JPY",  # 既存テストは JPY 固定で monkeypatch ロジック検証のみ
         margin_rate=Decimal("0.04"),
+        pip_size=Decimal("0.01"),
+        display_precision=3,
     )
 
 
@@ -779,6 +781,8 @@ def _make_stage_c_inputs() -> tuple[
         base_currency="USD",
         quote_currency="JPY",
         margin_rate=Decimal("0.04"),
+        pip_size=Decimal("0.01"),
+        display_precision=3,
     )
     bt_config = BacktestConfig(
         instrument="USD_JPY",

@@ -134,17 +134,32 @@ skip_reason / mode
 
 Stage C hook (`stage_gate.py::evaluate_stage_c`) は cross-pair evaluator 例外を try/except で隔離し、`payload.cross_pair.skipped=True` + `payload.cross_pair.error_type` (audit) を記録する。archive `_extract_cross_pair` は `payload.cross_pair.skipped` を見て `ii_lite_pass=None` を返す契約。
 
-**Phase 2 構造的制約**: `MockBroker` は `quote != JPY` で `NotImplementedError` を投げるため、すべての ANCHOR_PAIRS 定義 (6 target) で少なくとも 1 つの非 JPY-quote anchor が含まれる現状では実 backtest 経由での意味のある shadow 統計は取れない。`evaluate_cross_pair` の集約・判定ロジックは monkeypatch ベース test で検証済。意味のある実 backtest shadow 統計は **MockBroker 非 JPY-quote 対応 (別 TODO)** に依存する。
+**Phase 2 構造的制約 — 非 JPY-quote の backtest 完走制約は T019 で解消**:
+
+旧実装では `MockBroker` が `quote != JPY` (home=JPY 固定) で `NotImplementedError` を raise していたため、ANCHOR_PAIRS 定義 6 target すべてで少なくとも 1 つの非 JPY-quote anchor が含まれる現状では、実 backtest 経由での意味ある shadow 統計が取れなかった。T019 で MockBroker に **per-pair home モード** (default: `home_currency=meta.quote_currency`) を導入し、非 JPY-quote ペアでも backtest が完走するようになった。これにより cross-pair shadow は全 6 target で意味ある `mean_sharpe / std_sharpe / pair_failure` 統計を archive に残せる。
+
+**T019 で解消した範囲（限定）**:
+- 非 JPY-quote ペア (EUR_USD / USD_CAD 等) の backtest 完走制約
+- cross-pair shadow の構造的 pair_failure:NotImplementedError
+
+**T019 で解消されない範囲（Phase 4 TODO）**:
+- `home != quote` (例: JPY 口座で EUR_USD を JPY 建てで評価) の真の quote→home 換算
+- 複数通貨建て cash の統合会計（graduation lane マルチ pair 統合口座など）
+
+**Sharpe 集約の解釈**: per-pair home Sharpe 集約であり、各 pair は独自の home currency (= quote currency) 建ての equity curve で評価される。Sharpe は無次元 (return mean / return std) で scale 不変性が保証される (T019 の `tests/broker/test_mock_multi_currency.py` で `initial_cash × units` 同時 10 倍スケール下の Sharpe 不変性 + equity returns 要素一致を直接検証済)。したがって pair 間で home 通貨が異なっても集約は統計的に健全。
+
+Phase 4 の真の quote→home 換算が必要になった場合は、MockBroker に `fx_rate_provider` 引数を追加する設計を予約済 (devnotes/20260424-0517-mock-broker-multi-currency/conceptual-design.md §8)。
 
 ## 関連 TODO
 
 - T016 実装済: `src/alpha_factory/cross_pair.py` 新設、Stage C hook 修正、config 追加
+- T019 実装済 (2026-04-24): MockBroker 非 JPY-quote 対応 (per-pair home モード、`InstrumentMeta` に pip_size / display_precision 追加)
 - 後続 (別 TODO):
-  - **MockBroker 非 JPY-quote 対応** (Phase 2 で構造的 pair_failure を解消、優先度 High)
   - swim-lane / run-ga 統合 (多通貨 bars/meta ロード経路 + provider bind)
   - archive スキーマ拡張 (`cross_pair_error_type` / `pair_failure_count` 列追加)
   - `liquidity_weighted_mean` 実装 (流動性データソース確定後)
   - Phase 4 hard 化 (`mode='hard'` で Stage C `passed` への AND 合成)
+  - Phase 4 quote→home 換算 (MockBroker に `fx_rate_provider` 引数追加)
   - config YAML loader (StageGateConfig と一括で)
   - migration-triggers.md の shadow → hard 切替条件具体化
   - OANDA CFD ingest pipeline 拡張 (T005 実測結果に基づく別 TODO)
