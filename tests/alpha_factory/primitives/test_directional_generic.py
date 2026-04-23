@@ -139,19 +139,24 @@ ALL_SPECS = (
 
 
 class TestRegistryIntegration:
-    def test_all_14_registered(self):
+    def test_all_14_directional_registered(self):
+        # T012 で modulator (M1-M6) も同時登録される (合計 20)。
+        # 本テストでは directional 14 が含まれることのみ verify。
         specs = list_all()
-        assert len(specs) == 14
         ids = {s.id for s in specs}
-        assert ids == {f"F{i}" for i in range(1, 15)}
+        directional_ids = {f"F{i}" for i in range(1, 15)}
+        assert directional_ids.issubset(ids)
 
     def test_category_counts(self):
         assert len(list_by_category("TREND_FOLLOW")) == 6
         assert len(list_by_category("MEAN_REVERT")) == 5
         assert len(list_by_category("NEUTRAL")) == 3
+        # MODULATOR は T012 で 6 個登録
+        assert len(list_by_category("MODULATOR")) == 6
 
     def test_all_generic_domain(self):
-        assert len(list_by_domain("generic")) == 14
+        # T012 で modulator 6 も generic に追加 → 合計 20
+        assert len(list_by_domain("generic")) == 20
         assert len(list_by_domain("pair_specific")) == 0
 
     def test_each_id_retrievable(self):

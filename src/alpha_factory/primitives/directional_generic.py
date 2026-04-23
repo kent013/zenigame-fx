@@ -39,6 +39,7 @@ from src.alpha_factory.primitives._base import (
 )
 from src.alpha_factory.primitives._indicators import (
     _EPS,
+    _SESSION_RANGES_UTC,
     adx,
     atr,
     bollinger,
@@ -319,12 +320,8 @@ F5_SPEC = PrimitiveSpec(
 # ---------------------------------------------------------------------------
 
 
-# UTC 静的境界 (DST 無視)
-_SESSION_RANGES_UTC: dict[int, tuple[int, int]] = {
-    0: (0, 9),   # Tokyo
-    1: (7, 16),  # London
-    2: (12, 21), # NY
-}
+# UTC 静的境界 (DST 無視) は `_indicators._SESSION_RANGES_UTC` に集約
+# （T012 で M2 SessionGate と共有するため移動。本モジュールでは re-export のみ）。
 
 
 def _f6_compute_all(ctx: EvaluationContext) -> np.ndarray:
@@ -723,6 +720,16 @@ NEUTRAL_SPECS: tuple[PrimitiveSpec, ...] = (F12_SPEC, F13_SPEC, F14_SPEC)
 
 
 def category_counts() -> dict[PrimitiveCategory, int]:
+    """**directional_generic モジュール固有の内訳カウント** (F1-F14 のみ)。
+
+    本関数は registry 全体の集計ではなく、本モジュール (T011) で定義された
+    14 primitive の category 内訳を返す。"MODULATOR": 0 は「本モジュール内に
+    MODULATOR は無い」の意であり、registry 全体に MODULATOR が無い意味ではない。
+
+    Registry 全体の category 別 count を取りたい場合は
+    `_registry.list_by_category(category)` を使うこと（T012 modulator_generic
+    で M1-M6 が登録される）。
+    """
     return {
         "TREND_FOLLOW": len(TREND_FOLLOW_SPECS),
         "MEAN_REVERT": len(MEAN_REVERT_SPECS),
