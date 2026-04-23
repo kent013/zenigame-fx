@@ -63,6 +63,27 @@ stage_gate:
     spread_stress_min_sharpe: 0.0
     # live_criteria は上記 SSOT セクションを参照 (重複定義しない)
 
+# Cross-pair (ii-lite) evaluation 設定 (T016)
+# - 実装: src/alpha_factory/cross_pair.py
+# - 概念: docs/alpha_factory/cross-pair.md
+# - mode='shadow' (Phase 2 default): Stage C passed には影響させず archive 記録のみ
+# - mode='hard'   (Phase 4 で切替): 通過基準を Stage C の AND に組み込む (別 TODO)
+# YAML loader は別 TODO (run-ga 統合) で実装。本セクションは SSOT としてのみ。
+cross_pair:
+  mode: shadow
+  aggregator_lambda: 0.5            # F = mean - λ × std
+  pass_criteria:
+    sharpe_target_cross_ratio_min: 0.8   # Phase 2 では provider 注入時のみ有効
+    mean_sharpe_cross_min: 0.15
+    min_sharpe_cross_min: -0.20
+  anchors:
+    EUR_JPY: [EUR_USD, USD_JPY]
+    USD_JPY: [USD_CAD, EUR_JPY]
+    EUR_USD: [EUR_JPY, USD_CAD]
+    AUD_JPY: [USD_JPY, EUR_USD]
+    USD_CAD: [USD_JPY, EUR_USD]
+    USD_ZAR: [USD_CAD, USD_JPY]
+
 # 改善サイクル設定
 improve_cycle:
   # repeat mode 1 サイクルあたりの最大経過時間（秒）。超過したら次サイクルへ

@@ -50,15 +50,15 @@ class CrossPairResult:
 
 ### Shadow モード動作
 
-- Stage C 通過後に必ず実行
-- `ii_lite_pass` カラムに記録、但し Stage C 判定には影響しない
-- archive に shadow_pass_rate / 予測力（shadow 通過群の事後 OOS）を集計
+- **Phase 2 (T016 で実装済)**: Stage C **実行個体すべてを観測対象**として cross-pair 評価し、`ii_lite_pass` カラムに記録。Stage C 判定には影響しない (shadow only)。後段分析で `stage_c_pass=True` 個体のみに絞った分布集計が可能。
+- **Phase 4 (別 TODO)**: `mode='hard'` で Stage C 通過判定の AND 合成として動作 (= 「Stage C 通過後に必ず通過判定として参照される」状態)。
+- archive に shadow_pass_rate / 予測力（shadow 通過群の事後 OOS）を集計するのは集計スクリプト側で別途実装。
 
 ## 実装範囲
 
-- cross_pair.py 新設
-- archive 書き込み統合
-- config に `ii_lite:` セクション追加（`mode: shadow`、アンカー定義、通過基準）
+- cross_pair.py 新設 (T016 実装済)
+- Stage C hook に例外隔離 + skipped 伝搬を追加 (T016 実装済)
+- config `cross_pair:` セクション追加（`mode: shadow`、アンカー定義、通過基準）。命名は `cross_pair` で SSOT 統一 (旧名 `ii_lite` の archive カラム `ii_lite_pass` のみ既存互換のため維持)。
 
 ## テスト
 

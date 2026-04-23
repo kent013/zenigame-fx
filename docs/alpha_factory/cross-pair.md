@@ -2,7 +2,7 @@
 
 ## 目的
 
-(ii-lite) 評価の構造（target + アンカー 2 ペア、集約関数、通過基準、shadow / hard モード）を一箇所に集約する。実装詳細は `concepts/cross-pair-evaluation-shadow.md` および後続 TODO で扱う。
+(ii-lite) 評価の構造（target + アンカー 2 ペア、集約関数、通過基準、shadow / hard モード）を一箇所に集約する。実装は `src/alpha_factory/cross_pair.py` (T016 実装済)。
 
 ## スコープ
 
@@ -53,18 +53,28 @@ F = mean(Sharpe_i) - λ × std(Sharpe_i)
 
 ### アンカー定義の構造
 
-target ペアごとに 2 アンカーを**固定**割当（実行時に変動させない）。固定マッピング表は `default.yaml` の `ii_lite.anchors` キー（Phase 2I で追加予定）に保持する。
+target ペアごとに 2 アンカーを**固定**割当（実行時に変動させない）。固定マッピング表は **`src/alpha_factory/cross_pair.py::ANCHOR_PAIRS`** (Python SSOT) に保持し、`default.yaml` の `cross_pair.anchors` で再掲される (T016 で追加)。
+
+### Phase 2 / Phase 4 の通過基準段階導入
+
+| Phase | 通過基準 | 通過基準の合成 |
+|-------|----------|----------------|
+| Phase 2 (shadow, T016 実装) | mean / min の **2 条件 AND** | provider 未注入のため ratio 判定は skip。Stage C `passed` には影響しない (shadow) |
+| Phase 4 (hard, 別 TODO) | sharpe_ratio / mean / min の **3 条件 AND** | provider が結束されて ratio が opt-in、Stage C `passed` への AND 合成 |
+
+- `pass_criteria.all` は None を除外して AND を取る (= 全 None なら False)
+- pair_failure (backtest 例外 / metric_unavailable) があれば fail-fast で `passed=False` (集約値が信頼できないため)
 
 ## SSOT 参照
 
-| 項目 | 参照キーパス（config/alpha_factory/default.yaml） |
-|------|--------------------------------------------------|
-| 集約関数の λ | Phase 2I で `ii_lite.aggregation.lambda` 追加予定（未定義） |
-| 通過基準 比率閾値 | Phase 2I で `ii_lite.pass_criteria.sharpe_target_cross_ratio_min` 追加予定（未定義） |
-| 通過基準 平均閾値 | Phase 2I で `ii_lite.pass_criteria.mean_sharpe_cross_min` 追加予定（未定義） |
-| 通過基準 最小閾値 | Phase 2I で `ii_lite.pass_criteria.min_sharpe_cross_min` 追加予定（未定義） |
-| アンカーマッピング | Phase 2I で `ii_lite.anchors.<target>` 追加予定（未定義） |
-| モード | Phase 2I で `ii_lite.mode`（shadow / hard）追加予定（未定義） |
+| 項目 | 参照キーパス（config/alpha_factory/default.yaml） | 実装 |
+|------|--------------------------------------------------|------|
+| 集約関数の λ | `cross_pair.aggregator_lambda` (default 0.5) | `CrossPairConfig.aggregator_lambda` |
+| 通過基準 比率閾値 | `cross_pair.pass_criteria.sharpe_target_cross_ratio_min` (default 0.8) | `CrossPairConfig.sharpe_target_cross_ratio_min` |
+| 通過基準 平均閾値 | `cross_pair.pass_criteria.mean_sharpe_cross_min` (default 0.15) | `CrossPairConfig.mean_sharpe_cross_min` |
+| 通過基準 最小閾値 | `cross_pair.pass_criteria.min_sharpe_cross_min` (default -0.20) | `CrossPairConfig.min_sharpe_cross_min` |
+| アンカーマッピング | `cross_pair.anchors.<target>` | `cross_pair.py::ANCHOR_PAIRS` |
+| モード | `cross_pair.mode` (shadow / hard) | `CrossPairConfig.mode` |
 
 ## 関連ドキュメント
 
@@ -105,7 +115,36 @@ verdict は観測事実のみ。account 区分・契約状態・地域規制等�
 
 実測レポート: `devnotes/20260422-1149-oanda-cfd-probe/probe-report.md`
 
+## 実装メモ (T016)
+
+`src/alpha_factory/cross_pair.py` の主要 API:
+
+- `evaluate_cross_pair(genome, target, pair_bars, pair_meta, backtest_config, primitive_evaluator, cross_pair_config, *, sharpe_target_single=None, anchor_pairs=None) -> CrossPairResult`
+- `StageCRunCrossPairEvaluator` — T014 `CrossPairEvaluator` Protocol 実装。Stage C `evaluate_stage_c(cross_pair_evaluator=...)` に注入する thin adapter。
+
+戻り値の型は T014 で定義済の `CrossPairResult` を再利用 (`stage_gate.py` の SSOT 維持)。詳細値は `metrics` 辞書に canonical key 集合で格納:
+
+```
+sharpe_per_pair / mean_sharpe / std_sharpe / min_sharpe /
+aggregate_fitness / aggregator_lambda / sharpe_target_single /
+sharpe_target_cross / sharpe_target_cross_ratio /
+liquidity_weighted_mean / pass_criteria / skipped /
+skip_reason / mode
+```
+
+Stage C hook (`stage_gate.py::evaluate_stage_c`) は cross-pair evaluator 例外を try/except で隔離し、`payload.cross_pair.skipped=True` + `payload.cross_pair.error_type` (audit) を記録する。archive `_extract_cross_pair` は `payload.cross_pair.skipped` を見て `ii_lite_pass=None` を返す契約。
+
+**Phase 2 構造的制約**: `MockBroker` は `quote != JPY` で `NotImplementedError` を投げるため、すべての ANCHOR_PAIRS 定義 (6 target) で少なくとも 1 つの非 JPY-quote anchor が含まれる現状では実 backtest 経由での意味のある shadow 統計は取れない。`evaluate_cross_pair` の集約・判定ロジックは monkeypatch ベース test で検証済。意味のある実 backtest shadow 統計は **MockBroker 非 JPY-quote 対応 (別 TODO)** に依存する。
+
 ## 関連 TODO
 
-- 未着手（Phase 2H: `src/alpha_factory/cross_pair.py`）
-- 後続: OANDA CFD ingest pipeline 拡張（T005 実測結果に基づく別 TODO 化）
+- T016 実装済: `src/alpha_factory/cross_pair.py` 新設、Stage C hook 修正、config 追加
+- 後続 (別 TODO):
+  - **MockBroker 非 JPY-quote 対応** (Phase 2 で構造的 pair_failure を解消、優先度 High)
+  - swim-lane / run-ga 統合 (多通貨 bars/meta ロード経路 + provider bind)
+  - archive スキーマ拡張 (`cross_pair_error_type` / `pair_failure_count` 列追加)
+  - `liquidity_weighted_mean` 実装 (流動性データソース確定後)
+  - Phase 4 hard 化 (`mode='hard'` で Stage C `passed` への AND 合成)
+  - config YAML loader (StageGateConfig と一括で)
+  - migration-triggers.md の shadow → hard 切替条件具体化
+  - OANDA CFD ingest pipeline 拡張 (T005 実測結果に基づく別 TODO)
