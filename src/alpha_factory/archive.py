@@ -516,6 +516,34 @@ class GenomeArchive:
         return pq.read_table(parquet_path)
 
     # ------------------------------------------------------------------
+    # Row snapshot (run_ga.py selection cache 用; T018)
+    # ------------------------------------------------------------------
+
+    def get_row_snapshot(
+        self, lane_id: str, generation: int, individual_name: str
+    ) -> Mapping[str, Any] | None:
+        """特定 row の snapshot dict (shallow copy) を返す。
+
+        run_ga.py が GA selection / best 選出 / live_criteria 判定のために
+        archive に蓄積された fitness_pen / stage pass / metrics を read-back
+        する用途 (T018)。未登録 key は ``None``、内部フィールド
+        ``_max_stage_seen`` は除外する。
+
+        Args:
+            lane_id: lane 識別子 (``tier1_{instrument}`` or GRADUATION_LANE_ID)。
+            generation: 世代番号。
+            individual_name: ``genome.name``。
+
+        Returns:
+            Schema 準拠の row dict の shallow copy、未登録なら ``None``。
+        """
+        key = (lane_id, generation, individual_name)
+        row = self._rows.get(key)
+        if row is None:
+            return None
+        return {k: v for k, v in row.items() if k != _MAX_STAGE_KEY}
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 

@@ -682,3 +682,36 @@ def test_schema_field_types() -> None:
     }
     for name, expected in type_map.items():
         assert GENOMES_SCHEMA.field(name).type == expected
+
+
+# ---------------------------------------------------------------------------
+# T018: get_row_snapshot
+# ---------------------------------------------------------------------------
+
+
+def test_get_row_snapshot_returns_none_for_unknown_key() -> None:
+    arc = GenomeArchive(run_id="run_x", run_number=1)
+    assert arc.get_row_snapshot("tier1_EUR_JPY", 0, "nope") is None
+
+
+def test_get_row_snapshot_returns_row_copy_excluding_internal_key() -> None:
+    arc = GenomeArchive(run_id="run_x", run_number=1)
+    g = _stub_genome("g0_i0")
+    arc.collect_stage_a(
+        g, "tier1_EUR_JPY", 0, _stage_a_result(),
+        instrument="EUR_JPY",
+        parent_a="parent_a",
+        parent_b="parent_b",
+    )
+    snap = arc.get_row_snapshot("tier1_EUR_JPY", 0, "g0_i0")
+    assert snap is not None
+    assert snap["individual_name"] == "g0_i0"
+    assert snap["parent_a"] == "parent_a"
+    assert snap["parent_b"] == "parent_b"
+    assert snap["stage_a_pass"] is True
+    assert _MAX_STAGE_KEY not in snap
+    # snap はコピーであり、mutate しても internal dict に影響しない
+    snap["stage_a_pass"] = False
+    snap2 = arc.get_row_snapshot("tier1_EUR_JPY", 0, "g0_i0")
+    assert snap2 is not None
+    assert snap2["stage_a_pass"] is True
