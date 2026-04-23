@@ -270,6 +270,26 @@ zenigame-fx Alpha Factory の全ドキュメントから参照される横断用
 
 `<a id="monotonic-enrich"></a>` Monotonic Enrich — [Genome Archive](#genome-archive) の重複 collect ポリシー（T015）。各 row は内部に `_max_stage_seen ∈ {"", "A", "B", "C"}` を持ち、stage 順序（`{"":0,"A":1,"B":2,"C":3}`）に基づいて: 後段 stage 適用は enrich 上書き OK、同一 stage 再 collect は WARN + 上書き、前段 stage 逆流（B→A 等）は WARN + no-op。後段ほど rich な指標が prevail する設計。`_max_stage_seen` は in-memory 専用（Parquet には書かない）。
 
+### SwimLane
+
+`<a id="swim-lane"></a>` SwimLane — `src/alpha_factory/swim_lane.py` の dataclass 基底（T017）。`lane_id: str` / `population: list[Genome]` / `generation_count: int` / `state: LaneStatus` の 4 フィールド。`LaneStatus = Literal["active", "converged", "paused"]`。`Tier1Lane` / `GraduationLane` が継承する。
+
+### Tier1Lane
+
+`<a id="tier1-lane"></a>` Tier1Lane — `src/alpha_factory/swim_lane.py` の dataclass（T017、SwimLane 継承）。1 通貨ペア固有 GA lane。`instrument: str` / `bars_60d` / `bars_18m` / `bars_holdout: list[PriceBar]` / `meta: InstrumentMeta | None` を持つ。`lane_id` は `"tier1_{instrument}"` 形式、`instrument` は `lane_id.removeprefix("tier1_")` と一致必須（LaneManager 構築時に validate）。`meta` は None 許容だが LaneManager 構築時に non-None を強制。
+
+### GraduationLane
+
+`<a id="graduation-lane"></a>` GraduationLane — `src/alpha_factory/swim_lane.py` の dataclass（T017、SwimLane 継承）。Universal alpha 探索 lane。`seed_graduates: list[Genome]` / `pair_bars: dict[str, list[PriceBar]]` / `pair_meta: dict[str, InstrumentMeta]` を持つ。`lane_id` は固定 `"graduation"` (= `GRADUATION_LANE_ID`)。Phase 2 では評価実体は未実装、cross-pair shadow の multi-pair データ SSOT と graduation 受け皿を担う。archive row の `instrument` カラム sentinel は `"multi"` (= `GRADUATION_INSTRUMENT_SENTINEL`)。
+
+### LaneManager
+
+`<a id="lane-manager"></a>` LaneManager — `src/alpha_factory/swim_lane.py` のクラス（T017）。Tier 1 × N + Graduation lane 1 つを一元管理する orchestrator。`__init__(tier1, graduation, stage_gate_config, cross_pair_config, primitive_evaluator, archive, backtest_config_factory, *, deferred_promotion=False)` で構築し、`run_generation(lane_id)` で 1 lane × 1 世代の Stage A/B/C + cross-pair shadow + graduation 判定を実行する。archive への 4 段伝搬（collect_stage_a/b/c + mark_graduated）と、`_promoted_keys` による二重昇格抑止（冪等性ガード）を担保する。`get_all_lanes()` は tier1 挿入順 → graduation の順序で返し、Run-GA 側が決定論的に lane 巡回できるよう保証する。
+
+### Graduation Criteria
+
+`<a id="graduation-criteria"></a>` Graduation Criteria — Tier 1 → Graduation lane 昇格条件。`Stage C 通過 AND (ii-lite) cross-pair 通過` の AND 判定。実装は `LaneManager.graduation_criteria(individual, stage_c_result, cross_pair_result)`。`cross_pair_result is None`（skipped / 例外 fallback）は保守的に False。Phase 2 では cross-pair が 2 条件 AND（mean / min）縮退、Phase 4 で 3 条件に拡張されても本判定は変更不要（`cross_pair_result.passed` の bool のみ参照）。Graduation lane の個体自体は本判定の対象外。
+
 ## SSOT 参照
 
 本ファイル自身が用語の SSOT。`config/alpha_factory/default.yaml` への参照は無い。

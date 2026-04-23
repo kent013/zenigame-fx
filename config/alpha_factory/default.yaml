@@ -84,6 +84,27 @@ cross_pair:
     USD_CAD: [USD_JPY, EUR_USD]
     USD_ZAR: [USD_CAD, USD_JPY]
 
+# Swim lane manager (T017)
+# - 実装: src/alpha_factory/swim_lane.py (LaneManager + Tier1Lane + GraduationLane)
+# - 概念: docs/alpha_factory/swim-lane.md / concepts/swim-lane-manager.md
+# - 本セクションは SSOT のみ (YAML loader / SwimLaneConfig dataclass は
+#   run-ga-full-rewrite TODO で導入)。
+# - tier1 は 6 通貨ペアに lane を張る想定で、population_size / generations
+#   は lane 共通 (ペア別カスタム化は別 TODO)。
+swim_lane:
+  tier1:
+    population_size: 30
+    generations: 15
+    crossover_rate: 0.7
+    mutation_rate: 0.3
+    elite_count: 2
+  graduation:
+    population_size: 40
+    seed_strategy: "union_of_tier1_graduates"
+  graduation_criteria:
+    require_stage_c_pass: true
+    require_cross_pair_pass: true
+
 # 改善サイクル設定
 improve_cycle:
   # repeat mode 1 サイクルあたりの最大経過時間（秒）。超過したら次サイクルへ
