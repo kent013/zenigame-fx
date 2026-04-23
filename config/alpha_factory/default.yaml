@@ -1,0 +1,73 @@
+# Alpha Factory FX 既定設定
+#
+# improve-cycle から参照される GA / バックテストの既定パラメータと、
+# 使命達成の判定に用いる live_criteria を定義する。
+#
+# 使命: 以下 live_criteria を全て満たすイントラデイ FX 戦略ゲノムを 1 つ以上見つけ出すこと。
+
+dataset:
+  instrument: EUR_JPY
+  # ISO 8601 (UTC) — バックテスト対象期間
+  start: "2025-10-01T00:00:00Z"
+  end: "2026-04-01T00:00:00Z"
+
+backtest:
+  initial_cash: "1000000"
+  leverage: 25
+  units: 10000
+
+ga:
+  population_size: 40
+  generations: 15
+  crossover_rate: 0.7
+  mutation_rate: 0.3
+  tournament_size: 3
+  elite_count: 2
+  max_depth: 4
+  fitness_metric: sharpe
+  seed: null  # null = 毎 Run ランダム
+
+# 使命達成判定 — 全てを満たす個体が出現すれば使命達成
+live_criteria:
+  sharpe_min: 1.0
+  total_pnl_min: 50000  # 50k JPY over dataset window
+  max_drawdown_max: 0.2  # 20%
+  trade_count_min: 50
+  trade_count_max: 5000
+
+# Stage A/B/C ゲート設定 (T014 実装)
+# - Stage A の評価関数は src/alpha_factory/stage_gate.py::evaluate_stage_a
+# - Stage B / C も同モジュールに pure function として実装。
+# - StageGateConfig (frozen dataclass) を yaml から構築する loader は
+#   別 TODO (GA runner 統合) で実装。本ファイルは SSOT としてのみ。
+stage_gate:
+  stage_a:
+    window_days: 60
+    target_pass_rate: 0.15      # monitor_only (calibrate-gate TODO で使用)
+    alpha: 0.03
+    threshold: 0.0              # 暫定固定 (calibrate-gate TODO で動的化)
+  stage_b:
+    window_months: 18
+    wf_train_days: 120
+    wf_test_days: 20
+    wf_step_days: 20
+    wf_embargo_days: 1
+    median_oos_sharpe_min: 0.20
+    positive_fold_min: 0.60
+    dsr_min: 0.0                # monitor_only (Phase 4 で hard 化)
+  stage_c:
+    holdout_days: 60
+    spread_stress_multiplier: 1.5
+    # 1.5x stress 後の hard gate 下限 (live_criteria.* を流用しないため別定義)
+    spread_stress_min_total_pnl: 0.0
+    spread_stress_min_sharpe: 0.0
+    # live_criteria は上記 SSOT セクションを参照 (重複定義しない)
+
+# 改善サイクル設定
+improve_cycle:
+  # repeat mode 1 サイクルあたりの最大経過時間（秒）。超過したら次サイクルへ
+  max_cycle_seconds: 3600
+  # 何サイクル連続で best fitness が改善しなかったら mutation_rate を 0.05 刻みで増やすか
+  plateau_cycles: 3
+  plateau_mutation_bump: 0.05
+  mutation_rate_max: 0.6

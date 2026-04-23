@@ -226,6 +226,26 @@ zenigame-fx Alpha Factory の全ドキュメントから参照される横断用
 
 `<a id="macro-index-daily"></a>` macro_index_daily — [FRED](#fred) 日足マクロ指標を保持するテーブル（`series_id`, `date`, `value NULL`, `fetched_at` の 4 主要列 + 一意制約 `(series_id, date)`）。**T+1 利用原則**: `date=D` の値は `D+1` 以降の primitive 判断にのみ使う（look-ahead bias 防止）。
 
+### StageResult
+
+`<a id="stage-result"></a>` StageResult — `src/alpha_factory/stage_gate.py` の frozen dataclass（T014）。Stage A/B/C 評価の単一返却型。`stage: Literal["A","B","C"]` / `passed: bool` / `metrics: Mapping[str, object]`（共通 envelope: `stage` / `genome_name` / `n_bars` / `wall_time_seconds` / `payload`） / `reason_codes: tuple[str, ...]`（空タプル = 通過、非空 = 失敗）の 4 フィールド。`reason_if_failed` property で `";".join(reason_codes)` を返す。
+
+### WF Fold
+
+`<a id="wf-fold"></a>` WF Fold — `make_wf_folds` (`src/alpha_factory/walk_forward.py`、T014) で生成される `(train_bars: list[PriceBar], test_bars: list[PriceBar])` tuple。observed-day index ベースで切り出され、train と test の間に embargo 区間（どちらにも含めない）が入る。`train_days + embargo_days + test_days > n_unique_dates` のときは空 list を返す（呼び出し側で `no_folds` reason に変換）。
+
+### Embargo
+
+`<a id="embargo"></a>` Embargo — Walk-Forward において train と test の間に置く隔離観測日数（`embargo_days`）。lookahead leak / autocorrelation contamination の緩和（López de Prado 2018, *Advances in Financial ML*, Ch.7）。embargo 区間の bars は train / test どちらにも含めない。
+
+### CrossPairResult
+
+`<a id="cross-pair-result"></a>` CrossPairResult — `src/alpha_factory/stage_gate.py` の frozen dataclass（T014、interface 定義）。cross-pair (ii-lite) 評価の戻り値。`target_pair: str` / `anchor_pairs: tuple[str, ...]` / `aggregator_name: str` / `window: tuple[datetime, datetime]` / `passed: bool`（Phase 2 では shadow only、Phase 4 で hard gate 化） / `metrics: Mapping[str, object]` / `reason_codes: tuple[str, ...]` の 7 フィールド。`CrossPairEvaluator` Protocol の `evaluate(...)` が返す。本実装は別 TODO（cross-pair-evaluation-shadow）。
+
+### Reason Code
+
+`<a id="reason-code"></a>` Reason Code — Stage 横断で canonical な失敗理由文字列（T014）。`StageResult.reason_codes: tuple[str, ...]` に格納し、archive / swim-lane の consumer が文字列パースせず set 比較できる設計。Stage 別の語彙は [stage-gates.md](stage-gates.md#reason-code-語彙-canonical) 参照。空タプルは通過を意味する。
+
 ## SSOT 参照
 
 本ファイル自身が用語の SSOT。`config/alpha_factory/default.yaml` への参照は無い。
