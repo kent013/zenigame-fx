@@ -511,6 +511,61 @@ def test_run_generation_stage_a_fail_short_circuit(
     assert archive.mark_graduated.call_count == 0
 
 
+def test_run_generation_propagates_provenance_to_archive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T018: Tier1Lane.provenance が collect_stage_a の parent_a/parent_b に
+    伝搬されることを検証."""
+    _patch_stage_funcs(
+        monkeypatch,
+        a_result=_stage_a_result(passed=False),
+    )
+    archive = MagicMock(spec=GenomeArchive)
+    tier1 = _make_tier1_lane("EUR_JPY", pop_size=2)
+    tier1.provenance = {
+        tier1.population[0].name: ("parent_a0", "parent_b0"),
+        tier1.population[1].name: ("parent_a1", None),
+    }
+    mgr = _make_lane_manager(
+        tier1={"tier1_EUR_JPY": tier1},
+        archive=archive,
+    )
+    mgr.run_generation("tier1_EUR_JPY")
+    # collect_stage_a の kwargs を検証
+    call_args = archive.collect_stage_a.call_args_list
+    assert len(call_args) == 2
+    # 第1個体
+    ka0 = call_args[0].kwargs
+    assert ka0["parent_a"] == "parent_a0"
+    assert ka0["parent_b"] == "parent_b0"
+    # 第2個体
+    ka1 = call_args[1].kwargs
+    assert ka1["parent_a"] == "parent_a1"
+    assert ka1["parent_b"] is None
+
+
+def test_run_generation_default_provenance_empty_dict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T018 後方互換: provenance 未設定 (default 空 dict) は parent_a/b=None で
+    collect_stage_a が呼ばれること."""
+    _patch_stage_funcs(
+        monkeypatch,
+        a_result=_stage_a_result(passed=False),
+    )
+    archive = MagicMock(spec=GenomeArchive)
+    tier1 = _make_tier1_lane("EUR_JPY", pop_size=1)
+    assert tier1.provenance == {}  # default
+    mgr = _make_lane_manager(
+        tier1={"tier1_EUR_JPY": tier1},
+        archive=archive,
+    )
+    mgr.run_generation("tier1_EUR_JPY")
+    ka = archive.collect_stage_a.call_args_list[0].kwargs
+    assert ka["parent_a"] is None
+    assert ka["parent_b"] is None
+
+
 def test_run_generation_stage_b_fail_short_circuit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

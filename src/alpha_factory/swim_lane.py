@@ -135,6 +135,16 @@ class Tier1Lane(SwimLane):
     bars_18m: list[PriceBar] = field(default_factory=list)
     bars_holdout: list[PriceBar] = field(default_factory=list)
     meta: InstrumentMeta | None = None
+    provenance: dict[str, tuple[str | None, str | None]] = field(
+        default_factory=dict
+    )
+    """genome.name -> (parent_a, parent_b)。
+
+    T018 追加: run_ga.py が世代生成時に populate し、LaneManager が
+    ``collect_stage_a`` 呼び出しで ``parent_a`` / ``parent_b`` を archive に
+    伝搬する。未設定 (default 空 dict) は T017 までの挙動と後方互換
+    (parent_a=parent_b=None)。
+    """
 
 
 @dataclass
@@ -458,12 +468,17 @@ class LaneManager:
                 self._primitive_evaluator,
                 self._stage_gate_config,
             )
+            parent_a, parent_b = lane.provenance.get(
+                genome.name, (None, None)
+            )
             self._archive.collect_stage_a(
                 genome,
                 lane.lane_id,
                 lane.generation_count,
                 a_result,
                 instrument=lane.instrument,
+                parent_a=parent_a,
+                parent_b=parent_b,
             )
             if not a_result.passed:
                 continue

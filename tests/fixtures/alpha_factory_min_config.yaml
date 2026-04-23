@@ -1,0 +1,54 @@
+dataset:
+  instrument: EUR_JPY
+  start: "2026-01-01T00:00:00Z"
+  end: "2026-01-08T00:00:00Z"
+backtest:
+  initial_cash: "1000000"
+  leverage: 25
+  units: 10000
+  max_spread_bps: "5"
+  session_close_utc_hours: [23]
+ga:
+  population_size: 5
+  generations: 1
+  crossover_rate: 0.7
+  mutation_rate: 0.3
+  tournament_size: 3
+  elite_count: 1
+  max_depth: 2
+  max_clause: 1
+  fitness_metric: sharpe
+  seed: 42
+live_criteria:
+  sharpe_min: 1.0
+  total_pnl_min: 0
+  max_drawdown_max: 0.5
+  trade_count_min: 0
+  trade_count_max: 10000
+stage_gate:
+  stage_a:
+    window_days: 1
+    alpha: 0.03
+    threshold: 0.0
+  stage_b:
+    window_months: 1
+    wf_train_days: 2
+    wf_test_days: 1
+    wf_step_days: 1
+    wf_embargo_days: 0
+    median_oos_sharpe_min: 0.20
+    positive_fold_min: 0.60
+  stage_c:
+    holdout_days: 1
+    spread_stress_multiplier: 1.5
+stage_windows:
+  stage_a_window_days: 1
+  stage_c_holdout_days: 1
+  allow_stage_c_fallback_slice: true
+cross_pair:
+  mode: shadow
+  aggregator_lambda: 0.5
+  pass_criteria:
+    sharpe_target_cross_ratio_min: 0.8
+    mean_sharpe_cross_min: 0.15
+    min_sharpe_cross_min: -0.20
