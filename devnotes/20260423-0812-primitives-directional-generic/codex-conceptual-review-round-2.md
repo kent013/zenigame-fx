@@ -1,0 +1,9 @@
+判定: **APPROVED**
+
+Round 1 の Must-fix 3件は、設計文書上でいずれも解消されています。  
+- NEUTRAL bounded: 全14 primitive を `[-1, +1]` に統一し、F12/F14 に `tanh` スケーリング、F13 は相関の定義域で bounded を明示。[conceptual-design.md#L72](/Users/ishitoya/repository/zenigame-fx/devnotes/20260423-0812-primitives-directional-generic/conceptual-design.md#L72) [conceptual-design.md#L140](/Users/ishitoya/repository/zenigame-fx/devnotes/20260423-0812-primitives-directional-generic/conceptual-design.md#L140)  
+- F4/F5 方向性付与: `sign(+DI - -DI)` と `sign(EMA_fast - EMA_slow)` を導入し、directional 契約に合わせた点は妥当。[conceptual-design.md#L111](/Users/ishitoya/repository/zenigame-fx/devnotes/20260423-0812-primitives-directional-generic/conceptual-design.md#L111) [conceptual-design.md#L115](/Users/ishitoya/repository/zenigame-fx/devnotes/20260423-0812-primitives-directional-generic/conceptual-design.md#L115)  
+- F13 O(N): `rolling_corr` の 5本 prefix-sum による O(N) 方針と warmup 記述が追加され、実装可能性は十分。[conceptual-design.md#L146](/Users/ishitoya/repository/zenigame-fx/devnotes/20260423-0812-primitives-directional-generic/conceptual-design.md#L146) [conceptual-design.md#L167](/Users/ishitoya/repository/zenigame-fx/devnotes/20260423-0812-primitives-directional-generic/conceptual-design.md#L167)
+
+Should-consider（非ブロッカー）として1点だけあります。  
+- F4/F5 は現式だと「強度が低い局面」で符号反転が起きうるため、詳細設計では `max(0, strength)` 系にして「弱いときは 0 に寄る」形を比較検討すると、名前（Trend/Break）との整合がさらに上がります。[conceptual-design.md#L111](/Users/ishitoya/repository/zenigame-fx/devnotes/20260423-0812-primitives-directional-generic/conceptual-design.md#L111) [conceptual-design.md#L115](/Users/ishitoya/repository/zenigame-fx/devnotes/20260423-0812-primitives-directional-generic/conceptual-design.md#L115)
