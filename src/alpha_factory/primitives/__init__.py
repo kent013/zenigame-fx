@@ -7,6 +7,7 @@
 from src.alpha_factory.primitives._base import (
     ComputeAllBarsFn,
     ComputeFn,
+    EconomicEventSnapshot,
     EvaluationContext,
     GaSlot,
     ParamSpec,
@@ -14,6 +15,7 @@ from src.alpha_factory.primitives._base import (
     PrimitiveDomain,
     PrimitiveSpec,
     RequiredDataKey,
+    VixSeriesSnapshot,
     is_valid_required_data,
     slot_from_category,
     validate_primitive_spec,
@@ -33,6 +35,7 @@ from src.alpha_factory.primitives.evaluator import RegistryEvaluator
 __all__ = [
     "ComputeAllBarsFn",
     "ComputeFn",
+    "EconomicEventSnapshot",
     "EvaluationContext",
     "GaSlot",
     "ParamSpec",
@@ -41,6 +44,7 @@ __all__ = [
     "PrimitiveSpec",
     "RegistryEvaluator",
     "RequiredDataKey",
+    "VixSeriesSnapshot",
     "clear",
     "ensure_registered",
     "get_primitive",

@@ -56,14 +56,44 @@ T011 で `src/alpha_factory/primitives/directional_generic.py` に実装・登�
 
 ### 汎用 Modulator (6)
 
-| # | 名称 | 役割 |
-|---|------|------|
-| 15 | ATRRegimeGate | volatility regime |
-| 16 | SessionGate | session window |
-| 17 | SpreadConditionGate | cost gate |
-| 18 | EconomicEventGate | event blackout |
-| 19 | VIXRegimeGate | macro fear regime（FRED VIXCLS） |
-| 20 | TrendStrengthGate | trend confidence |
+T012 で `src/alpha_factory/primitives/modulator_generic.py` に実装・登録済。
+出力は全て `[0, 1]` bounded（warmup は np.nan、`compute` は neutral 値で吸収）。
+`category="MODULATOR"`, `domain="generic"`, GA slot は `local_gate`。
+
+| ID | 名称 | 数式 | 主要パラメータ | 外部データ |
+|----|------|------|----------------|-----------|
+| M1 | ATRRegimeGate | `sigmoid(direction * (atr_rel - threshold_rel) / scale_rel)`（`atr_rel = ATR/close` で pair 非依存化） | n[7,28], threshold_rel[0.0001,0.02], scale_rel[1e-5,0.01], prefer_high∈{0,1} | なし |
+| M2 | SessionGate | `in_session ? 1 : 0`（`soft_edge_min>0` で境界 sigmoid blend、open_gate * close_gate の AND-like） | session{0=tokyo,1=london,2=ny}, soft_edge_min[0,60] | なし |
+| M3 | SpreadConditionGate | `sigmoid(-k*(spread_bps - threshold_bps))`（`spread_bps = (ask.close - bid.close) / mid * 10000`） | threshold_bps[0.1,20], k[0.1,5] | `spread` |
+| M4 | EconomicEventGate | `1 - sigmoid((window_min - |Δt_min|)/scale_min)`（min_impact 以上の event を currency filter） | window_min[5,120], scale_min[1,30], min_impact{1,2,3} | `calendar.economic_event` (`event_snapshot`) |
+| M5 | VIXRegimeGate | `sigmoid((threshold - vix)/scale)`（直近 publication_ts < bar_time の vix_close） | threshold[10,40], scale[1,15] | `macro.vix` (`vix_snapshot`) |
+| M6 | TrendStrengthGate | `sigmoid((ADX(n) - theta)/scale)` | n[7,28], theta[10,40], scale[2,15] | なし |
+
+**look-ahead 回避**:
+- M1 / M6: ATR / ADX は Wilder smoothing で過去のみ参照
+- M2: bar_time の hour/minute から計算、deterministic
+- M3: bar close 時点のスプレッドを参照（signal at close → execute next bar open 規約と整合、MVP では proxy）
+- M4: `event.actual` を一切参照せず `event.event_time` のみ使用。`EconomicEventSnapshot.as_of` を cap として `event_time > as_of` のイベントを除外
+- M5: `bisect_left(pubs, bar_time)` の strict less than で同時刻 publication を除外
+
+**snapshot 欠損時挙動**:
+- M4 `event_snapshot=None` → 1.0 safe default + `RuntimeWarning`（gate 開放）
+- M5 `vix_snapshot=None` or 空 → 0.5 neutral + `RuntimeWarning`
+- `EvaluationContext.strict_snapshot_required=True` 時は `RuntimeError` で fail-fast（production backtest runner はこの flag を使い snapshot 伝搬漏れを検知する）
+
+**EvaluationContext 拡張** (T012、後方互換):
+- `event_snapshot: EconomicEventSnapshot | None = None`
+- `vix_snapshot: VixSeriesSnapshot | None = None`
+- `strict_snapshot_required: bool = False`
+
+T011 既存テストは新フィールドを指定せず `EvaluationContext(bars=..., idx=..., pair=..., params=...)` で構築するため壊れない（frozen dataclass への default 値付きフィールド追加は backward-compatible）。
+
+**snapshot dataclass** (`_base.py`):
+- `EconomicEventSnapshot(calendar, as_of)` — `EconomicCalendar` と as-of cap のペア
+- `VixSeriesSnapshot(observations: tuple[(datetime, float), ...])` — publication_ts_utc 昇順、`__post_init__` で tz-aware 強制 + 昇順検証。`lookup(bar_time)` は strict less than で O(N) lookup（compute_all_bars 内で繰り返し呼ぶ場合は呼び出し側で pubs 列をキャッシュして bisect_left を直接使うこと、M5 実装参照）
+
+**実行タイミング規約**: zenigame-fx の backtest は `signal at close → execute next bar open`。
+M3/M4/M5 の primitive は bar close 時点で観測される情報のみ参照する。
 
 ### ペア特化 (12)
 
@@ -84,7 +114,9 @@ T011 で `src/alpha_factory/primitives/directional_generic.py` に実装・登�
 
 ### Registry の役割
 
-**T011 時点の状態**: `src/alpha_factory/primitives/_registry.py` の registry に directional generic 14 個（F1-F14）が登録済。Modulator 6 個（M1-M6）と pair_specific 12 個（P1-P12）は未登録。
+**T012 時点の状態**: `src/alpha_factory/primitives/_registry.py` の registry に directional generic 14 個（F1-F14）と modulator generic 6 個（M1-M6）の合計 20 個が登録済。pair_specific 12 個（P1-P12）は未登録。`_registry.ensure_registered()` は `directional_generic.ensure_registered()` と `modulator_generic.ensure_registered()` の両方を呼ぶ。
+
+`directional_generic.category_counts()` は **本モジュール固有の内訳** (F1-F14 のみ) を返し、`"MODULATOR": 0` は「directional モジュール内に MODULATOR は無い」の意。registry 全体の category 別 count は `_registry.list_by_category(category)` を使うこと。
 
 **並行安全な登録**: `register_if_absent(spec)` が lock 内で atomic に存在確認＋登録を行う。`ensure_registered()` は `register_if_absent` を使って冪等性を保証する。
 
