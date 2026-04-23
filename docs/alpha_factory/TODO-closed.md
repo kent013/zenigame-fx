@@ -21,6 +21,7 @@
 | T015 | Genome archive schema + Parquet 書き込み | ga-architecture | Critical | 2026-04-23T19:15:00+09:00 | 39619ec |
 | T016 | (ii-lite) cross-pair evaluation shadow 実装 | cross-pair | Critical | 2026-04-23T21:09:57+09:00 | a594c50 |
 | T017 | Swim lane manager (Tier 1 + Graduation) | swim-lane | Critical | 2026-04-23 23:20 | fa7824f |
+| T018 | run_ga.py 全面改修 (Phase 2 統合) | ga-architecture | Critical | 2026-04-23T23:58:00+09:00 | efaf365 |
 
 ## Obsoleted
 
