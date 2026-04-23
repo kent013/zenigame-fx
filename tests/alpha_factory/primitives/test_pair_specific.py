@@ -1006,7 +1006,11 @@ class TestStaleValue:
 
 class TestPreflightVerify:
     def test_missing_aux_pair_bars_raises(self):
-        with pytest.raises(RuntimeError, match=r"cross_pair\.EUR_USD"):
+        # P5 requires both cross_pair.EUR_USD and cross_pair.USD_JPY.
+        # set iteration order is non-deterministic — どちらが先に検出されても OK
+        with pytest.raises(
+            RuntimeError, match=r"cross_pair\.(EUR_USD|USD_JPY)"
+        ):
             RegistryEvaluator(
                 pair="EUR_JPY",
                 strict_aux_required=True,
