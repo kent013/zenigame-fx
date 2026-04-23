@@ -240,7 +240,19 @@ zenigame-fx Alpha Factory の全ドキュメントから参照される横断用
 
 ### CrossPairResult
 
-`<a id="cross-pair-result"></a>` CrossPairResult — `src/alpha_factory/stage_gate.py` の frozen dataclass（T014、interface 定義）。cross-pair (ii-lite) 評価の戻り値。`target_pair: str` / `anchor_pairs: tuple[str, ...]` / `aggregator_name: str` / `window: tuple[datetime, datetime]` / `passed: bool`（Phase 2 では shadow only、Phase 4 で hard gate 化） / `metrics: Mapping[str, object]` / `reason_codes: tuple[str, ...]` の 7 フィールド。`CrossPairEvaluator` Protocol の `evaluate(...)` が返す。本実装は別 TODO（cross-pair-evaluation-shadow）。
+`<a id="cross-pair-result"></a>` CrossPairResult — `src/alpha_factory/stage_gate.py` の frozen dataclass（T014、interface 定義）。cross-pair (ii-lite) 評価の戻り値。`target_pair: str` / `anchor_pairs: tuple[str, ...]` / `aggregator_name: str` / `window: tuple[datetime, datetime]` / `passed: bool`（Phase 2 では shadow only、Phase 4 で hard gate 化） / `metrics: Mapping[str, object]` / `reason_codes: tuple[str, ...]` の 7 フィールド。`CrossPairEvaluator` Protocol の `evaluate(...)` が返す。本実装は T016 (`src/alpha_factory/cross_pair.py`) で完了。`metrics` 辞書には canonical key 集合 (`sharpe_per_pair / mean_sharpe / std_sharpe / min_sharpe / aggregate_fitness / aggregator_lambda / sharpe_target_single / sharpe_target_cross / sharpe_target_cross_ratio / liquidity_weighted_mean / pass_criteria / skipped / skip_reason / mode`) で詳細値を格納する。
+
+### CrossPairConfig
+
+`<a id="cross-pair-config"></a>` CrossPairConfig — `src/alpha_factory/cross_pair.py` の frozen dataclass (T016)。cross-pair (ii-lite) 評価の設定。`sharpe_target_cross_ratio_min: float` (default 0.8) / `mean_sharpe_cross_min: float` (default 0.15) / `min_sharpe_cross_min: float` (default -0.20) / `aggregator_lambda: float` (default 0.5、`F = mean - λ × std`) / `mode: Literal["shadow","hard"]` (default "shadow") の 5 フィールド。`__post_init__` で aggregator_lambda >= 0、ratio_min ∈ [0, 1]、mode ∈ {shadow, hard} を検証。Phase 2 default は `mode='shadow'` で Stage C `passed` 判定への副作用なし。
+
+### StageCRunCrossPairEvaluator
+
+`<a id="stage-c-run-cross-pair-evaluator"></a>` StageCRunCrossPairEvaluator — `src/alpha_factory/cross_pair.py` のクラス (T016)。T014 `CrossPairEvaluator` Protocol の実装オブジェクト。constructor で `(primitive_evaluator, cross_pair_config, anchor_pairs=None, sharpe_target_single_provider=None)` を受け取り、`evaluate(...)` 内で `evaluate_cross_pair(...)` を呼ぶ thin adapter。`sharpe_target_single_provider: Callable[[], float | None] | None` は opt-in (Phase 2 default は None で ratio 判定 skip)。Stage C `evaluate_stage_c(cross_pair_evaluator=...)` に注入する。
+
+### ANCHOR_PAIRS
+
+`<a id="anchor-pairs"></a>` ANCHOR_PAIRS — `src/alpha_factory/cross_pair.py` の `Mapping[str, tuple[str, str]]` 定数 (T016)。target ペアごとに 2 アンカーを固定割当 (debate-synthesis.md SSOT)。`MappingProxyType` で frozen 化。6 target (EUR_JPY / USD_JPY / EUR_USD / AUD_JPY / USD_CAD / USD_ZAR)。Phase 2 時点では MockBroker quote==JPY 制約により、すべての target で少なくとも 1 つの非 JPY-quote anchor が含まれるため実 backtest 経由では構造的 pair_failure が発生する (= MockBroker 拡張別 TODO で解消)。
 
 ### Reason Code
 

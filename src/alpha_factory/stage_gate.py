@@ -609,24 +609,54 @@ def evaluate_stage_c(
             stress_payload["skipped"] = True
             reasons.append("spread_stress_skipped")
 
-    # cross-pair shadow hook
-    cross_pair_payload: dict[str, object] = {"skipped": True, "result": None}
+    # cross-pair shadow hook (T016)
+    # Phase 2: shadow only — passed には影響させない (mode='hard' は別 TODO)
+    # 例外隔離 + skipped 伝搬 + audit 用 error_type 保持
+    cross_pair_payload: dict[str, object] = {
+        "skipped": True,
+        "result": None,
+        "error_type": None,
+    }
     if cross_pair_evaluator is not None:
         if cross_pair_inputs is None:
             raise ValueError(
                 "cross_pair_inputs required when cross_pair_evaluator is set"
             )
         validated = _validate_cross_pair_inputs(cross_pair_inputs)
-        cp_result = cross_pair_evaluator.evaluate(
-            genome=genome,
-            target_pair=validated["target_pair"],
-            pair_bars_map=validated["pair_bars_map"],
-            meta_map=validated["meta_map"],
-            backtest_config=backtest_config,
-        )
-        cross_pair_payload["skipped"] = False
-        cross_pair_payload["result"] = cp_result
-        # Phase 2: shadow only — passed には影響させない
+        cp_result: CrossPairResult | None
+        try:
+            cp_result = cross_pair_evaluator.evaluate(
+                genome=genome,
+                target_pair=validated["target_pair"],
+                pair_bars_map=validated["pair_bars_map"],
+                meta_map=validated["meta_map"],
+                backtest_config=backtest_config,
+            )
+        except Exception as exc:
+            logger.warning(
+                "stage_c.cross_pair_failure",
+                genome=genome.name,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            cp_result = None
+            cross_pair_payload["error_type"] = type(exc).__name__
+        if cp_result is None:
+            # 例外 fallback: skipped 扱いで記録 (audit 用 error_type は残す)
+            cross_pair_payload["skipped"] = True
+            cross_pair_payload["result"] = None
+        else:
+            # CrossPairResult.metrics["skipped"] を Stage C payload に伝搬
+            # (archive `_extract_cross_pair` が payload.skipped を見て
+            #  ii_lite_pass=None を判定する契約)
+            cp_metrics = cp_result.metrics
+            cp_skipped = (
+                bool(cp_metrics.get("skipped", False))
+                if isinstance(cp_metrics, Mapping)
+                else False
+            )
+            cross_pair_payload["skipped"] = cp_skipped
+            cross_pair_payload["result"] = cp_result
 
     passed = len(reasons) == 0
     elapsed = _time.perf_counter() - start
