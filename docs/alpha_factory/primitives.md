@@ -29,22 +29,30 @@
 
 ### 汎用 Directional (14)
 
-| # | 名称 | カテゴリ |
-|---|------|---------|
-| 1 | TrendEMA | trend |
-| 2 | MACDSignal | trend |
-| 3 | DonchianBreak | breakout |
-| 4 | ADXTrend | trend |
-| 5 | VolatilityBreak | breakout |
-| 6 | SessionMomentum | session |
-| 7 | RSIRevert | mean-revert |
-| 8 | BollingerRevert | mean-revert |
-| 9 | StochRevert | mean-revert |
-| 10 | ZScoreRevert | mean-revert |
-| 11 | MeanReversionRange | mean-revert |
-| 12 | RealizedVolZScore | volatility |
-| 13 | ReturnAutocorrLag | autocorr |
-| 14 | TrendStrengthRatio | trend |
+T011 で `src/alpha_factory/primitives/directional_generic.py` に実装・登録済。
+出力は全て `[-1, +1]` bounded（F14 のみ `[0, +1]`）。`required_data=("ohlc",)`、`domain=generic`。
+
+| ID | 名称 | Category | 数式 | 主要パラメータ |
+|----|------|----------|------|----------------|
+| F1 | TrendEMA | TREND_FOLLOW | `tanh((EMA(fast) - EMA(slow)) / ATR)` | fast_n[5,30], slow_n[20,100], atr_n[7,28] |
+| F2 | MACDSignal | TREND_FOLLOW | `tanh((MACD - Signal) / rolling_std(MACD-Signal, scale_n))` | fast_n[6,20], slow_n[12,40], signal_n[5,15], scale_n[20,100] |
+| F3 | DonchianBreak | TREND_FOLLOW | `tanh((close - DC_mid) / (k * ATR))` | n[10,60], k[0.5,3.0], atr_n[7,28] |
+| F4 | ADXTrend | TREND_FOLLOW | `max(0, tanh((ADX - 25) / scale)) * sign(+DI - -DI)` | n[7,28], scale[5,30] |
+| F5 | VolatilityBreak | TREND_FOLLOW | `max(0, tanh(k * (ATR_short/ATR_long - 1))) * sign(EMA_fast - EMA_slow)` | short_n[3,20], long_n[30,120], k[1,10] |
+| F6 | SessionMomentum | TREND_FOLLOW | `tanh((close - session_open_close) / (k * ATR))` | session{0=tokyo,1=london,2=ny}, k[0.5,3.0], atr_n[7,28] |
+| F7 | RSIRevert | MEAN_REVERT | `tanh((50 - RSI) / scale)` | n[7,28], scale[5,30] |
+| F8 | BollingerRevert | MEAN_REVERT | `tanh((BB_mid - close) / (k * BB_std))` | n[10,60], k[1.0,3.0] |
+| F9 | StochRevert | MEAN_REVERT | `tanh((50 - %K) / scale)` | n[7,28], scale[10,40] |
+| F10 | ZScoreRevert | MEAN_REVERT | `tanh(-zscore(close, n))` | n[10,60] |
+| F11 | MeanReversionRange | MEAN_REVERT | `tanh(-(close - range_mid) / (range_width + eps))` | n[10,60] |
+| F12 | RealizedVolZScore | NEUTRAL | `tanh(zscore(realized_vol, window) / k_scale)` | n[10,60], window[60,500], k_scale[1.5,4.0] |
+| F13 | ReturnAutocorrLag | NEUTRAL | `rolling_corr(r, r[shift=lag], w)`（tanh 不要、定義域 [-1,+1]） | w[20,200], lag[1,10] |
+| F14 | TrendStrengthRatio | NEUTRAL | `tanh(|EMA_diff| / (rv * scale * close) / k_scale)` → [0,+1] | fast_n[5,30], slow_n[20,100], rv_n[10,60], scale[0.5,5.0], k_scale[1.0,5.0] |
+
+**lookahead 回避**: rolling_*/Wilder recurrence/F6 session_key 遷移/F13 lag shift すべて過去方向のみ参照。`test_no_lookahead_property` で 14 primitive すべてに property test 適用（後続バー改変で過去 index 不変）。
+
+**技術指標ヘルパー** (`src/alpha_factory/primitives/_indicators.py`): EMA / ATR / RSI / ADX (+DI/-DI 含) / Bollinger / Stochastic / MACD / Donchian / realized_vol / zscore / rolling_{sum,mean,std,max,min,corr} を numpy で O(N) 実装。
+
 
 ### 汎用 Modulator (6)
 
@@ -76,7 +84,9 @@
 
 ### Registry の役割
 
-**T010 時点の状態**: `src/alpha_factory/primitives/_registry.py` の registry（module-level dict）は **空**。契約（`PrimitiveSpec` / `ParamSpec` / `EvaluationContext` / `RegistryEvaluator`）のみ整備済。32 primitive は後続 TODO（T010-a/b/c）で段階的に登録する。
+**T011 時点の状態**: `src/alpha_factory/primitives/_registry.py` の registry に directional generic 14 個（F1-F14）が登録済。Modulator 6 個（M1-M6）と pair_specific 12 個（P1-P12）は未登録。
+
+**並行安全な登録**: `register_if_absent(spec)` が lock 内で atomic に存在確認＋登録を行う。`ensure_registered()` は `register_if_absent` を使って冪等性を保証する。
 
 **Bootstrap 手順**:
 

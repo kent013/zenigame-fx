@@ -49,6 +49,29 @@ def register(spec: PrimitiveSpec) -> None:
         _PRIMITIVES[spec.id] = spec
 
 
+def register_if_absent(spec: PrimitiveSpec) -> bool:
+    """原子的に登録する。既登録なら False、新規登録なら True を返す。
+
+    T011 の ensure_registered で冪等かつ並行安全な登録パスを提供するため追加。
+    `try get_primitive / except KeyError: register` は非原子的で、並行時に
+    `register` 側 `ValueError` を引き起こすため、本関数で lock 内に存在確認＋
+    登録を atomic に閉じ込める。
+
+    Notes:
+        validate_primitive_spec は既存チェック前に呼ぶ。新規 spec の健全性は
+        常に検証する（既存 id でも spec 側が壊れていれば silent skip せず fail する）。
+
+    Raises:
+        ValueError: spec が不変条件違反。
+    """
+    validate_primitive_spec(spec)
+    with _LOCK:
+        if spec.id in _PRIMITIVES:
+            return False
+        _PRIMITIVES[spec.id] = spec
+        return True
+
+
 def get_primitive(primitive_id: str) -> PrimitiveSpec:
     """id で PrimitiveSpec を取得する。
 
@@ -93,14 +116,17 @@ def clear() -> None:
 
 
 def ensure_registered() -> None:
-    """primitive モジュールの明示的 bootstrap 関数（T010 骨格では no-op）。
+    """primitive モジュールの明示的 bootstrap 関数。
 
-    後続 TODO で primitive 実装モジュールを import してここから register を
-    発火させる。冪等（複数回呼んでも 2 回目以降は既登録で no-op、ただし
-    重複 register を避けるため各 primitive 側が id 済みチェックを行う）。
+    T011 で `directional_generic` の 14 primitive 登録を橋渡しする。
+    冪等（複数回呼んでも 2 回目以降は既登録 spec は register_if_absent で skip）。
+    並行呼び出しに対しては register_if_absent 内部 Lock で安全。
 
     production path (GA entry) から明示的に 1 回呼ぶ規約。
-    並行呼び出しに対しては register() 内部 Lock で安全。
     """
-    # 骨格では未登録。primitive 実装 TODO で埋まる。
-    return None
+    # 遅延 import（循環回避）。_base.py は触らずに実装モジュールだけ呼ぶ。
+    from src.alpha_factory.primitives.directional_generic import (
+        ensure_registered as _reg_directional_generic,
+    )
+
+    _reg_directional_generic()

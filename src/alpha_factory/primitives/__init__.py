@@ -26,6 +26,7 @@ from src.alpha_factory.primitives._registry import (
     list_by_category,
     list_by_domain,
     register,
+    register_if_absent,
 )
 from src.alpha_factory.primitives.evaluator import RegistryEvaluator
 
@@ -48,6 +49,7 @@ __all__ = [
     "list_by_category",
     "list_by_domain",
     "register",
+    "register_if_absent",
     "slot_from_category",
     "validate_primitive_spec",
 ]

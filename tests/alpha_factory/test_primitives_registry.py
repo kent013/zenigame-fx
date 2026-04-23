@@ -232,16 +232,20 @@ class TestRegistryEvaluator:
 
 
 class TestEnsureRegistered:
-    def test_ensure_registered_is_noop_skeleton(self):
-        # 骨格では登録対象が無いので no-op
+    def test_ensure_registered_registers_directional_generic(self):
+        # T011 以降、ensure_registered は directional_generic の 14 primitive
+        # (F1-F14) を登録する。
         ensure_registered()
-        assert list_all() == ()
+        specs = list_all()
+        ids = {s.id for s in specs}
+        assert len(specs) == 14
+        assert ids == {f"F{i}" for i in range(1, 15)}
 
     def test_ensure_registered_is_idempotent(self):
         ensure_registered()
         ensure_registered()
-        # エラー無しで 2 回呼べる
-        assert list_all() == ()
+        # エラー無しで 2 回呼べる。件数は 14 で不変。
+        assert len(list_all()) == 14
 
 
 class TestSpecValidation:
