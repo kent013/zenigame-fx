@@ -6,10 +6,15 @@ from decimal import Decimal
 def notional_home_currency(units: int, price_quote_per_base: Decimal, quote_is_home: bool) -> Decimal:
     """home currency 建ての想定元本を返す。
 
-    MVP は home=JPY で quote=JPY（USD_JPY 等）のケースのみ対応。quote != home の場合は Phase 4 で換算レートを導入予定。
+    Phase 2 (T019 時点): MockBroker の per-pair home モード (``home_currency=meta.quote_currency``)
+    下では常に ``quote_is_home=True`` が期待値。``home != quote`` を真に扱う quote→home
+    換算は Phase 4 で MockBroker に ``fx_rate_provider`` 引数 (別 TODO) を追加する
+    設計を予約済。
     """
     if not quote_is_home:
-        raise NotImplementedError("quote != home currency (e.g. EUR_USD in JPY account) is Phase 4")
+        raise NotImplementedError(
+            "quote != home currency requires fx_rate_provider (Phase 4)"
+        )
     return Decimal(abs(units)) * price_quote_per_base
 
 

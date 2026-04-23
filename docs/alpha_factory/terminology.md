@@ -252,7 +252,7 @@ zenigame-fx Alpha Factory の全ドキュメントから参照される横断用
 
 ### ANCHOR_PAIRS
 
-`<a id="anchor-pairs"></a>` ANCHOR_PAIRS — `src/alpha_factory/cross_pair.py` の `Mapping[str, tuple[str, str]]` 定数 (T016)。target ペアごとに 2 アンカーを固定割当 (debate-synthesis.md SSOT)。`MappingProxyType` で frozen 化。6 target (EUR_JPY / USD_JPY / EUR_USD / AUD_JPY / USD_CAD / USD_ZAR)。Phase 2 時点では MockBroker quote==JPY 制約により、すべての target で少なくとも 1 つの非 JPY-quote anchor が含まれるため実 backtest 経由では構造的 pair_failure が発生する (= MockBroker 拡張別 TODO で解消)。
+`<a id="anchor-pairs"></a>` ANCHOR_PAIRS — `src/alpha_factory/cross_pair.py` の `Mapping[str, tuple[str, str]]` 定数 (T016)。target ペアごとに 2 アンカーを固定割当 (debate-synthesis.md SSOT)。`MappingProxyType` で frozen 化。6 target (EUR_JPY / USD_JPY / EUR_USD / AUD_JPY / USD_CAD / USD_ZAR)。T019 で MockBroker の `home=JPY` 固定制約が解消され (per-pair home モード導入)、非 JPY-quote anchor を含む全 target で実 backtest 経由の意味ある shadow 統計が取得可能になった。Phase 4 で `home != quote` の真の換算 (例: JPY 口座で EUR_USD を JPY 建てで評価) が必要になった場合は MockBroker に `fx_rate_provider` 引数を追加する設計を予約済。
 
 ### Reason Code
 
@@ -302,6 +302,18 @@ zenigame-fx Alpha Factory の全ドキュメントから参照される横断用
 - [cross-pair.md](cross-pair.md)
 - [statistics.md](statistics.md)
 - [migration-triggers.md](migration-triggers.md)
+
+### pip_size
+
+`<a id="pip-size"></a>` pip_size — `InstrumentMeta.pip_size: Decimal` (T019 追加)。通貨ペアの 1 pip 単位。OANDA 仕様に準拠: JPY-quote (USD_JPY / EUR_JPY 等) = `0.01`、USD-quote (EUR_USD / GBP_USD 等) = `0.0001`、CAD-quote (USD_CAD) = `0.0001`、ZAR-quote (USD_ZAR) = `0.0001`。スリッページモデル・spread ログの pip 換算に利用。`CurrencyPair.pip_size` (ingest 層 SSOT) と派生的に揃うが、broker 層 SSOT として `InstrumentMeta` に独立保持する。`InstrumentMeta.default_pip_size_for_quote(quote_currency)` ヘルパで quote currency から自動決定可。
+
+### display_precision
+
+`<a id="display-precision"></a>` display_precision — `InstrumentMeta.display_precision: int` (T019 追加)。価格表示の小数点以下桁数。JPY-quote = 3 (例: `154.123`)、USD-quote / その他 = 5 (例: `1.08234`)。ログ表示・デバッグ用途のみで P&L 計算には影響しない。`InstrumentMeta.default_display_precision_for_quote(quote_currency)` ヘルパで自動決定可。
+
+### Per-pair Home Mode
+
+`<a id="per-pair-home-mode"></a>` Per-pair Home Mode — `MockBroker(home_currency=None)` (T019 導入) の default 挙動。broker インスタンスの home 通貨を `instrument_meta.quote_currency` に自動設定する。`USD_JPY → home=JPY`、`EUR_USD → home=USD`、`USD_CAD → home=CAD` 等。Phase 2 は single-instrument orientation の broker のみを対象とし、pair 単独 backtest 内では home==quote で閉じる。cross-pair shadow の Sharpe 集約は pair ごとに home 通貨が異なる状態で成立する (Sharpe が無次元 / scale 不変のため、`tests/broker/test_mock_multi_currency.py` で直接検証)。Phase 4 で真の quote→home 換算を必要とする場合 (例: JPY 口座で EUR_USD を JPY 建てで評価) は MockBroker に `fx_rate_provider` 引数を追加する設計を予約済 (T019 設計ドキュメント参照)。
 
 ## 関連 TODO
 

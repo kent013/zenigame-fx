@@ -15,6 +15,41 @@ def usd_jpy_meta(margin_rate: str = "0.04") -> InstrumentMeta:
         base_currency="USD",
         quote_currency="JPY",
         margin_rate=Decimal(margin_rate),
+        pip_size=Decimal("0.01"),
+        display_precision=3,
+    )
+
+
+def eur_jpy_meta(margin_rate: str = "0.04") -> InstrumentMeta:
+    return InstrumentMeta(
+        oanda_name="EUR_JPY",
+        base_currency="EUR",
+        quote_currency="JPY",
+        margin_rate=Decimal(margin_rate),
+        pip_size=Decimal("0.01"),
+        display_precision=3,
+    )
+
+
+def eur_usd_meta(margin_rate: str = "0.03") -> InstrumentMeta:
+    return InstrumentMeta(
+        oanda_name="EUR_USD",
+        base_currency="EUR",
+        quote_currency="USD",
+        margin_rate=Decimal(margin_rate),
+        pip_size=Decimal("0.0001"),
+        display_precision=5,
+    )
+
+
+def usd_cad_meta(margin_rate: str = "0.04") -> InstrumentMeta:
+    return InstrumentMeta(
+        oanda_name="USD_CAD",
+        base_currency="USD",
+        quote_currency="CAD",
+        margin_rate=Decimal(margin_rate),
+        pip_size=Decimal("0.0001"),
+        display_precision=5,
     )
 
 
