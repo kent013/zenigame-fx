@@ -17,6 +17,7 @@
 | T011 | Directional primitive 14 個実装 (F1-F14) | primitives | High | 2026-04-23 09:51 | 1e72414 |
 | T012 | Modulator primitive 6 個実装 (M1-M6) | primitives | High | 2026-04-23 13:55 JST | a4eb0bf |
 | T013 | Pair-specific primitive 12 個実装 (P1-P12) | primitives | Medium | 2026-04-23 15:35 | 4348144d3ab721468c353191ae41877032548c3d |
+| T014 | Stage A/B/C gate 実装 + WF folds + live_criteria | stage-gate | Critical | 2026-04-23T18:18:30+09:00 | 0f7aa06 |
 
 ## Obsoleted
 
