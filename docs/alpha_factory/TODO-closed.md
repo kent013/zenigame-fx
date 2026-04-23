@@ -15,6 +15,7 @@
 | T009 | backtest engine を Clause DslStrategy に対応 + fitness 復活 | ga-architecture | Critical | 2026-04-22 21:45 | 47c738d |
 | T010 | primitives registry + RegistryEvaluator 骨格 | primitives | High | 2026-04-22 22:34 | 25ba841872b2899fa22c7f8403ac8d2e1ea3a09a |
 | T011 | Directional primitive 14 個実装 (F1-F14) | primitives | High | 2026-04-23 09:51 | 1e72414 |
+| T012 | Modulator primitive 6 個実装 (M1-M6) | primitives | High | 2026-04-23 13:55 JST | a4eb0bf |
 
 ## Obsoleted
 
