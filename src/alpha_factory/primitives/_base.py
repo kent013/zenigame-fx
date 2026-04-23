@@ -46,6 +46,11 @@ RequiredDataKey = Literal[
     "macro.dgs2",
     "macro.t10yie",
     "macro.spx500",
+    # T013 追加: pair-specific primitive (P8/P9/P11/P12) で使用
+    "macro.copper",
+    "macro.commodity_index",
+    "macro.wti",
+    "macro.gold",
 ]
 
 _REQUIRED_DATA_LITERALS: frozenset[str] = frozenset(
@@ -62,6 +67,11 @@ _REQUIRED_DATA_LITERALS: frozenset[str] = frozenset(
         "macro.dgs2",
         "macro.t10yie",
         "macro.spx500",
+        # T013 追加 (Literal と同期)
+        "macro.copper",
+        "macro.commodity_index",
+        "macro.wti",
+        "macro.gold",
     }
 )
 
@@ -190,7 +200,7 @@ class VixSeriesSnapshot:
 
 @dataclass(frozen=True)
 class EvaluationContext:
-    """primitive compute に渡される評価文脈（T010 骨格で導入、T012 で拡張）。
+    """primitive compute に渡される評価文脈（T010 骨格で導入、T012/T013 で拡張）。
 
     Attributes:
         bars: OHLC 系列。bars[idx] が判定対象 bar。
@@ -204,15 +214,23 @@ class EvaluationContext:
                         M4 EconomicEventGate が参照。
         vix_snapshot: VixSeriesSnapshot（T012 追加, default=None）。
                       M5 VIXRegimeGate が参照。
-        strict_snapshot_required: True なら snapshot=None で primitive 呼び出し
-                                  発生時に RuntimeError を raise（fail-fast）。
+        strict_snapshot_required: True なら snapshot/aux 欠損時に primitive
+                                  compute 呼び出し発生時に RuntimeError を raise
+                                  （fail-fast）。T013 で意味を「snapshot + aux 全般の
+                                  per-call strict」に拡張。
                                   production backtest runner はこの flag を True
                                   にして伝搬漏れを検知する規約。
+        aux_pair_bars: cross-pair primitive (P5 等) が参照する別ペアの
+                       bar 列。key は OANDA pair 名 ("EUR_USD" 等)、value は
+                       同一時刻軸 (bar_time) にアラインされた PriceBar 列。
+                       各要素は PriceBar または None（stale / 欠損）。loader が
+                       alignment 責務を持ち、primitive 側は bar_time 一致を
+                       fail-fast assert する規約。default は空 dict（T013 追加）。
 
     Note:
         pip_size / quote_currency などの pair metadata は将来拡張で追加する。
         frozen dataclass への field 追加（default 値付き）は後方互換のため許容
-        （T011 既存テストは新フィールド未指定のまま動作する）。
+        （T011/T012 既存テストは新フィールド未指定のまま動作する）。
     """
 
     bars: Sequence[PriceBar]
@@ -224,6 +242,10 @@ class EvaluationContext:
     event_snapshot: EconomicEventSnapshot | None = None
     vix_snapshot: VixSeriesSnapshot | None = None
     strict_snapshot_required: bool = False
+    # --- T013 追加（default 空 dict で後方互換） ---
+    aux_pair_bars: Mapping[str, Sequence[PriceBar | None]] = field(
+        default_factory=dict
+    )
 
 
 ComputeFn = Callable[[EvaluationContext], float]
@@ -232,9 +254,7 @@ ComputeAllBarsFn = Callable[[EvaluationContext], np.ndarray]
 
 @dataclass(frozen=True)
 class PrimitiveSpec:
-    """primitive の正式仕様（T010 骨格）。
-
-    本 TODO では registry は空。後続 primitive 実装 TODO で具体的に登録される。
+    """primitive の正式仕様（T010 骨格、T013 で optional_data_groups 拡張）。
 
     Attributes:
         id: 一意な primitive ID（例: "F1", "M1", "P5"）。SignalConfig.name と一致。
@@ -242,11 +262,17 @@ class PrimitiveSpec:
         category: PrimitiveCategory（TREND_FOLLOW / MEAN_REVERT / NEUTRAL / MODULATOR）。
         domain: PrimitiveDomain（generic / pair_specific）。
         param_schema: ParamSpec のタプル。param 値の範囲と型を宣言。
-        required_data: 参照する系列の canonical key タプル。
+        required_data: 参照する系列の canonical key タプル（必須依存）。
                        is_valid_required_data で検証可能。
         compute: 1 点評価（EvaluationContext → float）。
         compute_all_bars: 一括評価（EvaluationContext → np.ndarray、
                            長さは len(ctx.bars)、warmup 内は np.nan で埋める規約）。
+        optional_data_groups: T013 追加。OR-semantics の依存 group。各 group は
+                              tuple[str, ...] で、group 内 1 つ以上が provide されれば
+                              OK。例: P8 CommodityFlowBias は
+                              `(("macro.copper", "macro.commodity_index"),)` で
+                              「銅 OR 商品 index のいずれか必須」を表現。
+                              default は空 tuple で後方互換（既存 primitive は影響なし）。
     """
 
     id: str
@@ -257,6 +283,8 @@ class PrimitiveSpec:
     required_data: tuple[str, ...]
     compute: ComputeFn
     compute_all_bars: ComputeAllBarsFn
+    # T013 追加 (default 空 tuple で後方互換)
+    optional_data_groups: tuple[tuple[str, ...], ...] = ()
 
 
 def validate_primitive_spec(spec: PrimitiveSpec) -> None:
@@ -315,6 +343,25 @@ def validate_primitive_spec(spec: PrimitiveSpec) -> None:
                 f"invalid required_data key {key!r} in "
                 f"PrimitiveSpec(id={spec.id!r})"
             )
+    # T013: optional_data_groups の検証
+    required_set = set(spec.required_data)
+    for group_idx, group in enumerate(spec.optional_data_groups):
+        if not group:
+            raise ValueError(
+                f"optional_data_groups[{group_idx}] is empty in "
+                f"PrimitiveSpec(id={spec.id!r})"
+            )
+        for key in group:
+            if not is_valid_required_data(key):
+                raise ValueError(
+                    f"invalid optional_data_groups key {key!r} in "
+                    f"PrimitiveSpec(id={spec.id!r})"
+                )
+            if key in required_set:
+                raise ValueError(
+                    f"optional_data_groups key {key!r} duplicates "
+                    f"required_data in PrimitiveSpec(id={spec.id!r})"
+                )
 
 
 def slot_from_category(category: PrimitiveCategory) -> GaSlot:

@@ -232,23 +232,26 @@ class TestRegistryEvaluator:
 
 
 class TestEnsureRegistered:
-    def test_ensure_registered_registers_directional_and_modulator_generic(self):
+    def test_ensure_registered_registers_directional_modulator_pair_specific(self):
         # T011 で directional_generic 14 (F1-F14)、T012 で modulator_generic 6
-        # (M1-M6)。合計 20 が登録される。
+        # (M1-M6)、T013 で pair_specific 12 (P1-P12)。合計 32 が登録される。
         ensure_registered()
         specs = list_all()
         ids = {s.id for s in specs}
-        assert len(specs) == 20
-        expected = {f"F{i}" for i in range(1, 15)} | {
-            f"M{i}" for i in range(1, 7)
-        }
+        expected = (
+            {f"F{i}" for i in range(1, 15)}
+            | {f"M{i}" for i in range(1, 7)}
+            | {f"P{i}" for i in range(1, 13)}
+        )
         assert ids == expected
+        assert len(specs) == 32
 
     def test_ensure_registered_is_idempotent(self):
         ensure_registered()
+        n1 = len(list_all())
         ensure_registered()
-        # エラー無しで 2 回呼べる。件数は 20 で不変。
-        assert len(list_all()) == 20
+        # エラー無しで 2 回呼べる。件数は不変。
+        assert len(list_all()) == n1
 
 
 class TestSpecValidation:
