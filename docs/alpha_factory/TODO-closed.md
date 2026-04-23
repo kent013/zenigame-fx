@@ -19,6 +19,7 @@
 | T013 | Pair-specific primitive 12 個実装 (P1-P12) | primitives | Medium | 2026-04-23 15:35 | 4348144d3ab721468c353191ae41877032548c3d |
 | T014 | Stage A/B/C gate 実装 + WF folds + live_criteria | stage-gate | Critical | 2026-04-23T18:18:30+09:00 | 0f7aa06 |
 | T015 | Genome archive schema + Parquet 書き込み | ga-architecture | Critical | 2026-04-23T19:15:00+09:00 | 39619ec |
+| T016 | (ii-lite) cross-pair evaluation shadow 実装 | cross-pair | Critical | 2026-04-23T21:09:57+09:00 | a594c50 |
 
 ## Obsoleted
 
