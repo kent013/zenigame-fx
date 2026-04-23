@@ -1,0 +1,129 @@
+{
+  "run_id": "run_20260423_195917",
+  "run_number": 3,
+  "generated_at": "2026-04-23T19:59:17.899088+00:00",
+  "dataset": {
+    "instrument": "EUR_JPY",
+    "start": "2026-03-15T00:00:00+00:00",
+    "end": "2026-03-22T00:00:00+00:00",
+    "bars": 7166,
+    "bars_stage_a": 7166,
+    "bars_stage_b": 7166,
+    "bars_holdout": 30666
+  },
+  "ga_config": {
+    "population_size": 4,
+    "generations": 2,
+    "crossover_rate": 0.7,
+    "mutation_rate": 0.3,
+    "tournament_size": 3,
+    "elite_count": 2,
+    "max_depth": 4,
+    "max_clause": 1,
+    "units": 10000,
+    "fitness_metric": "sharpe",
+    "seed": 42
+  },
+  "backtest_config": {
+    "initial_cash": "1000000",
+    "leverage": 25,
+    "units": 10000
+  },
+  "stage_gate_config": {
+    "stage_a_window_days": 60,
+    "stage_a_alpha": 0.03,
+    "stage_a_threshold": 0.0,
+    "stage_b_window_months": 18,
+    "stage_c_holdout_days": 60,
+    "spread_stress_multiplier": 1.5
+  },
+  "cross_pair_config": {
+    "mode": "shadow",
+    "aggregator_lambda": 0.5
+  },
+  "cross_pair_runtime_mode": "skipped_single_instrument",
+  "per_generation": [
+    {
+      "generation": 0,
+      "n_evaluated": 4,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.0,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 1,
+      "n_evaluated": 4,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.0,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 2,
+      "n_evaluated": 4,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.0,
+      "best_fitness_pen_finite": true
+    }
+  ],
+  "best": {
+    "name": "g0_i3",
+    "generation": 0,
+    "fitness": "0",
+    "fitness_finite": true,
+    "stage_a_pass": false,
+    "stage_b_pass": false,
+    "stage_c_pass": false,
+    "selection_score": [
+      0,
+      0,
+      0,
+      0.0
+    ],
+    "metrics": {
+      "total_pnl": "0.0",
+      "sharpe": null,
+      "sortino": null,
+      "calmar": null,
+      "max_drawdown_pct": "0.0",
+      "trade_count": 0
+    }
+  },
+  "live_criteria": {
+    "checks": {
+      "sharpe": {
+        "value": null,
+        "threshold": "1.0",
+        "pass": false
+      },
+      "total_pnl": {
+        "value": "0.0",
+        "threshold": "50000.0",
+        "pass": false
+      },
+      "max_drawdown_pct": {
+        "value": "0.0",
+        "threshold": "20.0",
+        "pass": true
+      },
+      "trade_count": {
+        "value": 0,
+        "threshold_min": 50,
+        "threshold_max": 5000,
+        "pass": false
+      }
+    },
+    "all_pass": false
+  },
+  "population_size": 4,
+  "graduation_count": 0,
+  "archive_parquet": ".cache/alpha_factory/runs/genomes_run_20260423_195917.parquet"
+}

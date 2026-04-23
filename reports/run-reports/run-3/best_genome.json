@@ -1,0 +1,47 @@
+{
+  "name": "g0_i3",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F9",
+          "weight": 0.5661886052115472,
+          "params": {
+            "n": 25,
+            "scale": 36.291028794180065
+          }
+        },
+        {
+          "name": "F11",
+          "weight": 0.7126265440541406,
+          "params": {
+            "n": 41
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "P6",
+          "weight": 1.1540494616601076,
+          "params": {
+            "atr_n": 27,
+            "threshold_rel": 0.009231151866489236,
+            "scale_rel": 0.0026561528633155442
+          }
+        }
+      ],
+      "weight": 0.7466275076939834
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.3245472536652603,
+    "exit_threshold": 0.07882248255688058,
+    "max_pos": 3,
+    "time_stop_min": 109
+  },
+  "risk": {
+    "stop_atr": 2.795645767204954,
+    "take_atr": 2.198201515421192
+  }
+}
