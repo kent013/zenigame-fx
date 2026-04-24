@@ -1,0 +1,3 @@
+APPROVED。
+
+R2 指摘の「summary.json パス特定の循環」は解消されています。`[done] ... report={run_dir}` を唯一の特定根拠にした Step 4(c)、`_estimate` を配置先予測に使わない明記、Step 5 の参照先統一が一貫しています。該当箇所は [conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1236-port-run-alpha-factory/conceptual-design.md#L113), [conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1236-port-run-alpha-factory/conceptual-design.md#L121), [conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1236-port-run-alpha-factory/conceptual-design.md#L164), [conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1236-port-run-alpha-factory/conceptual-design.md#L166) です。
