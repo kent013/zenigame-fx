@@ -109,7 +109,7 @@ zenigame 側のファイルは `.claude/settings.local.json` の `additionalDire
 
 `.claude/skills/` 配下は以下の三層構成:
 
-1. **`zenigame-fx-*`**（移植・新設済み）: zenigame-fx 環境で動く正式 skill 群（autopilot, codex-vscode, codex-review, alpha-design, todo-add, todo-close, implement, update-docs, improve-cycle 他）
+1. **`zenigame-fx-*`**（移植・新設済み）: zenigame-fx 環境で動く正式 skill 群（autopilot, codex-vscode, codex-review, alpha-design, todo-add, todo-close, implement, update-docs, improve-cycle, analyze-run, run-report, plan-and-design 他）
 2. **`zenigame-*`**（流用そのまま）: zenigame 由来でまだ移植中・参考保持の skill 群。zenigame-fx 用 inflastructure 整備後に zenigame-fx-* 版へ順次置き換える
 3. **`_archived/zenigame-*`**（退避済み）: zenigame 固有インフラ（Dramatiq, systemd, Discord, J-Quants）依存で zenigame-fx では動作しないため `_archived/` プレフィックス配下に退避し、Claude Code の skill 候補一覧から除外（実地検証済み: 2026-04-21）
 

@@ -161,9 +161,10 @@ scripts/codex exec resume "$SESSION_ID" --json \
 
 並列実行時の衝突を避けるため、呼び出し元が一意な `label` を指定:
 - `consensus` — 改善策合議
-- `design-review` — 詳細設計レビュー（alpha-design 2-3/2-4）
+- `design-review` — 詳細設計レビュー（alpha-design 2-3/2-4 / plan-and-design C-2/C-3）
 - `conceptual-review` — 概念設計レビュー（alpha-design 1-3/1-4）
 - `impl-review` — 実装レビュー（implement A-2/A-3）
+- `todo-selection` — TODO 選定合議（plan-and-design A-2）
 
 ---
 
