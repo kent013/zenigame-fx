@@ -36,6 +36,9 @@ from datetime import UTC
 
 import numpy as np
 
+from src.alpha_factory.primitives._bars_cache import (
+    bars_to_mid_ohlc as _bars_to_mid_ohlc,
+)
 from src.alpha_factory.primitives._base import (
     EvaluationContext,
     ParamSpec,
@@ -50,29 +53,8 @@ from src.alpha_factory.primitives._indicators import (
 from src.domain.price import PriceBar
 
 # ---------------------------------------------------------------------------
-# 共通ヘルパー
+# 共通ヘルパー（_bars_to_mid_ohlc は _bars_cache.py に統合済み: T030）
 # ---------------------------------------------------------------------------
-
-
-def _bars_to_mid_ohlc(
-    bars: Sequence[PriceBar],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """mid OHLC (bid/ask 平均) を float64 配列で返す。
-
-    directional_generic / modulator_generic と同等仕様（複製は意図的、循環 import
-    回避目的）。
-    """
-    length = len(bars)
-    o = np.empty(length, dtype=np.float64)
-    h = np.empty(length, dtype=np.float64)
-    low = np.empty(length, dtype=np.float64)
-    c = np.empty(length, dtype=np.float64)
-    for i, b in enumerate(bars):
-        o[i] = (float(b.bid.open) + float(b.ask.open)) * 0.5
-        h[i] = (float(b.bid.high) + float(b.ask.high)) * 0.5
-        low[i] = (float(b.bid.low) + float(b.ask.low)) * 0.5
-        c[i] = (float(b.bid.close) + float(b.ask.close)) * 0.5
-    return o, h, low, c
 
 
 def _bars_to_mid_close(bars: Sequence[PriceBar]) -> np.ndarray:
