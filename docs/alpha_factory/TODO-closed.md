@@ -33,6 +33,7 @@
 | T027 | calibrate-gate port + Stage A threshold 動的調整 | stage-gate | High | 2026-04-24T19:22:48+09:00 | 7f2894e |
 | T028 | broker snapshot caching | infrastructure | High | 2026-04-25 02:50 | - |
 | T029 | strategy signal cache flatten | ga-architecture | High | 2026-04-25 03:47 | - |
+| T030 | bars mid ohlc cache | primitives | High | 2026-04-25 04:41 | - |
 
 ## Obsoleted
 
