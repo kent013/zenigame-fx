@@ -100,6 +100,8 @@ FX 固有の絶対制約（イントラデイ / ロング・ショート両方�
 
 ### 1-2. 起動コマンド
 
+**重要: `--no-report` を必ず付ける。** プロファイル RUN の `reports/run-reports/run-{N}/` 成果物は本番 report を汚染するため出力禁止。archive Parquet と `.cache/alpha_factory/runs/` は引き続き書かれる（ephemeral）。
+
 ```bash
 mkdir -p .cache/alpha_factory/runs/profile
 run_id="profile_$(date +%Y%m%d_%H%M%S)"
@@ -110,13 +112,14 @@ log_out=".cache/alpha_factory/runs/profile/${run_id}.log"
 nohup uv run python -m cProfile -o "${prof_out}" \
   scripts/alpha_factory/run_ga.py \
   --run-id "${run_id}" \
+  --no-report \
   --population-size 8 --generations 1 --seed 42 \
   --instrument EUR_JPY \
   --start 2026-03-01T00:00:00Z --end 2026-03-15T00:00:00Z \
   > "${log_out}" 2>&1 &
 ```
 
-`--profile-args "..."` が指定された場合は GA 設定・データ窓を override する。
+`--profile-args "..."` が指定された場合は GA 設定・データ窓を override する（`--no-report` は skill 側で常に付与）。
 
 ### 1-3. 完了待機
 

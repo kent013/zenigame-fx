@@ -177,6 +177,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
     )
     p.add_argument("--seed", type=int, default=None)
+    p.add_argument(
+        "--no-report",
+        action="store_true",
+        help=(
+            "reports/run-reports/run-{N}/ への成果物書き出しを skip する。"
+            "プロファイル RUN 等で report を汚したくない場合に指定。"
+            "archive Parquet と RUN_CACHE_DIR state (.cache/) は常に書く。"
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -833,24 +842,32 @@ def main(argv: list[str] | None = None) -> int:
     )
     best_genome = genomes_by_name[best_name]
 
-    _write_reports(
-        run_dir=run_dir,
-        cfg=cfg,
-        run_id=run_id,
-        run_number=run_number,
-        bundle=bundle,
-        per_generation=per_generation,
-        best_name=best_name,
-        best_entry=best_entry,
-        best_genome=best_genome,
-        best_row=best_row,
-        final_population=prev_population,
-        final_population_cache=cache,
-        archive_path=archive_path,
-        lane_manager=lane_manager,
-        cross_pair_mode=cross_pair_mode,
-        now=now,
-    )
+    if not args.no_report:
+        _write_reports(
+            run_dir=run_dir,
+            cfg=cfg,
+            run_id=run_id,
+            run_number=run_number,
+            bundle=bundle,
+            per_generation=per_generation,
+            best_name=best_name,
+            best_entry=best_entry,
+            best_genome=best_genome,
+            best_row=best_row,
+            final_population=prev_population,
+            final_population_cache=cache,
+            archive_path=archive_path,
+            lane_manager=lane_manager,
+            cross_pair_mode=cross_pair_mode,
+            now=now,
+        )
+    else:
+        logger.info(
+            "run_ga.skip_report",
+            run_id=run_id,
+            reason="--no-report",
+            note="reports/run-reports/ was not touched (archive + cache only)",
+        )
 
     RUN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     (RUN_CACHE_DIR / f"{run_id}.json").write_text(
@@ -870,10 +887,11 @@ def main(argv: list[str] | None = None) -> int:
         best_fitness=str(best_entry.fitness_pen),
         stage_c_pass=best_entry.stage_c_pass,
     )
+    report_field = "skipped(--no-report)" if args.no_report else str(run_dir)
     print(
         f"[done] run_id={run_id} run_number={run_number} "
         f"best={best_name} fitness_pen={best_entry.fitness_pen} "
-        f"stage_c={best_entry.stage_c_pass} report={run_dir}"
+        f"stage_c={best_entry.stage_c_pass} report={report_field}"
     )
     return 0
 
