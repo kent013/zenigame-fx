@@ -26,6 +26,7 @@
 | T020 | skill port: zenigame-fx-analyze-run | skill-port | High | 2026-04-24 07:45 | 819a3aa321e6fada603625b36c07c5b10ae8c1ca |
 | T021 | skill port: zenigame-fx-run-report + generate_run_report.py 拡張 | skill-port | High | 2026-04-24 11:38 | ad925d02e4d0f55e3f6f57b695df7e51b99280e5 |
 | T022 | skill port: zenigame-fx-plan-and-design | skill-port | High | 2026-04-24 12:35 | 144d797 |
+| T023 | skill port: zenigame-fx-run-alpha-factory | skill-port | High | 2026-04-24T13:20:13+09:00 | 3fa0881 |
 
 ## Obsoleted
 
