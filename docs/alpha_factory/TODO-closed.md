@@ -30,6 +30,7 @@
 | T024 | skill rewrite: zenigame-fx-improve-cycle full version (Phase 2 architecture) | skill-port | Critical | 2026-04-24 14:13 | d2e1b90310db2abe95c6c13ea798dade14e9b074 |
 | T025 | alpha-sieve OOS validation framework + skill port | cross-pair | Critical | 2026-04-24 16:18 | 76cc5df |
 | T026 | post-run-review skill port (BG テーマレビュー) | skill-port | High | 2026-04-24 17:52 | 4c32d3840be91334d4d98d4f06b790c4ba1f8a35 |
+| T027 | calibrate-gate port + Stage A threshold 動的調整 | stage-gate | High | 2026-04-24T19:22:48+09:00 | 7f2894e |
 
 ## Obsoleted
 
