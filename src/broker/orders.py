@@ -17,7 +17,7 @@ class OrderSignal:
     position_id: int | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class Position:
     id: int
     instrument: str

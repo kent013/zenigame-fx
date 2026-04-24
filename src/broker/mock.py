@@ -124,6 +124,12 @@ class MockBroker:
         self._last_close_spread_bps: Decimal | None = None
         # T009: holding cost 累計（position_id → 累積 cost）
         self._holding_cost_by_position: dict[int, Decimal] = {}
+        # T028: per-bar snapshot cache。単一 tuple slot (bar, snapshot) で atomic
+        # に更新し None で invalidate する。3 calls/bar → 1 call/bar に削減
+        # (O(N²)→O(N) 最適化)。cache hit は `bar is cache[0]` identity 判定で
+        # object reference を保持することで id() 再利用問題を回避
+        # (T028 conceptual-design Round 3 Critical 対応)。
+        self._snapshot_cache: tuple[PriceBar, PortfolioSnapshot] | None = None
 
     # ---- public API -------------------------------------------------------
 
@@ -131,6 +137,7 @@ class MockBroker:
         if amount <= 0:
             raise ValueError("amount must be positive")
         self._cash += amount
+        self._invalidate_snapshot_cache()
 
     def submit(self, signal: OrderSignal, leverage: int) -> None:
         # open 系の場合は leverage を事前バリデーション（ここで弾く方がデバッグしやすい）
@@ -258,6 +265,7 @@ class MockBroker:
             )
         if total_cost > 0:
             self._cash -= total_cost
+            self._invalidate_snapshot_cache()
         return total_cost
 
     def force_close_if_margin_call(self, bar: PriceBar) -> list[Trade]:
@@ -313,6 +321,7 @@ class MockBroker:
         self._positions[pos.id] = pos
         # Mark: MVP ではキャッシュから margin を即座に減らさず、snapshot で拘束額を計算する。
         # （国内 FX の「拘束証拠金」モデルを採用。cash は常に「入金額 - 実現損益」。）
+        self._invalidate_snapshot_cache()
         return pos
 
     def _close_one(self, position_id: int, bar: PriceBar, exit_kind: str, reason: ExitReason) -> Trade | None:
@@ -340,6 +349,7 @@ class MockBroker:
             exit_reason=reason,
         )
         self._trades.append(trade)
+        self._invalidate_snapshot_cache()
         return trade
 
     def _close_all_internal(self, bar: PriceBar, exit_kind: str, reason: ExitReason) -> list[Trade]:
@@ -369,16 +379,38 @@ class MockBroker:
         return self._realized_pnl(pos, exit_price)
 
     def _snapshot_at(self, bar: PriceBar) -> PortfolioSnapshot:
+        # T028: cache hit 経路 — object reference 同一性判定 (`is`) で
+        # 同一 bar の 2 回目以降の呼び出しは cached PortfolioSnapshot を
+        # 即 return する。演算順序を一切変えないため bit-identical が
+        # 構造的に保証される。
+        cache = self._snapshot_cache
+        if cache is not None and cache[0] is bar:
+            return cache[1]
+        # cache miss: 既存ロジックで compute (ロジック本体は不変)
         unrealized = sum((self._unrealized_pnl(p, bar) for p in self._positions.values()), Decimal(0))
         equity = self._cash + unrealized
         margin_used = sum((p.entry_margin for p in self._positions.values()), Decimal(0))
         margin_level: Decimal | None = None
         if margin_used > 0:
             margin_level = equity / margin_used * Decimal(100)
-        return PortfolioSnapshot(
+        snapshot = PortfolioSnapshot(
             cash=self._cash,
             equity=equity,
             margin_used=margin_used,
             margin_level_pct=margin_level,
             positions=tuple(self._positions.values()),
         )
+        # T028: cache 書き込み — 1 回の tuple 代入で atomic に更新する。
+        # 例外時はここに到達しないため中間状態が残らない。
+        self._snapshot_cache = (bar, snapshot)
+        return snapshot
+
+    def _invalidate_snapshot_cache(self) -> None:
+        """次回 ``_snapshot_at`` 呼び出しで cache miss を強制する。
+
+        cash / positions の変化時に呼ぶ。bar 進行による invalidate は
+        ``cache[0] is bar`` の identity 比較で自動検出されるため不要。
+
+        単一スロットに ``None`` 代入で invalidate 完了（atomic）。
+        """
+        self._snapshot_cache = None
