@@ -29,6 +29,7 @@
 | T023 | skill port: zenigame-fx-run-alpha-factory | skill-port | High | 2026-04-24T13:20:13+09:00 | 3fa0881 |
 | T024 | skill rewrite: zenigame-fx-improve-cycle full version (Phase 2 architecture) | skill-port | Critical | 2026-04-24 14:13 | d2e1b90310db2abe95c6c13ea798dade14e9b074 |
 | T025 | alpha-sieve OOS validation framework + skill port | cross-pair | Critical | 2026-04-24 16:18 | 76cc5df |
+| T026 | post-run-review skill port (BG テーマレビュー) | skill-port | High | 2026-04-24 17:52 | 4c32d3840be91334d4d98d4f06b790c4ba1f8a35 |
 
 ## Obsoleted
 
