@@ -331,6 +331,22 @@ zenigame-fx Alpha Factory の全ドキュメントから参照される横断用
 
 `<a id="cscv"></a>` CSCV — Bailey, Borwein, López de Prado, Zhu (2014) "The Probability of Backtest Overfitting" で提案された過学習確率推定枠組み。観測区間を S 個に分割し、ランダムな組み合わせの train/test split で in-sample / out-of-sample 順位の逆転確率を計測する。zenigame-fx Phase 2 [Alpha Sieve](#alpha-sieve) は CSCV の簡易版として単一追加 OOS 窓を先行導入し、Phase 4 で複数窓 + PBO スコア計算へ拡張予定。
 
+### Post-Run Review
+
+`<a id="post-run-review"></a>` Post-Run Review — improve-cycle Phase 1 完了直後に launcher が fire-and-forget で起動する、テーマ別の戦略レビュー BG Agent 群 (T026)。Codex (`gpt-5.3-codex` medium) と議論して上位 0-3 案を `/zenigame-fx-alpha-design` → `/zenigame-fx-todo-add` まで自動完結させる。launch owner は **improve-cycle Phase 1 末尾のみ** に固定。analyze-run スタンドアロン実行時には自動起動しない (二重起動防止)。
+
+### Review Theme
+
+`<a id="review-theme"></a>` Review Theme — [Post-Run Review](#post-run-review) の引数として渡される 5 値固定 enum (`signal-quality` / `regime-awareness` / `cost-efficiency` / `robustness` / `risk-management`)。各 review-theme には 2 文字の短縮 code (`sq` / `ra` / `ce` / `rb` / `rm`) が紐付き、`zenigame-fx-todo-add` の TODO theme (10 種) とは別空間で、内部で固定マッピング表を介して TODO theme へ変換される (signal-quality→primitives / regime-awareness→cross-pair / cost-efficiency→ga-architecture / robustness→statistics / risk-management→stage-gate)。post-run-review 由来の TODO は `--summary` 先頭に `[r:{code}]` prefix を付与する規約 (30 文字制約対応で短縮 code を採用)。
+
+### Launched Marker
+
+`<a id="launched-marker"></a>` Launched Marker — `.cache/alpha_factory/post-run-review-launched-{run_id}.json`。同一 run_id の [Post-Run Review](#post-run-review) BG Agent 群を二重起動しないための排他 marker。improve-cycle Phase 1 末尾 launcher が起動前にチェックし、起動直後に書き込む。
+
+### Review Summary
+
+`<a id="review-summary"></a>` Review Summary — `.cache/alpha_factory/post-run-review-summary-{run_id}.md`。各 [Review Theme](#review-theme) Agent が完了時に 1 行追記する集約ログ (`{theme}: {status} / {todos_added} / {note}`)。silent failure 防止と次 cycle 観測用。
+
 ## 関連 TODO
 
 - 未着手（用語追加は各 doc 作成時に随時）

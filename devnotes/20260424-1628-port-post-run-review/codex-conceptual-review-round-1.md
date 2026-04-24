@@ -1,0 +1,48 @@
+全体判定: **CHANGES_REQUESTED**
+
+参照済み: [devnotes/20260424-1628-port-post-run-review/conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md), [docs/alpha_factory/concepts/post-run-review.md](/Users/ishitoya/repository/zenigame-fx/docs/alpha_factory/concepts/post-run-review.md), [devnotes/20260421-1850-fx-skill-port/debate-synthesis.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260421-1850-fx-skill-port/debate-synthesis.md), [scripts/alpha_factory/todo_manager.py](/Users/ishitoya/repository/zenigame-fx/scripts/alpha_factory/todo_manager.py), [zenigame-fx-analyze-run/SKILL.md](/Users/ishitoya/repository/zenigame-fx/.claude/skills/zenigame-fx-analyze-run/SKILL.md), [zenigame-fx-improve-cycle/SKILL.md](/Users/ishitoya/repository/zenigame-fx/.claude/skills/zenigame-fx-improve-cycle/SKILL.md), `git log -n 20`。
+
+**1. 使命との整合性**
+- [Warning] Fact: FX 5 テーマは `Clause / Stage gate / Cross-pair / Sieve / Risk` という現行の設計次元とは概ね整合しています。[debate-synthesis.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260421-1850-fx-skill-port/debate-synthesis.md) [conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):77 Interpretation: 方向性は mission に沿っていますが、「改善案のスループットを 5 倍化」は未検証で、live_criteria 到達への本質寄与としては言い過ぎです。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):19 修正提案: 成功判定を「次サイクルで採用された TODO 数」「採用 TODO の live_criteria 対応率」「重複率」に置き換えてください。
+- [Suggestion] Fact: `risk-management` は `live_criteria 達成パス` を明示しています。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):85 Interpretation: 最も mission 直結なので、5 テーマ横並びではなく優先度を 1 段上げた方がよいです。
+
+**2. 禁止事項違反**
+- [Suggestion] Fact: 明示的な `live_criteria` 緩和、期間延長、オーバーナイト導入は本文にありません。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md) Interpretation: 直接の禁止事項違反は見当たりません。
+- [Warning] Fact: `cost-efficiency` と `risk-management` は `spread / slippage / max_pos / time_stop` を扱います。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):83-85 Interpretation: 「取引回数を減らして見かけ改善」に滑りやすいテーマです。修正提案: prompt に「trade_count 減少を主効果とする案は禁止」「live_criteria.trade_count_min からの距離悪化は reject」を明記してください。
+
+**3. 実現可能性**
+- [Critical] Fact: post-run-review のテーマは `signal-quality` など 5 種ですが、現行 TODO 体系が受け付ける `theme` は `ga-architecture / primitives / stage-gate / cross-pair / statistics / ...` です。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):21-23 [zenigame-fx-todo-add/SKILL.md](/Users/ishitoya/repository/zenigame-fx/.claude/skills/zenigame-fx-todo-add/SKILL.md):16-18 [scripts/alpha_factory/todo_manager.py](/Users/ishitoya/repository/zenigame-fx/scripts/alpha_factory/todo_manager.py):17-28 Interpretation: H2 の「同テーマ Open TODO 判定」は現行 schema では成立しません。修正提案: post-run-review 用の `review_theme` を TODO に別メタデータとして追加するか、5 テーマから TODO theme への明示マッピング表を設計に追加してください。
+- [Warning] Fact: BG Agent 起動時の引数は `{theme} {run_id}` だけで、入力契約で前提にしている `analysis-claude.md / analysis-codex.md` の場所を渡していません。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):38-40 [conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):64-66 Interpretation: standalone の `analyze-run` から起動した場合、子 Agent は分析成果物を安定して特定できません。修正提案: `--tmp_dir` を必須伝搬にしてください。
+- [Warning] Fact: run-alpha-factory 側では「Claude Code 固有の `run_in_background=True` に依存しない」と明示しています。[devnotes/20260424-1236-port-run-alpha-factory/conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1236-port-run-alpha-factory/conceptual-design.md):170-175 Interpretation: 本設計の `run_in_background` 前提は、同 repo 内の直近方針と衝突しています。修正提案: 「Claude Code 専用運用に限定する」のか、「CLI 互換を保つ」のかを先に決めてください。
+
+**4. 期待効果の妥当性**
+- [Warning] Fact: `0-3 件 / テーマ`、`5 倍化`、`数千 tok / session` は経験的主張として書かれていますが、実測根拠は本文にありません。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):19-29 [conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):184-186 Interpretation: C7 的に effect size claim としては弱いです。修正提案: 初期 acceptance は「5 テーマ起動成功率」「重複 reject 率」「実際に plan-and-design で消費された TODO 数」に落としてください。
+- [Suggestion] Fact: 5 テーマは直交「概ね」と記載されています。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):88 Interpretation: `cost-efficiency` と `robustness` は実務上かなり重なります。テーマ間の主担当境界を 1 行ずつ追加した方がよいです。
+
+**5. リスク**
+- [Critical] Fact: `todo_manager.py next-id` はファイルを読んで最大 ID + 1 を返すだけで、`add` と分離されています。ロックも CAS もありません。[scripts/alpha_factory/todo_manager.py](/Users/ishitoya/repository/zenigame-fx/scripts/alpha_factory/todo_manager.py):145-188 Interpretation: 設計書の「next-id は atomic」は現行コードと不一致で、並列 Agent で ID 衝突も重複追加も起こり得ます。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):194-195 修正提案: `todo_manager.py` にロック付き `add-auto` を追加し、採番・重複検査・書き込みを 1 コマンドに統合してください。
+- [Critical] Fact: 成功判定で「improve-cycle / analyze-run 双方の hook から発火」と明記しています。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):30 Fact: `improve-cycle` は Phase 1 で `analyze-run` を呼ぶ構造です。[zenigame-fx-improve-cycle/SKILL.md](/Users/ishitoya/repository/zenigame-fx/.claude/skills/zenigame-fx-improve-cycle/SKILL.md):19-21 Interpretation: owner を 1 つに決めないと同一 Run で二重起動します。修正提案: hook owner を `analyze-run` のみに固定するか、`improve-cycle` からは `--launch-post-run-review=false` を渡して抑止してください。
+- [Warning] Fact: `失敗しても申し送りが残らないだけで improve-cycle は続行可能` としています。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):187-189 Interpretation: fire-and-forget なので本体継続は正しいですが、学習ループ上は silent failure になります。修正提案: 少なくとも `launched / failed / skipped` の run 単位サマリを 1 ファイル残してください。
+
+**6. スコープの適切さ**
+- [Warning] Fact: 本 TODO は「接続点を復活させる」までで、自動起動条件は別 TODO に切っています。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):145-163 Interpretation: 分離方針自体は妥当ですが、二重起動防止と cooldown は接続点に付随する最低限の安全弁です。修正提案: 本 TODO に「単一 owner」「同一 run_id 再起動禁止」だけは含めてください。
+- [Suggestion] Fact: `0-3 件 × 5 テーマ` だと理論上 15 TODO/Run です。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):27-29 Interpretation: 初回 port としてはやや広いです。初期は `max_new_todos_per_run=3 total` の全体 cap が無難です。
+
+**7. メモリ制約**
+- [Suggestion] Fact: 現行のレビュー基準は `24GB / 6 workers / 1 worker 約 3GB` です。[zenigame-fx-alpha-design/SKILL.md](/Users/ishitoya/repository/zenigame-fx/.claude/skills/zenigame-fx-alpha-design/SKILL.md):111-117 Fact: 本施策は md/Agent 主体で、GA worker の in-process メモリを直接増やす設計ではありません。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):165-177 Interpretation: 直ちに 3GB/worker を破る設計ではありません。
+- [Warning] Fact: 5 BG Agent は Phase 4 の GA 実行と時間的に重なり得ます。[conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1628-port-post-run-review/conceptual-design.md):67 [zenigame-fx-improve-cycle/SKILL.md](/Users/ishitoya/repository/zenigame-fx/.claude/skills/zenigame-fx-improve-cycle/SKILL.md):36-40 Interpretation: ローカル RAM よりも同時セッション数・I/O・トークン消費の上振れリスクがあります。修正提案: `max_parallel_review_agents` を 2-3 に制限するか、Phase 4 開始前に未完了 Agent を起動禁止にしてください。
+
+**8. 前提検証（C4）**
+- [Critical] Fact: `analyze-run` は現契約で post-run-review 未接続と書いており、`improve-cycle` からの skill 経由切替も「別 follow-up TODO」と書いています。[zenigame-fx-analyze-run/SKILL.md](/Users/ishitoya/repository/zenigame-fx/.claude/skills/zenigame-fx-analyze-run/SKILL.md):24-38 Interpretation: 現行契約はまだ安定していません。その状態で hook を improve-cycle/analyze-run の両方へ生やすのは危険です。修正提案: 「誰が launch owner か」を先に 1 箇所に確定してください。
+- [Warning] Fact: `227ac58` が HEAD であることは `git log` で確認できました。Fact: `834 tests passing / 1 skip` は今回の確認対象ファイルからは裏取りしていません。 Interpretation: 前提の commit は検証済みですが、テスト件数は未検証です。修正提案: 前提欄を「HEAD=227ac58 verified, test count = reported baseline」に書き分けてください。
+
+**9. Design-first（C1）**
+- [Suggestion] Fact: 本レビューでは `docs/alpha_factory/`、関連 `devnotes/`、`git log` を参照しました。 Interpretation: C1 はこのレビューでは満たしています。
+- [Warning] Fact: 設計本文は `debate-synthesis` と旧 `post-run-review` には触れていますが、直近の `run-alpha-factory` の「run_in_background 非依存」判断と、現行 `todo_manager.py` の実装制約を吸収していません。[devnotes/20260424-1236-port-run-alpha-factory/conceptual-design.md](/Users/ishitoya/repository/zenigame-fx/devnotes/20260424-1236-port-run-alpha-factory/conceptual-design.md):170-175 [scripts/alpha_factory/todo_manager.py](/Users/ishitoya/repository/zenigame-fx/scripts/alpha_factory/todo_manager.py):145-188 Interpretation: C1 は部分的で、現行コード契約への着地が不足しています。修正提案: 概念設計の前提節に「launch owner」「TODO metadata」「atomic add」の 3 点を verified/unverified で追加してください。
+
+主な修正必須点は 3 つです。  
+1. post-run-review の 5 テーマと TODO schema の対応付けを定義すること。  
+2. TODO 追加を atomic にすること。  
+3. hook owner を 1 箇所に固定して二重起動を防ぐこと。  
+
+この 3 点が入れば、再レビューで APPROVED まで持っていけます。

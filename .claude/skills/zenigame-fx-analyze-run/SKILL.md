@@ -26,7 +26,7 @@ argument-hint: "<run_id> [--tmp_dir path]"
 User / manual invocation → /zenigame-fx-analyze-run
 /zenigame-fx-analyze-run → /zenigame-fx-codex-review  (Codex 独立分析)
                          → /zenigame-fx-codex-vscode  (codex 呼び出し規約)
-                         × /zenigame-fx-post-run-review        (未移植、整備後に接続)
+                         → /zenigame-fx-post-run-review        (改善案 hook の標準起動点は improve-cycle Phase 1 末尾。analyze-run スタンドアロン実行時は起動しない)
                          × /zenigame-fx-analyze-genome-archive (未移植、shallow read のみ委譲予定)
 ```
 
@@ -217,7 +217,7 @@ scripts/codex exec --ephemeral --sandbox read-only -m gpt-5.3-codex \
 - 全体判定: {OK / CONCERN / CRITICAL_DRIFT}
 
 ### 未接続 hook（整備後に起動）
-- zenigame-fx-post-run-review: 未移植
+- zenigame-fx-post-run-review: 接続済 (improve-cycle Phase 1 末尾の launcher で起動。analyze-run スタンドアロンでは起動しない)
 - zenigame-fx-analyze-genome-archive: 未移植（shallow read のみ委譲予定）
 ```
 
@@ -239,7 +239,7 @@ scripts/codex exec --ephemeral --sandbox read-only -m gpt-5.3-codex \
 ## 注意事項
 
 - 本 skill は **Markdown 編集のみ**で動くように設計された run report analyzer。archive の**深い分析は `zenigame-fx-analyze-genome-archive`（未移植）に委譲**する予定
-- `zenigame-fx-post-run-review`（未移植）整備後に、Step 4 末尾に自動起動ブロックを追加する（follow-up TODO）
+- `zenigame-fx-post-run-review` の起動 owner は **improve-cycle Phase 1 末尾のみ** (T026 接続済)。analyze-run スタンドアロン実行時に hook を発火させない (二重起動防止のため)。手動起動は `docs/alpha_factory/runbook.md` の Post-Run Review 節を参照
 - 既存 `zenigame-analyze-run`（zenigame 側）は参照保持、**zenigame-fx 系からは参照しない**（reference-only）
 - artifact 名は `analysis-claude.md` / `analysis-codex.md` に SSoT 統一
 

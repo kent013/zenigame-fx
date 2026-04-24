@@ -18,7 +18,9 @@ zenigame-fx-improve-cycle (orchestrator)
 │
 ├─ Phase 1: /zenigame-fx-analyze-run {run_id} --tmp_dir {tmp_dir}
 │   → analysis-claude.md, analysis-codex.md
-│   <!-- TODO(post-run-review-port): zenigame-fx-post-run-review 整備後に BG 起動を追加。現時点では no-op -->
+│   <!-- post-run-review hook (T026 接続済): 5 review-theme を BG Agent (run_in_background: true) で fire-and-forget 起動 (launch owner = 本フェーズ単一)
+│        marker: .cache/alpha_factory/post-run-review-launched-{run_id}.json で二重起動防止
+│        cooldown / theme rotation / trigger 判断ロジックは別 TODO -->
 │
 ├─ [Phase 1.5 未移植] IC Sync
 │   <!-- TODO(primitive-ic-port): FX には primitive-ic 未整備。整備後に zenigame-fx-primitive-ic-sync を接続 -->
@@ -262,7 +264,52 @@ bootstrap cycle 時は skip。
 
 > **producer 不在の fail-soft 設計**: 現状 `zenigame-fx-analyze-run` には `emergency_fix` 書き込み契約がない（key は常に null）。consumer 側（improve-cycle）はキー存在時のみ尊重するフェイルソフトで実装。「壊れはしないが、現状では発火しない（=検証不能）」状態であり、producer 整備は別 TODO の責務。
 
-<!-- TODO(post-run-review-port): zenigame-fx-post-run-review 整備後、Phase 1 完了直後に BG 起動するブロックを追加 -->
+<!-- post-run-review hook (T026 接続済): Phase 1 完了直後に 5 review-theme を BG Agent で fire-and-forget 起動。
+     marker: .cache/alpha_factory/post-run-review-launched-{run_id}.json
+     起動条件 (cooldown / theme rotation / trigger) の判断ロジックは別 TODO で詳細化。
+     現時点では「marker 不在なら毎 Phase 1 完了で起動」のシンプル実装でよい。
+     summary: .cache/alpha_factory/post-run-review-summary-{run_id}.md で各 Agent の launched/failed/skipped/success を 1 行ずつ集約。 -->
+
+### Post-Run Review BG 起動 (T026)
+
+Phase 1 完了直後、5 review-theme について BG Agent を fire-and-forget で起動する。
+
+**Step 1: 二重起動防止 marker 検査**
+
+```bash
+LAUNCHED_MARKER=".cache/alpha_factory/post-run-review-launched-${run_id}.json"
+if [ -f "$LAUNCHED_MARKER" ]; then
+  echo "[INFO] post-run-review already launched for ${run_id}, skipping"
+  # marker が既存 → skip (Phase 2 へ続行)
+else
+  # Step 2: 5 review-theme を BG Agent で起動 (micro-stagger 1 秒間隔)
+  # Agent ツール (run_in_background: true) で以下を順次起動:
+  #   /zenigame-fx-post-run-review signal-quality   {run_id} --tmp_dir {tmp_dir}
+  #   /zenigame-fx-post-run-review regime-awareness {run_id} --tmp_dir {tmp_dir}
+  #   /zenigame-fx-post-run-review cost-efficiency  {run_id} --tmp_dir {tmp_dir}
+  #   /zenigame-fx-post-run-review robustness       {run_id} --tmp_dir {tmp_dir}
+  #   /zenigame-fx-post-run-review risk-management  {run_id} --tmp_dir {tmp_dir}
+  # 各起動の間に sleep 1 を挟む (micro-stagger、lockf 競合分散)
+  # max_parallel_review_agents = 5 (固定。実測ベースの cap は別 TODO)
+
+  # Step 3: marker 書き込み (起動直後)
+  mkdir -p .cache/alpha_factory
+  cat > "$LAUNCHED_MARKER" <<EOF
+{
+  "run_id": "${run_id}",
+  "tmp_dir": "${tmp_dir}",
+  "launched_at": "$(TZ=Asia/Tokyo date -Iseconds)",
+  "themes": ["signal-quality", "regime-awareness", "cost-efficiency", "robustness", "risk-management"]
+}
+EOF
+fi
+
+# Step 4: improve-cycle 自身は完了を待たず Phase 2 へ続行 (fire-and-forget)
+# 各 BG Agent は完了時に .cache/alpha_factory/post-run-review-summary-${run_id}.md に
+# 1 行追記する (Agent 自身の責務)。improve-cycle 側はこの summary を待たない。
+```
+
+**失敗時**: 5 Agent のうち一部が起動失敗しても improve-cycle は続行 (fire-and-forget)。summary が空 / 部分的でも Phase 2 のブロック条件にしない。
 
 **状態ファイル更新**: `completed_phases` に `"analyze-run"` を追加、`phase` を `"plan-and-design"` に更新。
 
@@ -540,7 +587,7 @@ Phase 6: 繰り返し判定
 
 | hook | 整備後の接続点 | 復活時の作業 |
 |------|--------------|------------|
-| `zenigame-fx-post-run-review` | Phase 1 末尾 | `<!-- TODO(post-run-review-port) -->` コメント解除 + BG 起動ブロック追加 |
+| `zenigame-fx-post-run-review` | Phase 1 末尾 | **接続済 (T026)**。自動起動条件 (cooldown / rotation / trigger 判断) は別 TODO に分離 |
 | `zenigame-fx-primitive-ic-sync` | Phase 1.5 全体 | `<!-- TODO(primitive-ic-port) -->` コメントブロック解除 |
 | `zenigame-fx-calibrate-gate` | Phase 2.5 全体 | `<!-- TODO(calibrate-gate-port) -->` コメントブロック解除 |
 | `zenigame-fx-alpha-sieve` | Phase 5.5 全体 | `<!-- TODO(alpha-sieve-port) -->` コメントブロック解除 |

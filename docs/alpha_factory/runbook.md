@@ -47,6 +47,33 @@ Phase 0 Survey → Phase 1 Design → Phase 2 TODO Add → Phase 3 Implement
 
 `analyze-run → plan-and-design → calibrate-gate → implement → run-ga → run-report → alpha-sieve` を順次起動。
 
+### 2-1. Post-Run Review — テーマ別 BG レビュー (T026)
+
+improve-cycle Phase 1 (analyze-run) 完了直後、5 つの review-theme について BG Agent (`run_in_background: true`) を fire-and-forget で起動する。
+
+| review-theme | code | TODO theme | フォーカス |
+|--------------|------|-----------|----------|
+| signal-quality | sq | primitives | プリミティブ予測力 |
+| regime-awareness | ra | cross-pair | レジーム適応 |
+| cost-efficiency | ce | ga-architecture | コスト現実性 |
+| robustness | rb | statistics | 過学習耐性 |
+| risk-management | rm | stage-gate | リスク統制 |
+
+post-run-review 由来の TODO は `--summary` 先頭に **`[r:{code}]`** prefix を必ず付与 (30 文字制約対応の短縮 code、prefix 7 文字固定 → 内容 23 文字残)。
+
+- launch owner: `improve-cycle` Phase 1 末尾のみ (analyze-run スタンドアロンでは起動しない)
+- 二重起動防止 marker: `.cache/alpha_factory/post-run-review-launched-{run_id}.json`
+- 集約 summary: `.cache/alpha_factory/post-run-review-summary-{run_id}.md`
+- 申し送り: `.cache/alpha_factory/post-run-review-{review-theme}-deferred.md` (テーマごと)
+
+**手動起動** (analyze-run スタンドアロン実行後に改善案を出したい場合):
+
+```
+/zenigame-fx-post-run-review signal-quality run_YYYYMMDD_HHMMSS --tmp_dir devnotes/YYYYMMDD-HHMM-analyze-run-XXXX
+```
+
+`--tmp_dir` には `analyze-run` が出力した `analysis-claude.md` / `analysis-codex.md` のあるディレクトリを指定。
+
 ### 3. 失敗時の復旧
 
 | 失敗箇所 | 一次対応 |
