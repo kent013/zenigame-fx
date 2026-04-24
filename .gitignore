@@ -25,3 +25,9 @@ reports/ga-runs/
 docs/oanda/jp-v1/
 docs/oanda/v20/
 docs/oanda/shared/
+
+# T027 calibrate-gate atomic write tmp / lock files
+config/alpha_factory/*.tmp
+config/alpha_factory/*.lock
+config/alpha_factory/default.yaml.tmp
+config/alpha_factory/default.yaml.lock
