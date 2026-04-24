@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 
+import numpy as np
+
 from src.alpha_factory.primitives._base import (
     EconomicEventSnapshot,
     EvaluationContext,
@@ -151,3 +153,30 @@ class RegistryEvaluator:
             aux_pair_bars=self._aux_pair_bars,
         )
         return spec.compute(ctx)
+
+    def evaluate_all_bars(
+        self, bars: list[PriceBar], signal: SignalConfig
+    ) -> np.ndarray:
+        """bars 全長に対する signal 値配列を返す。
+
+        primitive は look-ahead bias-free な前提: `compute_all_bars(bars)[idx]`
+        は `compute_all_bars(bars[:idx+1])[idx]` と一致する。backtest のように
+        bars 全体が既知の経路では 1 回だけ計算して indexing した方が
+        O(N²) → O(N) で圧倒的に速い (DslStrategy.prepare が本メソッドを利用)。
+
+        Raises:
+            KeyError: signal.name が registry に無い場合。
+        """
+        spec = get_primitive(signal.name)
+        ctx = EvaluationContext(
+            bars=bars,
+            idx=0,
+            pair=self._pair,
+            params=signal.params,
+            aux_series=self._aux_series,
+            event_snapshot=self._event_snapshot,
+            vix_snapshot=self._vix_snapshot,
+            strict_snapshot_required=self._strict_snapshot_required,
+            aux_pair_bars=self._aux_pair_bars,
+        )
+        return spec.compute_all_bars(ctx)

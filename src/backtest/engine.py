@@ -107,6 +107,13 @@ def run_backtest(
                 "or ensure bars span multiple UTC dates."
             )
 
+    # Strategy が prepare() を提供する場合、backtest 全バーを 1 度だけ渡して
+    # primitive 配列を事前計算させる (DslStrategy.prepare 参照: O(N²) → O(N))。
+    # Live feed / 単純 Strategy は prepare を持たず、ここは NoOp になる。
+    prepare = getattr(strategy, "prepare", None)
+    if callable(prepare):
+        prepare(bars_list)
+
     broker.deposit(config.initial_cash)
     broker.set_spread_filter(config.max_spread_bps)
 

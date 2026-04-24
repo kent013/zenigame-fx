@@ -7,14 +7,27 @@ primitive 評価は PrimitiveEvaluator Protocol 経由で行い、本 TODO で�
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Protocol
+
+import numpy as np
 
 from src.broker.orders import OrderSignal, PortfolioSnapshot
 from src.domain.price import PriceBar
 from src.dsl.composite import compute_composite
 from src.dsl.genome import Genome, SignalConfig
+
+
+def _signal_cache_key(
+    sig: SignalConfig,
+) -> tuple[str, tuple[tuple[str, float | int], ...]]:
+    """prepare() の precompute cache で使う安定キー。
+
+    params は dict（unordered）なので sorted(items) のタプル化で決定論化する。
+    """
+    return (sig.name, tuple(sorted(sig.params.items())))
 
 
 class PrimitiveEvaluator(Protocol):
@@ -74,6 +87,12 @@ class DslStrategy:
         self._warmup = warmup_bars
         self._session_close = session_close_utc
         self._bars: list[PriceBar] = []
+        # prepare() で埋まる precompute cache。
+        # key=(signal.name, sorted(params.items()) tuple) → full-length np.ndarray
+        # 存在する場合 on_bar は arr[idx] で O(1) 参照し、evaluator.evaluate を
+        # 経由しないため per-bar O(N) 計算が消える（backtest 全体 O(N²) → O(N)）。
+        self._precomputed: dict[tuple[str, tuple[tuple[str, float | int], ...]], np.ndarray] | None = None
+        self._bar_count = 0
 
     @property
     def genome(self) -> Genome:
@@ -82,22 +101,69 @@ class DslStrategy:
     def warmup_bars(self) -> int:
         return self._warmup
 
+    def prepare(self, bars: list[PriceBar]) -> None:
+        """backtest 全バーを事前計算して cache する（O(N²) → O(N) 最適化）。
+
+        primitive が look-ahead bias-free である前提を利用:
+        ``compute_all_bars(bars)[idx]`` == ``compute_all_bars(bars[:idx+1])[idx]``
+        （rolling* は prefix-sum、ema/atr/rsi/adx は recurrence で過去のみ参照）。
+
+        evaluator が ``evaluate_all_bars`` を提供しない場合は NoOp で、従来の
+        per-bar ``evaluate()`` 経路にフォールバックする（live feed / paper trading
+        互換）。
+        """
+        if not hasattr(self._evaluator, "evaluate_all_bars"):
+            return
+        cache: dict[
+            tuple[str, tuple[tuple[str, float | int], ...]], np.ndarray
+        ] = {}
+        for clause in self._genome.clauses:
+            for sig in (*clause.directional, *clause.local_gate):
+                key = _signal_cache_key(sig)
+                if key not in cache:
+                    cache[key] = self._evaluator.evaluate_all_bars(bars, sig)
+        self._precomputed = cache
+        self._bar_count = 0
+
+    def _lookup_signal(self, sig: SignalConfig, idx: int) -> float:
+        """prepared 経路: cache から arr[idx] を安全に取り出す (nan → 0.0)。"""
+        assert self._precomputed is not None
+        key = _signal_cache_key(sig)
+        arr = self._precomputed[key]
+        if idx < 0 or idx >= len(arr):
+            return 0.0
+        v = float(arr[idx])
+        return 0.0 if not math.isfinite(v) else v
+
     def on_bar(
         self, bar: PriceBar, snapshot: PortfolioSnapshot
     ) -> list[OrderSignal]:
-        self._bars.append(bar)
-        if len(self._bars) < self._warmup:
-            return []
-        idx = len(self._bars) - 1
+        if self._precomputed is not None:
+            # prepared 経路: self._bars の蓄積を省略、bar_count で idx 決定
+            idx = self._bar_count
+            self._bar_count += 1
+            if idx < self._warmup:
+                return []
+        else:
+            self._bars.append(bar)
+            if len(self._bars) < self._warmup:
+                return []
+            idx = len(self._bars) - 1
 
         # 各 clause の primitive 値を評価
         values_per_clause: list[dict[str, float]] = []
         for clause in self._genome.clauses:
             vals: dict[str, float] = {}
-            for sig in clause.directional:
-                vals[sig.name] = self._evaluator.evaluate(self._bars, idx, sig)
-            for sig in clause.local_gate:
-                vals[sig.name] = self._evaluator.evaluate(self._bars, idx, sig)
+            if self._precomputed is not None:
+                for sig in clause.directional:
+                    vals[sig.name] = self._lookup_signal(sig, idx)
+                for sig in clause.local_gate:
+                    vals[sig.name] = self._lookup_signal(sig, idx)
+            else:
+                for sig in clause.directional:
+                    vals[sig.name] = self._evaluator.evaluate(self._bars, idx, sig)
+                for sig in clause.local_gate:
+                    vals[sig.name] = self._evaluator.evaluate(self._bars, idx, sig)
             values_per_clause.append(vals)
         composite = compute_composite(self._genome.clauses, values_per_clause)
 
