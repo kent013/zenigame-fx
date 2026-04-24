@@ -315,6 +315,22 @@ zenigame-fx Alpha Factory の全ドキュメントから参照される横断用
 
 `<a id="per-pair-home-mode"></a>` Per-pair Home Mode — `MockBroker(home_currency=None)` (T019 導入) の default 挙動。broker インスタンスの home 通貨を `instrument_meta.quote_currency` に自動設定する。`USD_JPY → home=JPY`、`EUR_USD → home=USD`、`USD_CAD → home=CAD` 等。Phase 2 は single-instrument orientation の broker のみを対象とし、pair 単独 backtest 内では home==quote で閉じる。cross-pair shadow の Sharpe 集約は pair ごとに home 通貨が異なる状態で成立する (Sharpe が無次元 / scale 不変のため、`tests/broker/test_mock_multi_currency.py` で直接検証)。Phase 4 で真の quote→home 換算を必要とする場合 (例: JPY 口座で EUR_USD を JPY 建てで評価) は MockBroker に `fx_rate_provider` 引数を追加する設計を予約済 (T019 設計ドキュメント参照)。
 
+### Alpha Sieve
+
+`<a id="alpha-sieve"></a>` Alpha Sieve — `scripts/alpha_factory/run_alpha_sieve.py` (T025) で実装される **Stage C 通過個体の OOS 再検証ゲート**。Stage C holdout（60 日）後に **5 日 embargo + 90 日 OOS** で再 backtest を実行し、`sharpe > 0.5 AND trade_count >= 30 AND total_pnl > 0` を要求して true positive を絞る。Phase 2 は CSCV (Bailey et al. 2014) の簡易版として **単一追加 OOS 窓** を先行導入。Phase 4 で複数非連続窓に拡張予定。レポート出力先: `reports/alpha-sieve/{yyyy-mm}/sieve-R{run_number}.md`。詳細: [sieve.md](sieve.md) / [concepts/alpha-sieve.md](concepts/alpha-sieve.md)。
+
+### Sieve OOS Window
+
+`<a id="sieve-oos-window"></a>` Sieve OOS Window — [Alpha Sieve](#alpha-sieve) の OOS 評価期間。`[holdout_end + sieve_embargo_days, +sieve_window_days)`。デフォは 5 日 embargo + 90 日窓 = `[holdout_end + 5d, +95d)`。`SieveConfig.sieve_window_days` (default 90) と `SieveConfig.sieve_embargo_days` (default 5) で制御。CLI override: `--sieve-window-days` / `--sieve-embargo-days`。
+
+### Sieve Embargo
+
+`<a id="sieve-embargo"></a>` Sieve Embargo — Stage C holdout と Sieve OOS Window の境界に置く隔離日数 (`SieveConfig.sieve_embargo_days`、default 5)。autocorrelation / レジーム持続による境界依存の緩和を目的とする。López de Prado (2018) Ch.7 の embargoed CV 思想を Stage C → Sieve に適用。Phase 4 で複数非連続窓化する際の inter-window gap 設計のベース。
+
+### CSCV (Combinatorially Symmetric Cross-Validation)
+
+`<a id="cscv"></a>` CSCV — Bailey, Borwein, López de Prado, Zhu (2014) "The Probability of Backtest Overfitting" で提案された過学習確率推定枠組み。観測区間を S 個に分割し、ランダムな組み合わせの train/test split で in-sample / out-of-sample 順位の逆転確率を計測する。zenigame-fx Phase 2 [Alpha Sieve](#alpha-sieve) は CSCV の簡易版として単一追加 OOS 窓を先行導入し、Phase 4 で複数窓 + PBO スコア計算へ拡張予定。
+
 ## 関連 TODO
 
 - 未着手（用語追加は各 doc 作成時に随時）
