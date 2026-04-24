@@ -31,6 +31,8 @@
 | T025 | alpha-sieve OOS validation framework + skill port | cross-pair | Critical | 2026-04-24 16:18 | 76cc5df |
 | T026 | post-run-review skill port (BG テーマレビュー) | skill-port | High | 2026-04-24 17:52 | 4c32d3840be91334d4d98d4f06b790c4ba1f8a35 |
 | T027 | calibrate-gate port + Stage A threshold 動的調整 | stage-gate | High | 2026-04-24T19:22:48+09:00 | 7f2894e |
+| T028 | broker snapshot caching | infrastructure | High | 2026-04-25 02:50 | - |
+| T029 | strategy signal cache flatten | ga-architecture | High | 2026-04-25 03:47 | - |
 
 ## Obsoleted
 
