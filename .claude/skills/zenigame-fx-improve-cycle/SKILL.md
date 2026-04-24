@@ -31,9 +31,12 @@ zenigame-fx-improve-cycle (orchestrator)
 │   │   (GA パラメータ介入が必要な場合、improvement-plan.md / detailed-design.md 内に
 │   │    人間/Codex 判断として記載される。自動更新する skill は現存しない)
 │   │
-│   ├─ [Phase 2.5 未移植] Calibrate Gate
-│   │   <!-- TODO(calibrate-gate-port): zenigame-fx-calibrate-gate 整備後に接続。
-│   │        整備されるまで GA パラメータ自動調整経路は存在しない -->
+│   ├─ Phase 2.5: /zenigame-fx-calibrate-gate {run_id}
+│   │   → archive 由来 Stage A pass rate から `stage_gate.stage_a.threshold` を deterministic に更新
+│   │   （`stage_gate.stage_a.calibrate.enabled=false` で無効化可）
+│   │   接続済 (T027): scripts/alpha_factory/calibrate_gate.py + .claude/skills/zenigame-fx-calibrate-gate/SKILL.md
+│   │   <!-- 注: plateau_mutation_bump 等の他自動調整機構との衝突回避ルールは
+│   │        devnotes/20260424-1759-port-calibrate-gate/detailed-design.md §4.5 参照 -->
 │   │
 │   ├─ Phase 3: /zenigame-fx-implement {todo_id} --tmp_dir {tmp_dir} {--skip-consensus}（selected_todos ごと）
 │   │

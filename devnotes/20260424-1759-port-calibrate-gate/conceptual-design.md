@@ -1,0 +1,342 @@
+# 概念設計: calibrate-gate port + Stage A threshold 動的調整
+
+- 作成日時: 2026-04-24 17:59 JST（rev1: 18:30 Codex review 反映）
+- 関連 TODO: T027 (本設計から登録)
+- 親 skill: zenigame-calibrate-gate (zenigame 版)
+- 接続先: improve-cycle Phase 2.5 (現状 `<!-- TODO(calibrate-gate-port) -->` で stub 化)
+
+## 1. 目的
+
+GA Run 終了後に **archive Parquet** から Stage A の実通過率を計算し、
+`config/alpha_factory/default.yaml::stage_gate.stage_a.threshold` を
+次 Run 用に自動調整する skill / scripts を実装する。
+
+### 使命との関係（North Star との従属関係）
+
+**`stage_a.target_pass_rate` は使命そのものではない**。
+使命は「`live_criteria` を全て満たす Stage C 通過個体を 1 つ見つけること」であり、
+target_pass_rate は **探索圧 (selection pressure) の健全性を測る代理指標** である。
+
+- pass rate が極端に低い → Stage B/C への流入が枯渇 → 探索ループが止まる → 使命未達
+- pass rate が極端に高い → Stage B 計算コストが膨張、effectivly Stage A が無くなる
+- pass rate が target 帯にある → 適切な exploration / exploitation バランス
+
+したがって本 skill の判断材料には pass_rate に加えて以下の **従属監視指標** を必ず併記し、
+threshold 変更ログに残す（変更には使わないが、後段の人間判断 / LLM 拡張で参照する）:
+
+- **Stage B 到達数 / Stage C 到達数**: pass rate を変えた結果、
+  本来の目的指標が改善しているか
+- **live_criteria gap**: 全 individual の `(sharpe, total_pnl, max_drawdown, trade_count)`
+  の最良値と `live_criteria` 各閾値とのギャップ。これが縮小していなければ、
+  threshold チューニングだけでは使命達成に近づかない（別 TODO 起票の signal）
+
+## 2. 背景
+
+- T014 で Stage A 評価関数は実装済み (`evaluate_stage_a`、`fitness_pen >= threshold` で pass)
+- T015 で archive に `stage_a_pass: bool` を 1 行 / 個体で記録
+- T018 で run_ga.py が swim_lane × Stage A/B/C を archive に書き出すフロー完成
+- 現状 threshold は `0.0` 固定。実 Run の pass 率がどうなるかは Run しないとわからず、
+  毎 Run 手動チューニングは現実的でない
+- zenigame 版は `stage_b_ratio` (Stage A → B 進出個体率) を LLM で調整しているが、
+  zenigame-fx は **Stage A 自体の閾値** を動かす設計（より直接的な制御点）
+
+### 名前に立ち返る (`機能の名前に立ち返れ` 原則)
+
+- `stage_a.threshold`: 「fitness_pen の最低水準」。下げれば pass 増、上げれば pass 減
+- `stage_a.target_pass_rate`: 「Run 全体で結果として何割が Stage B に進むことを設計目標とするか」
+
+## 3. スコープ
+
+### In scope (本 TODO)
+
+1. `scripts/alpha_factory/calibrate_gate.py` 新規作成
+   - 入力: `--run-id` (省略時は最新 archive Parquet)
+   - 計算: 前 Run の Stage A pass rate (**generation-aware aggregation**, §4.1 参照)
+   - 算出: target_pass_rate との乖離から新 threshold
+   - 反映: `config/alpha_factory/default.yaml` の `stage_gate.stage_a.threshold` を atomic update
+   - dry-run mode (`--dry-run`): 値計算 + 提案出力のみ、yaml 不変
+2. `.claude/skills/zenigame-fx-calibrate-gate/SKILL.md` 新規作成（skill wrapper）
+3. `improve-cycle` SKILL.md Phase 2.5 hook を「接続済」に更新
+4. `docs/alpha_factory/concepts/calibrate-gate.md` 新規 + `stage-gates.md` に節追加
+
+### Out of scope (別 TODO に分離)
+
+- LLM 判断による調整（zenigame 版踏襲）。本 TODO は **deterministic 計算のみ**
+- Stage B / Stage C threshold の動的調整
+- target_pass_rate 自体の動的調整（手動 SSOT 維持）
+- per-lane / per-instrument の threshold 分離（Phase 4 以降）
+- 他自動調整機構（`plateau_mutation_bump` 等）との optimal coordination
+  （本 TODO では衝突回避ルール = §4.5 のみ規定し、最適化は別 TODO）
+
+## 4. アルゴリズム設計
+
+### 4.1 actual pass rate の集計 (generation-aware aggregation)
+
+**集計方式は SSOT 化**: `stage_gate.stage_a.calibrate.aggregation_mode` で切替。
+
+| mode | 計算式 | 利用想定 |
+|------|--------|---------|
+| `last_k_generations` (推奨既定) | 最終 K 世代だけで pass rate を計算（K = `aggregation_window`、既定 K=5） | survivor bias を抑え、選抜後分布の実情を捉える |
+| `all_generations` | 全行 pass / 全行 total（後方互換用） | デバッグ・初期実装の検証用 |
+| `generation_weighted_mean` | 各世代 pass rate を計算→世代 index に対する線形重み平均（後半世代を重く） | smooth aggregation（外れ世代の影響を緩和） |
+
+**既定**: `last_k_generations`, `aggregation_window=5`。
+
+**根拠**: GA は generation 進行とともに selection pressure で fitness 分布が
+右シフトする。次 Run の threshold は「次 Run の population が突き当たる
+Stage A」の pass 率を狙うので、**選抜後分布に近い終盤世代** を反映するのが
+推定量として正しい（survivor bias を逆手に取って活用する）。
+
+`fitness_pen` の `quantile` 計算も同じ集計範囲で行う。
+
+### 4.2 deterministic 制御則 (bounded quantile tracking with hysteresis + delta clamp)
+
+「PID-like」と呼ぶのは不正確（誤差量に比例しない）。本制御則の正確な名称は
+**bounded quantile tracking with hysteresis (dead-band) + delta clamp** である。
+
+```
+target = config.stage_gate.stage_a.target_pass_rate     # 例 0.15
+tol    = config.stage_gate.stage_a.calibrate.pass_rate_tolerance_abs  # 既定 0.05
+actual = aggregate_pass_rate(rows, mode, window)        # §4.1
+prev   = config.stage_gate.stage_a.threshold
+
+# === 飛び先の決定 ===
+fitness_pen_pool = aggregate_fitness_pen(rows, mode, window)  # §4.1 と同範囲
+
+if abs(actual - target) <= tol:
+    new_raw, decision = prev, "in_band"        # hysteresis: dead-band 内は無変更
+elif var(fitness_pen_pool) <= eps_var:
+    new_raw, decision = prev, "skip_zero_variance"  # quantile-snap が無意味
+else:
+    # 「target 通過率を達成する仮想 threshold」へスナップ
+    new_raw = quantile(fitness_pen_pool, 1 - target)
+    decision = "tighten" if actual > target + tol else "loosen"
+
+# === 変更幅クランプ（暴走防止） ===
+delta = new_raw - prev
+delta = clamp(delta, -max_delta, +max_delta)             # 既定 max_delta = 0.50
+new   = prev + delta
+
+# === 絶対値クランプ（極端な値の防御） ===
+new = clamp(new, threshold_floor, threshold_ceiling)
+
+# 小数桁丸め
+new = round(new, 4)
+```
+
+#### 振動 / overshoot の前提条件
+
+- dead-band により、target ± tol 内は確実に静止
+- delta clamp により、1 Run の動きは max_delta で頭打ち
+- distribution shift（次 Run で fitness_pen 分布が大きく動く）が起きると
+  oscillation の余地はある。これは別 TODO（distribution shift detector）で対処
+- 同一 Run 内で他の自動調整機構（mutation_rate 等）も動くと因果分離が困難に
+  なるため §4.5 で衝突回避ルールを規定
+
+#### パラメータ既定値（SSOT は yaml の `stage_gate.stage_a.calibrate` セクション）
+
+| キー | 既定 | 単位 | 意味 |
+|------|------|-----|------|
+| `enabled` | `true` | - | false で全 no-op |
+| `aggregation_mode` | `last_k_generations` | enum | 集計方式 (§4.1) |
+| `aggregation_window` | 5 | generations | 終盤 K 世代 |
+| `pass_rate_tolerance_abs` | 0.05 | pass rate (絶対) | dead-band 半幅 |
+| `threshold_delta_abs_max` | 0.50 | fitness_pen (絶対) | 1 Run の変更幅上限 |
+| `threshold_floor` | -100.0 | fitness_pen | 下限 |
+| `threshold_ceiling` | 100.0 | fitness_pen | 上限 |
+| `min_sample_size` | 30 | rows | これ未満なら skip + WARN |
+| `eps_var` | 1e-9 | fitness_pen² | quantile-snap skip 判定 |
+
+### 4.3 LLM 判断 vs deterministic の比較
+
+| 観点 | deterministic (本 TODO) | LLM (将来 TODO) |
+|------|----------------------|----------------|
+| 再現性 | 完全に再現可（input → output 一意） | seed/prompt 依存で variance |
+| 説明性 | 数式 / dead-band で明示 | 自然言語で根拠説明、ただし post-hoc |
+| 失敗モード | 数値 outlier に脆弱 (quantile 計算) | hallucination, 過剰チューニング |
+| 拡張性 | 追加 metric を入れる度に式の再設計 | 新変数を context に足すだけで対応 |
+| API コスト | ゼロ | Codex/LLM 呼び出し費 |
+| 監査ログ | 全式・全クランプを構造化ログ出力 | LLM 出力 + reasoning |
+| 適用フェーズ | Phase 2 (現状) | Phase 4 以降、cross-pair / DSR / regime も併合判断するとき |
+
+**結論**: Phase 2 の責務は「target_pass_rate を成立させる」だけで、判断の自由度を上げる必要は無い。
+deterministic で十分。LLM 判断は別 TODO で導入余地を残す。
+
+### 4.4 dead-band の根拠（暫定既定値 + 見直し条件）
+
+`pass_rate_tolerance_abs = 0.05` は **暫定既定値（仮説値）**。
+
+- 現時点の根拠: Tier1 6 lane × population 30 × 15 generations ≒ 2700 評価で、
+  `last_k_generations=5` だと ≈ 900 評価。±5pt は ±45 個体の幅。
+  個数換算ベース、**世代内相関 / lane 間相関は未考慮** であることを明記する
+- 見直しトリガー（README に記載）:
+  1. 連続 3 Run で `decision="in_band"` が継続したら tol を 1pt 下げる検討
+  2. 連続 3 Run で `tighten` ↔ `loosen` が交互発生したら tol を 1pt 上げる検討
+  3. archive 5 Run 蓄積後、`actual` の世代内 std から `tol = k × std`
+     (k ≈ 1) で empirical 化を再設計
+
+### 4.5 他自動調整機構との衝突回避ルール
+
+現状の自動調整候補:
+
+| 機構 | 制御変数 | 制御点 |
+|------|---------|--------|
+| calibrate-gate (本 TODO) | `stage_gate.stage_a.threshold` | Run 終了後 |
+| `improve_cycle.plateau_mutation_bump` | `ga.mutation_rate` | Run 終了後（improve-cycle 内） |
+| (将来) calibrate-gate v2 / per-lane | per-instrument threshold | Run 終了後 |
+
+**衝突回避ルール**:
+
+1. **適用順序の固定**: improve-cycle Phase 2.5 で calibrate-gate を実行 →
+   その後 plateau_mutation_bump（順序を SKILL.md に明記）
+2. **同一 Run 多重変動の構造化ログ**: 両機構が同 Run で変更した場合、
+   `improve-cycle` レベルで JSONL ログにまとめて出す
+   （後段で因果分離可能にする）
+3. **片方発動時の他方凍結は本 TODO で実装しない**（過剰な相互依存を避ける）。
+   将来「片方発動時は他方を 1 Run 凍結」が必要になった場合は別 TODO で導入
+
+## 5. データモデル
+
+### 5.1 yaml 追加セクション (SSOT 拡張)
+
+```yaml
+stage_gate:
+  stage_a:
+    window_days: 60
+    target_pass_rate: 0.15
+    alpha: 0.03
+    threshold: 0.0
+    calibrate:                           # 新設
+      enabled: true
+      aggregation_mode: last_k_generations  # last_k_generations / all_generations / generation_weighted_mean
+      aggregation_window: 5
+      pass_rate_tolerance_abs: 0.05
+      threshold_delta_abs_max: 0.50
+      threshold_floor: -100.0
+      threshold_ceiling: 100.0
+      min_sample_size: 30
+      eps_var: 0.000000001
+```
+
+`calibrate.enabled: false` の場合、scripts は no-op + 報告のみ。
+
+### 5.2 yaml の atomic update
+
+`Edit` ツールで該当行のみピンポイント書換。ただし scripts は以下の手順で
+**atomic** に更新する:
+
+1. yaml を temp file に新内容で書き出し
+2. parse + 構造検証 (`stage_gate.stage_a.threshold` が float に戻ること)
+3. `os.replace(temp, original)` で atomic rename
+4. 失敗時は temp を削除しロールバック
+
+ruamel.yaml の round-trip dump を使い、コメント / order / アンカーを保持する。
+
+### 5.3 出力 (構造化ログ + 報告)
+
+```jsonl
+{"event":"calibrate_gate.input", "run_id":"run_...", "n_rows_total":2700, "n_rows_used":900, "aggregation_mode":"last_k_generations", "aggregation_window":5, "stage_a_pass_used":135, "actual":0.15, "target":0.15, "tol":0.05, "prev_threshold":0.0}
+{"event":"calibrate_gate.monitoring", "stage_b_pass_count":42, "stage_c_pass_count":3, "best_sharpe":0.85, "best_total_pnl":35000.0, "best_max_dd":0.12, "best_trade_count":210, "live_criteria_gap":{"sharpe":0.15,"total_pnl":15000.0,"max_dd":0.0,"trade_count_min":0,"trade_count_max":0}}
+{"event":"calibrate_gate.decision", "decision":"in_band", "new_threshold":0.0, "delta":0.0, "q_target":0.02, "var_fitness_pen":12.4}
+{"event":"calibrate_gate.applied", "yaml_path":"config/alpha_factory/default.yaml", "dry_run":false}
+```
+
+## 6. インタフェース
+
+### 6.1 CLI
+
+```bash
+uv run python scripts/alpha_factory/calibrate_gate.py \
+  [--run-id RUN_ID] \
+  [--config-path PATH] \
+  [--dry-run] \
+  [--archive-dir PATH]
+```
+
+| 引数 | 既定 | 説明 |
+|-----|-----|------|
+| `--run-id` | 最新 Parquet | `genomes_{run_id}.parquet` を選ぶ |
+| `--config-path` | `config/alpha_factory/default.yaml` | 編集対象 yaml |
+| `--dry-run` | False | 値計算と提案出力のみ、yaml 不変 |
+| `--archive-dir` | `.cache/alpha_factory/runs` | Parquet 配置 dir |
+
+exit code:
+- 0 = success (yaml 更新 or in_band)
+- 2 = invalid arg
+- 3 = no archive (skip)
+- 4 = calibrate disabled
+- 5 = io error
+- 6 = sample size insufficient (skip + WARN)
+- 7 = zero variance (skip)
+- 8 = schema mismatch (Parquet schema が想定外)
+
+### 6.2 skill wrapper
+
+`/zenigame-fx-calibrate-gate [run_id]`。スキルは scripts を呼び出し、結果を表形式でユーザー報告する。
+
+## 7. 失敗モードと対処（拡張）
+
+| 失敗 | 検出 | 対処 |
+|-----|-----|------|
+| archive Parquet 0 件 | n_rows == 0 | skip (exit 3) |
+| 全 fail かつ n>=10 (n_rows >= 10) | actual == 0 | quantile-snap で `q_target` を計算 → 通常 path で loosen 提案 |
+| 全 pass | actual == 1 | quantile-snap で tighten 提案、ただし threshold_ceiling で頭打ち |
+| `min_sample_size` 未満 (n<30) | sample size guard (C7) | skip + WARN (exit 6) |
+| ゼロ分散 / IQR ≈ 0 | `var(fitness_pen) <= eps_var` | quantile-snap が無意味 → skip (exit 7) |
+| NaN / 欠損カラム / schema mismatch | pyarrow read 後の column check | skip + ERROR (exit 8) |
+| `calibrate.enabled: false` | yaml 読み込み | exit 4 + 報告 |
+| yaml 編集失敗 (Permission, parse error) | 例外 | exit 5 + temp rollback |
+| atomic update 中断（プロセスキル） | os.replace 完了前 | original yaml 不変、temp はゴミとして残るが次回 calibrate で上書き |
+
+## 8. テスト方針
+
+- **mock archive で pass rate 計算**: pass 件数 0 / 全 fail / 50% / 100% / 中間値で classification 確認
+- **dead-band**: target±tol 内 → no change
+- **過剰高 (actual > target+tol)**: 新 threshold > prev (tighten)
+- **過剰低 (actual < target-tol)**: 新 threshold < prev (loosen)
+- **max_delta clamp**: quantile が極端な値でも Δ <= max_delta
+- **floor/ceiling clamp**: 極端な fitness_pen でも new in [floor, ceiling]
+- **dry-run**: yaml の SHA256 が前後で一致
+- **disabled**: `calibrate.enabled=false` → exit 4 + 不変
+- **archive 0 件**: skip + exit 3
+- **n < min_sample_size**: skip + exit 6
+- **zero variance**: skip + exit 7
+- **schema mismatch**: skip + exit 8
+- **aggregation modes**: `last_k_generations` / `all_generations` で結果が変わること
+- **atomic update**: 中断シミュレーションで original 不変
+
+## 9. リスク
+
+1. **fitness_pen の単位想定が外れる**: Stage A は backtest sharpe ベース。
+   絶対値が大きい / 負方向に振れる傾向がある。floor/ceiling の既定 ±100 は
+   現状の sample (Run 3 で fitness_pen ≈ -47〜-65) を覆うが、
+   将来 fitness_metric を変えたら再調整が必要 → SSOT で yaml に出している
+2. **target_pass_rate の単一スカラーで全 lane を縛るリスク**:
+   Tier1 ペアごとに難易度が違う場合、single threshold では不公平。
+   Phase 4 で per-lane 化 (calibrate-gate-v2 TODO) を予定
+3. **distribution shift で oscillation**: 次 Run の fitness_pen 分布が大きく動くと
+   quantile-snap が overshoot する可能性。`§4.4 見直しトリガー` で監視。
+   Phase 4 で distribution shift detector + adaptive max_delta を別 TODO で導入
+
+## 10. 参考
+
+- zenigame `.claude/skills/zenigame-calibrate-gate/SKILL.md` (LLM 判断版)
+- 既存 `src/alpha_factory/stage_gate.py::evaluate_stage_a` (threshold 評価点)
+- 既存 `src/alpha_factory/archive.py::GENOMES_SCHEMA` (stage_a_pass column)
+- López de Prado (2018) Ch.7 — 過学習防止の文脈で「閾値を動かす施策には
+  必ず dead-band を置け」という原則
+- Bechhofer, Dunnett & Sobel (1968) — selection from a finite population:
+  generation-aware aggregation の素地
+- 制御理論の hysteresis (dead-band): Åström & Wittenmark (1995) Adaptive Control
+
+## 11. 完了条件 (Definition of Done)
+
+- [ ] `scripts/alpha_factory/calibrate_gate.py` 実装 + tests
+- [ ] `.claude/skills/zenigame-fx-calibrate-gate/SKILL.md` 新設
+- [ ] `config/alpha_factory/default.yaml` に `calibrate` セクション追加
+- [ ] `docs/alpha_factory/concepts/calibrate-gate.md` 新設
+- [ ] `docs/alpha_factory/stage-gates.md` に calibrate-gate 節追加
+- [ ] `improve-cycle` SKILL.md Phase 2.5 hook を「接続済」に更新
+- [ ] cycle 21 run-3 archive で smoke test (Stage A 通過 0 件 → loosen 提案)
+- [ ] mypy / ruff clean
+- [ ] 既存 834 passed テストを壊さない + 新規 ≥ 12 テスト追加

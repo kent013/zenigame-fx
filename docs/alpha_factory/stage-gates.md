@@ -199,12 +199,53 @@ loader は **GA runner 統合 TODO** で実装予定。現状は dataclass を�
 - [terminology.md](terminology.md) — StageResult / WF Fold / Embargo /
   Reason Code / CrossPairResult
 
+## Stage A threshold 動的調整 (T027 calibrate-gate)
+
+`stage_gate.stage_a.threshold` は **calibrate-gate** (T027) により Run 終了後に
+自動更新される。実装は `scripts/alpha_factory/calibrate_gate.py` + pure logic
+`src/alpha_factory/calibrate_gate.py`。
+
+### 制御則
+
+bounded quantile tracking with hysteresis (dead-band) + delta clamp。
+
+1. `actual = aggregate_pass_rate(rows, mode, window)` (既定 mode=`last_k_generations`, window=5)
+2. `actual ∈ [target - tol, target + tol]` → `in_band` (変更なし)
+3. それ以外 → `q_target = quantile(fitness_pen_pool, 1 - target)` を仮想 threshold へスナップ
+4. 変更幅は `threshold_delta_abs_max` で clamp（暴走防止）
+5. 結果は `[threshold_floor, threshold_ceiling]` で clamp
+
+### SSOT
+
+`config/alpha_factory/default.yaml` の `stage_gate.stage_a.calibrate.*`:
+
+| キー | 既定 | 意味 |
+|------|------|------|
+| `enabled` | `true` | false で全 no-op |
+| `aggregation_mode` | `last_k_generations` | `last_k_generations` / `all_generations` / `generation_weighted_mean` |
+| `aggregation_window` | 5 | last_k_generations の K |
+| `pass_rate_tolerance_abs` | 0.05 | dead-band 半幅 |
+| `threshold_delta_abs_max` | 0.5 | 1 Run の変更幅上限 |
+| `threshold_floor` / `threshold_ceiling` | -100.0 / 100.0 | 絶対値クランプ |
+| `min_sample_size` | 30 | この未満は skip + WARN |
+| `eps_var` | 1e-9 | quantile-snap skip 判定 |
+
+### improve-cycle 接続
+
+`improve-cycle` Phase 2.5 (calibrate-gate hook) で実行される。skill wrapper:
+`.claude/skills/zenigame-fx-calibrate-gate/SKILL.md`。
+
+詳細: [concepts/calibrate-gate.md](concepts/calibrate-gate.md) /
+`devnotes/20260424-1759-port-calibrate-gate/`。
+
 ## 関連 TODO
 
 - T014 完了 — `src/alpha_factory/stage_gate.py` / `src/alpha_factory/walk_forward.py`
-  実装。後続:
+  実装。
+- T027 完了 — calibrate-gate (`stage_a.threshold` 動的調整)
+- 後続:
   - GA runner 統合 (yaml → `StageGateConfig`、Stage 実行配線)
-  - calibrate-gate (`stage_a.threshold` 動的調整)
   - DSR hard gate 化 (Stage B `dsr_min`)
   - cross-pair-evaluation-shadow (Stage C `CrossPairEvaluator` 実装)
   - cross-pair の hard gate 化 (Phase 4)
+  - calibrate-gate v2: per-lane / LLM 判断 / distribution shift detector (別 TODO)

@@ -43,9 +43,23 @@ live_criteria:
 stage_gate:
   stage_a:
     window_days: 60
-    target_pass_rate: 0.15      # monitor_only (calibrate-gate TODO で使用)
+    target_pass_rate: 0.15      # 探索圧の代理指標 (calibrate-gate T027 で使用)
     alpha: 0.03
-    threshold: 0.0              # 暫定固定 (calibrate-gate TODO で動的化)
+    threshold: 0.0              # T027 calibrate-gate により Run 終了後に動的更新
+    # T027 calibrate-gate 設定 (deterministic 制御則)
+    # - 概念設計: docs/alpha_factory/concepts/calibrate-gate.md
+    # - SSOT: 本セクション、loader: scripts/alpha_factory/calibrate_gate.py
+    calibrate:
+      enabled: true
+      # last_k_generations / all_generations / generation_weighted_mean
+      aggregation_mode: last_k_generations
+      aggregation_window: 5
+      pass_rate_tolerance_abs: 0.05      # dead-band 半幅 (pass_rate 絶対)
+      threshold_delta_abs_max: 0.5       # 1 Run の変更幅上限 (fitness_pen 絶対)
+      threshold_floor: -100.0
+      threshold_ceiling: 100.0
+      min_sample_size: 30                # この未満は skip + WARN
+      eps_var: 0.000000001               # quantile-snap skip 判定 (var(fitness_pen))
   stage_b:
     window_months: 18
     wf_train_days: 120
