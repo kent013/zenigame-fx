@@ -31,6 +31,9 @@ from datetime import UTC
 
 import numpy as np
 
+from src.alpha_factory.primitives._bars_cache import (
+    bars_to_mid_ohlc as _bars_to_mid_ohlc,
+)
 from src.alpha_factory.primitives._base import (
     EvaluationContext,
     ParamSpec,
@@ -61,31 +64,6 @@ from src.domain.price import PriceBar
 # ---------------------------------------------------------------------------
 # 共通 helper
 # ---------------------------------------------------------------------------
-
-
-def _bars_to_mid_ohlc(
-    bars,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """mid OHLC (bid/ask 平均) を float64 配列で返す。"""
-    length = len(bars)
-    o = np.empty(length, dtype=np.float64)
-    h = np.empty(length, dtype=np.float64)
-    low = np.empty(length, dtype=np.float64)
-    c = np.empty(length, dtype=np.float64)
-    for i, b in enumerate(bars):
-        bo = float(b.bid.open)
-        bh = float(b.bid.high)
-        bl = float(b.bid.low)
-        bc = float(b.bid.close)
-        ao = float(b.ask.open)
-        ah = float(b.ask.high)
-        al = float(b.ask.low)
-        ac = float(b.ask.close)
-        o[i] = (bo + ao) * 0.5
-        h[i] = (bh + ah) * 0.5
-        low[i] = (bl + al) * 0.5
-        c[i] = (bc + ac) * 0.5
-    return o, h, low, c
 
 
 def _nan_to_zero(x: float) -> float:
