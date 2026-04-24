@@ -4,6 +4,12 @@
 
 (ii-lite) 評価の構造（target + アンカー 2 ペア、集約関数、通過基準、shadow / hard モード）を一箇所に集約する。実装は `src/alpha_factory/cross_pair.py` (T016 実装済)。
 
+**注**: Cross-pair (ii-lite) と [Alpha Sieve](sieve.md) は **独立した追加ゲート** である。
+- Cross-pair: Stage C と同時実行、target + 2 アンカーで shadow 集約
+- Alpha Sieve: Stage C **後** の OOS 期間 (holdout + 5d ~ +95d) で再 backtest、target ペア単独で再検証
+
+両者は補完関係にあり、Phase 4 で hard gate 化と DSR 接続が完了した時点で「Stage C 通過 → cross-pair hard pass → Alpha Sieve pass → 卒業候補」という三段直列ゲートとなる。
+
 ## スコープ
 
 - target / アンカーの選び方（構造）
