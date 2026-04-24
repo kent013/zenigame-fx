@@ -19,7 +19,9 @@ composite score を介してヒステリシス判定で売買する。
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 
 @dataclass(frozen=True)
@@ -30,17 +32,22 @@ class SignalConfig:
         name: primitive ID（例: "F1", "M1"）。後続 TODO で PrimitiveRegistry 登録値と一致必須。
         weight: directional の場合 [0.1, 2.0] の正、local_gate の場合 [-2.0, 2.0]。
         params: primitive 固有パラメータ（fast/slow 窓、閾値など）。
-                生成時に defensive copy される（shared reference 遮断）。
+                生成時に defensive copy + MappingProxyType で immutable 化される
+                (Cycle 2 / T029 で deep immutability 保証)。
     """
 
     name: str
     weight: float
-    params: dict[str, float | int] = field(default_factory=dict)
+    params: Mapping[str, float | int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        # frozen dataclass でも object.__setattr__ で内部書き換え可能。
-        # 外部 dict と reference を共有しないよう dict(...) でコピー。
-        object.__setattr__(self, "params", dict(self.params))
+        # Cycle 2 / T029: dict(self.params) で shared reference を遮断した上で
+        # MappingProxyType で外部からの mutation を禁止 (deep immutability)。
+        # DslStrategy の prepare-time identity check (`prepared.genome is
+        # self._genome`) が安全に成立する前提を構成する。
+        object.__setattr__(
+            self, "params", MappingProxyType(dict(self.params))
+        )
 
 
 @dataclass(frozen=True)

@@ -121,9 +121,9 @@ def test_prepare_produces_identical_trades_to_per_bar_path() -> None:
     broker_slow = MockBroker(instrument_meta=meta)
     result_slow = run_backtest(bars, strat_slow, broker_slow, cfg)
 
-    # prepare 経路が使われたことを確認
-    assert strat_fast._precomputed is not None
-    assert strat_slow._precomputed is None
+    # prepare 経路が使われたことを確認 (Cycle 2 / T029 で _prepared に移行)
+    assert strat_fast._prepared is not None
+    assert strat_slow._prepared is None
 
     # trade 件数・最終 equity が一致
     assert len(result_fast.trades) == len(result_slow.trades)
@@ -149,9 +149,9 @@ def test_prepare_noop_when_evaluator_lacks_evaluate_all_bars() -> None:
 
     ev = _StripPreparedEvaluator(RegistryEvaluator(pair="USD_JPY"))
     strat = DslStrategy(genome, ev)
-    # prepare 呼んでも precomputed は埋まらない
+    # prepare 呼んでも prepared は埋まらない (Cycle 2 / T029)
     strat.prepare(bars)
-    assert strat._precomputed is None
+    assert strat._prepared is None
 
 
 def test_prepare_reuses_cache_across_duplicate_signals() -> None:
