@@ -7,7 +7,7 @@ zenigame（日本株 Alpha Factory）から流用した skill 群のうち、以
 
 `_archived/` プレフィックスは Claude Code の skill 候補一覧から除外される（実地検証: 2026-04-21）。
 
-## 退避された skill 一覧（合計 20 件）
+## 退避された skill 一覧（合計 21 件）
 
 ### A. インフラ依存で動作不可 (7 件、cycle 1 / T001 で archive)
 
@@ -21,7 +21,7 @@ zenigame（日本株 Alpha Factory）から流用した skill 群のうち、以
 | `zenigame-primitive-ic-eval` | J-Quants API + 日本株プリミティブ registry 依存 | zenigame-fx 用 primitive registry 整備 + IC 評価再設計 |
 | `zenigame-primitive-ic-sync` | J-Quants + プリミティブ registry 依存 | 同上 |
 
-### B. zenigame-fx-* 版あり、reference 保持目的 (13 件、cycle 23 で archive)
+### B. zenigame-fx-* 版あり、reference 保持目的 (14 件、cycle 23 以降で archive)
 
 | zenigame-* skill | zenigame-fx-* 版 | port 完了 cycle |
 |------------------|------------------|----------------|
@@ -34,6 +34,7 @@ zenigame（日本株 Alpha Factory）から流用した skill 群のうち、以
 | `zenigame-implement` | `zenigame-fx-implement` | T003 |
 | `zenigame-improve-cycle` | `zenigame-fx-improve-cycle` | (縮小版、T018 統合の上位 wrapper として再構築予定) |
 | `zenigame-manage-sessions` | `zenigame-fx-manage-sessions` | T003 |
+| `zenigame-profile-optimize` | `zenigame-fx-profile-optimize` | 2026-04-25 |
 | `zenigame-snapshot` | `zenigame-fx-snapshot` | T003 |
 | `zenigame-todo-add` | `zenigame-fx-todo-add` | T003 |
 | `zenigame-todo-close` | `zenigame-fx-todo-close` | T003 |
@@ -55,7 +56,6 @@ zenigame（日本株 Alpha Factory）から流用した skill 群のうち、以
 | `zenigame-update-run-metrics` | Medium | run-metrics-summary.md 更新 |
 | `zenigame-post-run-review` | Medium | テーマ別レビュー (Phase 4) |
 | `zenigame-set-focus` | Low | focus-theme 切替 |
-| `zenigame-profile-optimize` | Low | プロファイル → 改善サイクル |
 | `zenigame-alpha-sieve` | Low | OOS Sieve (Phase 4) |
 
 ## 復活手順
