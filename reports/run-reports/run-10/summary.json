@@ -1,0 +1,709 @@
+{
+  "run_id": "run_20260425_004002",
+  "run_number": 10,
+  "generated_at": "2026-04-25T00:40:13.448688+00:00",
+  "dataset": {
+    "instrument": "EUR_JPY",
+    "start": "2026-03-01T00:00:00+00:00",
+    "end": "2026-03-15T00:00:00+00:00",
+    "bars": 14351,
+    "bars_stage_a": 14351,
+    "bars_stage_b": 14351,
+    "bars_holdout": 37832
+  },
+  "ga_config": {
+    "population_size": 96,
+    "generations": 60,
+    "crossover_rate": 0.7,
+    "mutation_rate": 0.3,
+    "tournament_size": 3,
+    "elite_count": 2,
+    "max_depth": 4,
+    "max_clause": 1,
+    "units": 10000,
+    "fitness_metric": "sharpe",
+    "seed": null
+  },
+  "backtest_config": {
+    "initial_cash": "1000000",
+    "leverage": 25,
+    "units": 10000
+  },
+  "stage_gate_config": {
+    "stage_a_window_days": 60,
+    "stage_a_alpha": 0.03,
+    "stage_a_threshold": 0.0,
+    "stage_b_window_months": 18,
+    "stage_c_holdout_days": 60,
+    "spread_stress_multiplier": 1.5
+  },
+  "cross_pair_config": {
+    "mode": "shadow",
+    "aggregator_lambda": 0.5
+  },
+  "cross_pair_runtime_mode": "skipped_single_instrument",
+  "per_generation": [
+    {
+      "generation": 0,
+      "n_evaluated": 96,
+      "stage_a_pass": 8,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 8.11512761939894,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 1,
+      "n_evaluated": 96,
+      "stage_a_pass": 13,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 8.11512761939894,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 2,
+      "n_evaluated": 96,
+      "stage_a_pass": 21,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 8.606361745254393,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 3,
+      "n_evaluated": 96,
+      "stage_a_pass": 28,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 9.50625788686992,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 4,
+      "n_evaluated": 96,
+      "stage_a_pass": 36,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 9.579339545307809,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 5,
+      "n_evaluated": 96,
+      "stage_a_pass": 47,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 14.964480394504683,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 6,
+      "n_evaluated": 96,
+      "stage_a_pass": 60,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 14.964480394504683,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 7,
+      "n_evaluated": 96,
+      "stage_a_pass": 60,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 14.964480394504683,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 8,
+      "n_evaluated": 96,
+      "stage_a_pass": 56,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 14.964480394504683,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 9,
+      "n_evaluated": 96,
+      "stage_a_pass": 70,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 14.964480394504683,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 10,
+      "n_evaluated": 96,
+      "stage_a_pass": 61,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 14.964480394504683,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 11,
+      "n_evaluated": 96,
+      "stage_a_pass": 65,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 17.312947373630614,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 12,
+      "n_evaluated": 96,
+      "stage_a_pass": 61,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 17.312947373630614,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 13,
+      "n_evaluated": 96,
+      "stage_a_pass": 67,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 17.312947373630614,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 14,
+      "n_evaluated": 96,
+      "stage_a_pass": 75,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 17.312947373630614,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 15,
+      "n_evaluated": 96,
+      "stage_a_pass": 66,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 17.634316681209032,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 16,
+      "n_evaluated": 96,
+      "stage_a_pass": 74,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 17.634316681209032,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 17,
+      "n_evaluated": 96,
+      "stage_a_pass": 80,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 17.634316681209032,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 18,
+      "n_evaluated": 96,
+      "stage_a_pass": 69,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 17.793569719508397,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 19,
+      "n_evaluated": 96,
+      "stage_a_pass": 73,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 17.793569719508397,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 20,
+      "n_evaluated": 96,
+      "stage_a_pass": 81,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 21,
+      "n_evaluated": 96,
+      "stage_a_pass": 77,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 22,
+      "n_evaluated": 96,
+      "stage_a_pass": 68,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 23,
+      "n_evaluated": 96,
+      "stage_a_pass": 80,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 24,
+      "n_evaluated": 96,
+      "stage_a_pass": 80,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 25,
+      "n_evaluated": 96,
+      "stage_a_pass": 81,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 26,
+      "n_evaluated": 96,
+      "stage_a_pass": 81,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 27,
+      "n_evaluated": 96,
+      "stage_a_pass": 84,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 28,
+      "n_evaluated": 96,
+      "stage_a_pass": 81,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 29,
+      "n_evaluated": 96,
+      "stage_a_pass": 76,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 30,
+      "n_evaluated": 96,
+      "stage_a_pass": 80,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 31,
+      "n_evaluated": 96,
+      "stage_a_pass": 78,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 32,
+      "n_evaluated": 96,
+      "stage_a_pass": 75,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 33,
+      "n_evaluated": 96,
+      "stage_a_pass": 76,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 34,
+      "n_evaluated": 96,
+      "stage_a_pass": 72,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 35,
+      "n_evaluated": 96,
+      "stage_a_pass": 77,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 36,
+      "n_evaluated": 96,
+      "stage_a_pass": 73,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 37,
+      "n_evaluated": 96,
+      "stage_a_pass": 75,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 38,
+      "n_evaluated": 96,
+      "stage_a_pass": 76,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 39,
+      "n_evaluated": 96,
+      "stage_a_pass": 79,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 40,
+      "n_evaluated": 96,
+      "stage_a_pass": 77,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 41,
+      "n_evaluated": 96,
+      "stage_a_pass": 76,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 42,
+      "n_evaluated": 96,
+      "stage_a_pass": 85,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 43,
+      "n_evaluated": 96,
+      "stage_a_pass": 79,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 44,
+      "n_evaluated": 96,
+      "stage_a_pass": 75,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 45,
+      "n_evaluated": 96,
+      "stage_a_pass": 77,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 46,
+      "n_evaluated": 96,
+      "stage_a_pass": 81,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 47,
+      "n_evaluated": 96,
+      "stage_a_pass": 84,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 48,
+      "n_evaluated": 96,
+      "stage_a_pass": 74,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 49,
+      "n_evaluated": 96,
+      "stage_a_pass": 77,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 50,
+      "n_evaluated": 96,
+      "stage_a_pass": 80,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 51,
+      "n_evaluated": 96,
+      "stage_a_pass": 77,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 52,
+      "n_evaluated": 96,
+      "stage_a_pass": 85,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 53,
+      "n_evaluated": 96,
+      "stage_a_pass": 76,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 54,
+      "n_evaluated": 96,
+      "stage_a_pass": 79,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 55,
+      "n_evaluated": 96,
+      "stage_a_pass": 82,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 56,
+      "n_evaluated": 96,
+      "stage_a_pass": 81,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 57,
+      "n_evaluated": 96,
+      "stage_a_pass": 83,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 58,
+      "n_evaluated": 96,
+      "stage_a_pass": 76,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 59,
+      "n_evaluated": 96,
+      "stage_a_pass": 75,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.314965221298483,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 60,
+      "n_evaluated": 96,
+      "stage_a_pass": 72,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 18.480682265575506,
+      "best_fitness_pen_finite": true
+    }
+  ],
+  "best": {
+    "name": "g60_i21",
+    "generation": 60,
+    "fitness": "18.480682265575506",
+    "fitness_finite": true,
+    "stage_a_pass": true,
+    "stage_b_pass": false,
+    "stage_c_pass": false,
+    "selection_score": [
+      0,
+      0,
+      1,
+      18.480682265575506
+    ],
+    "metrics": {
+      "total_pnl": "18860.0",
+      "sharpe": "18.491182265575507",
+      "sortino": null,
+      "calmar": null,
+      "max_drawdown_pct": "0.0",
+      "trade_count": 3
+    }
+  },
+  "live_criteria": {
+    "checks": {
+      "sharpe": {
+        "value": "18.491182265575507",
+        "threshold": "1.0",
+        "pass": true
+      },
+      "total_pnl": {
+        "value": "18860.0",
+        "threshold": "50000.0",
+        "pass": false
+      },
+      "max_drawdown_pct": {
+        "value": "0.0",
+        "threshold": "20.0",
+        "pass": true
+      },
+      "trade_count": {
+        "value": 3,
+        "threshold_min": 50,
+        "threshold_max": 5000,
+        "pass": false
+      }
+    },
+    "all_pass": false
+  },
+  "population_size": 96,
+  "graduation_count": 0,
+  "archive_parquet": ".cache/alpha_factory/runs/genomes_run_20260425_004002.parquet"
+}

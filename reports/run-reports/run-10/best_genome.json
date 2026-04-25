@@ -1,0 +1,40 @@
+{
+  "name": "g60_i21",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F13",
+          "weight": 0.33481747637078857,
+          "params": {
+            "w": 151,
+            "lag": 10
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "M6",
+          "weight": 0.5937903505705098,
+          "params": {
+            "n": 12,
+            "theta": 27.92797229798414,
+            "scale": 11.352613597973203
+          }
+        }
+      ],
+      "weight": 1.3363837112066248
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.17746419481439277,
+    "exit_threshold": -0.22632437564426391,
+    "max_pos": 1,
+    "time_stop_min": 105
+  },
+  "risk": {
+    "stop_atr": 3.4068217531143015,
+    "take_atr": 2.460483437489967
+  }
+}
