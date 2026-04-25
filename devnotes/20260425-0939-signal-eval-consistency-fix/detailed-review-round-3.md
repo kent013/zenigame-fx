@@ -1,0 +1,9 @@
+施策1: APPROVE  
+施策2: APPROVE  
+施策3: APPROVE  
+施策4: APPROVE  
+施策5: APPROVE  
+施策6: APPROVE  
+施策7: APPROVE  
+
+全体判定: APPROVED
