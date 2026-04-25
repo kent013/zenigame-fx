@@ -1,0 +1,14 @@
+**Findings**
+
+1. [Critical] Phase 1A を「Alpha Factory 内部だけ」に閉じる設計になっていません。`compute_metrics()` と `BacktestMetrics.sharpe` は共有 API で、ここを `trade_sharpe_raw` に置換すると、報告系を Phase 2 に逃がしても実際には直撃します。[src/backtest/metrics.py:15](/Users/ishitoya/repository/zenigame-fx/src/backtest/metrics.py:15) [src/backtest/metrics.py:85](/Users/ishitoya/repository/zenigame-fx/src/backtest/metrics.py:85) [src/backtest/report.py:56](/Users/ishitoya/repository/zenigame-fx/src/backtest/report.py:56) [src/backtest/report.py:92](/Users/ishitoya/repository/zenigame-fx/src/backtest/report.py:92) [src/backtest/ensemble_report.py:26](/Users/ishitoya/repository/zenigame-fx/src/backtest/ensemble_report.py:26) [src/backtest/ensemble_report.py:91](/Users/ishitoya/repository/zenigame-fx/src/backtest/ensemble_report.py:91) [src/backtest/ensemble.py:119](/Users/ishitoya/repository/zenigame-fx/src/backtest/ensemble.py:119) [src/backtest/grid_search.py:69](/Users/ishitoya/repository/zenigame-fx/src/backtest/grid_search.py:69) [src/backtest/walk_forward.py:116](/Users/ishitoya/repository/zenigame-fx/src/backtest/walk_forward.py:116)  
+設計上は「外部向けに `trade_sharpe_raw` を Sharpe と呼ばない」としていますが、このままだと `BacktestMetrics.sharpe` を残して意味だけ差し替えるか、逆に field を変えて非 Alpha Factory 系を壊すかの二択です。Round 3 ではここを明示的に固定すべきです。実務的には「Phase 1A は `BacktestMetrics` に `trade_sharpe_raw` を追加し、既存 `sharpe` は非 AF consumer の互換用途として一時残す」か、「report/grid/ensemble/walk_forward も Phase 1A に含めて同時改名」のどちらかです。
+
+2. [Critical] `GenomeArchive.get_sharpe(row)` の v1 挙動がまだ曖昧です。提示文の「v1 archive → `None` を返すか例外」は、reader 境界を閉じたことになっていません。現状 `GenomeArchive.load()` は素通しで table を返すだけで、archive 消費側は live criteria 判定・候補抽出・monitoring にその値を使っています。[src/alpha_factory/archive.py:513](/Users/ishitoya/repository/zenigame-fx/src/alpha_factory/archive.py:513) [scripts/alpha_factory/run_alpha_sieve.py:218](/Users/ishitoya/repository/zenigame-fx/scripts/alpha_factory/run_alpha_sieve.py:218) [scripts/alpha_factory/run_ga.py:490](/Users/ishitoya/repository/zenigame-fx/scripts/alpha_factory/run_ga.py:490) [scripts/alpha_factory/run_ga.py:508](/Users/ishitoya/repository/zenigame-fx/scripts/alpha_factory/run_ga.py:508) [src/alpha_factory/calibrate_gate.py:411](/Users/ishitoya/repository/zenigame-fx/src/alpha_factory/calibrate_gate.py:411)  
+`None` を返す設計だと、v1 archive を混ぜたときに「比較禁止」ではなく「静かに no-metric 扱い」になります。`run_alpha_sieve` は stage_c_sharpe 欠損の候補を作れますし、`run_ga` / `calibrate_gate` は hard-fail せず劣化動作します。ここは `get_sharpe()` を比較用 accessor に限定し、v1 は必ず例外にしてください。旧値の閲覧が必要なら別名 accessor (`get_legacy_bar_sharpe` など) を切る方が安全です。
+
+**Open Questions**
+
+- `compute_metrics(..., trade_count_min_for_sharpe)` を追加するなら、非 Alpha Factory 系 caller が多数あるので default 注入経路をどこに置くかは先に決めた方がよいです。[src/backtest/walk_forward.py:116](/Users/ishitoya/repository/zenigame-fx/src/backtest/walk_forward.py:116)
+- `equity_at_entry` は same-bar 複数 fill 時に「bar 開始時の pre-fill equity」で全注文共通に固定するのか、fill 順依存を許すのかを一文で固定しておくと、実装レビューでぶれません。
+
+上の 2 点が閉じれば、Round 3 での残りは実装詳細に落としてよい状態です。

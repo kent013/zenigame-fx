@@ -13,6 +13,7 @@ zenigame-fx Alpha Factory の改善タスク一覧。
 | T035 | stats-completeness-gate-stage-b: Stage B 統計可観測性ハード契約と reason_codes 集計 | statistics | [r:ro] stats completeness gate | Critical | incremental | [設計](devnotes/20260425-0937-stats-completeness-gate-stage-b/) | 2026-04-25 16:17 |
 | T036 | factor-shadow-plane (FSP) Phase 1: single-instrument 用 daily diagnostic shadow layer | cross-pair | [r:ra] FSP single-instr daily | Critical | incremental | [設計](devnotes/20260425-0956-factor-shadow-plane-single-instr/) | 2026-04-25 16:17 |
 | T037 | signal-active-clause-metric: clause 発火カウンタの runtime 計測と archive 反映 | primitives | [r:sq] active-clause metric | Critical | incremental | [設計](devnotes/20260425-0958-signal-active-clause-metric/) | 2026-04-25 16:17 |
+| T038 | Sharpe 計算根本修正 Phase 1A: bar-level annualized → trade_sharpe_raw + sample-size guard | stage-gate | [r:sq] sharpe calc v2 | Critical | standalone | [設計](devnotes/20260425-1624-sharpe-calc-fix/) | 2026-04-25 17:27 |
 
 ## Conditional
 

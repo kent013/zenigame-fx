@@ -1,0 +1,9 @@
+**Findings**
+
+- [Critical] Phase 1A の後方互換は、まだ設計上閉じていません。今回案は「`BacktestMetrics.sharpe` は一時残存」としつつ、「`compute_metrics` 実行後は `sharpe=None` に設定」としていますが、現行の非 AF consumer は `compute_metrics()` の返り値からそのまま `metrics.sharpe` を表示・保存しています。これだと互換維持ではなく、`report/grid/ensemble/walk_forward` の Sharpe 出力が Phase 1A 時点で即座に空になります。[src/backtest/metrics.py:15](/Users/ishitoya/repository/zenigame-fx/src/backtest/metrics.py#L15) [src/backtest/metrics.py:85](/Users/ishitoya/repository/zenigame-fx/src/backtest/metrics.py#L85) [src/backtest/report.py:56](/Users/ishitoya/repository/zenigame-fx/src/backtest/report.py#L56) [src/backtest/report.py:92](/Users/ishitoya/repository/zenigame-fx/src/backtest/report.py#L92) [src/backtest/report.py:123](/Users/ishitoya/repository/zenigame-fx/src/backtest/report.py#L123) [src/backtest/ensemble_report.py:26](/Users/ishitoya/repository/zenigame-fx/src/backtest/ensemble_report.py#L26) [src/backtest/ensemble_report.py:65](/Users/ishitoya/repository/zenigame-fx/src/backtest/ensemble_report.py#L65) [src/backtest/ensemble_report.py:91](/Users/ishitoya/repository/zenigame-fx/src/backtest/ensemble_report.py#L91) [src/backtest/grid_search.py:69](/Users/ishitoya/repository/zenigame-fx/src/backtest/grid_search.py#L69) [src/backtest/walk_forward.py:116](/Users/ishitoya/repository/zenigame-fx/src/backtest/walk_forward.py#L116)  
+  修正方針は二択です。`compute_metrics()` は Phase 2 まで legacy `sharpe` を埋め続け、AF だけ `trade_sharpe_raw` を読む。もしくは AF 専用の別 API / opt-in flag で v2 指標を返し、共有 API を壊さない。このどちらかを概念設計本文で固定しない限り、Round 4 はまだ通せません。
+
+**判定**
+
+CHANGES_REQUESTED です。  
+Round 3 の残件のうち、`get_trade_sharpe()` の v1 hard-fail 化と same-bar pre-fill equity 固定は概念上は閉じています。残る blocker は上の 1 点だけです。
