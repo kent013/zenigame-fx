@@ -1,0 +1,57 @@
+{
+  "name": "g49_i64",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F14",
+          "weight": 1.5718395764088093,
+          "params": {
+            "fast_n": 21,
+            "slow_n": 78,
+            "rv_n": 52,
+            "scale": 1.40269076209133,
+            "k_scale": 4.626460394618197
+          }
+        },
+        {
+          "name": "F4",
+          "weight": 0.7130571994984926,
+          "params": {
+            "n": 18,
+            "scale": 6.808773425506377
+          }
+        },
+        {
+          "name": "P12",
+          "weight": 1.340781182667464,
+          "params": {
+            "mom_n": 8,
+            "scale": 0.08532779351266175,
+            "staleness_bars": 135
+          }
+        },
+        {
+          "name": "P2",
+          "weight": 1.2332796395642525,
+          "params": {
+            "atr_n": 7
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.403354354276535
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.4253150914901611,
+    "exit_threshold": 0.09803599637785505,
+    "max_pos": 1,
+    "time_stop_min": 139
+  },
+  "risk": {
+    "stop_atr": 0.9598815077528584,
+    "take_atr": 3.5614419829538284
+  }
+}
