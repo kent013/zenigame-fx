@@ -487,13 +487,17 @@ def _row_to_metrics_dict(row: Mapping[str, Any] | None) -> dict[str, Any]:
     def _dec_or_none(v: Any) -> str | None:
         return str(v) if v is not None else None
 
+    # T-sharpe Phase 1A: report 出力の "sharpe" 列は trade_sharpe_raw (v2) を採用
     return {
         "total_pnl": str(row.get("total_pnl", "0")),
-        "sharpe": _dec_or_none(row.get("sharpe")),
+        "sharpe": _dec_or_none(row.get("trade_sharpe_raw")),
         "sortino": _dec_or_none(row.get("sortino")),
         "calmar": _dec_or_none(row.get("calmar")),
         "max_drawdown_pct": str(row.get("max_drawdown_pct", "0")),
         "trade_count": int(row.get("trade_count", 0)),
+        "sharpe_calc_version": str(
+            row.get("sharpe_calc_version") or "v1_bar_annualized"
+        ),
     }
 
 
@@ -505,13 +509,26 @@ def _check_live_criteria(
         return {"checks": {}, "all_pass": False}
     checks: dict[str, dict[str, Any]] = {}
 
-    sharpe_raw = row.get("sharpe")
+    # T-sharpe Phase 1A: live_criteria.sharpe_min は trade_sharpe_raw (v2) と比較。
+    # v1 archive 行は sharpe_calc_version で識別し検査時に None 扱い (比較禁止)。
+    raw_version = row.get("sharpe_calc_version")
+    version = "v1_bar_annualized" if raw_version is None else str(raw_version)
+    # v1/未知 archive 行は v2 sharpe_min と比較しない
+    if version not in ("v1_bar_annualized", "v2_trade_level"):
+        logger.warning(
+            "live_criteria.unknown_sharpe_calc_version",
+            sharpe_calc_version=version,
+        )
+    sharpe_raw = (
+        row.get("trade_sharpe_raw") if version == "v2_trade_level" else None
+    )
     sharpe_min = float(criteria.get("sharpe_min", 0.0))
     if sharpe_raw is None:
         checks["sharpe"] = {
             "value": None,
             "threshold": str(sharpe_min),
             "pass": False,
+            "sharpe_calc_version": version,
         }
     else:
         sharpe_val = float(sharpe_raw)
@@ -519,6 +536,7 @@ def _check_live_criteria(
             "value": str(sharpe_val),
             "threshold": str(sharpe_min),
             "pass": sharpe_val >= sharpe_min,
+            "sharpe_calc_version": version,
         }
 
     pnl_val = float(row.get("total_pnl", 0.0) or 0.0)

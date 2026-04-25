@@ -15,7 +15,7 @@ from typing import Literal
 import structlog
 
 from src.backtest.engine import BacktestConfig, run_backtest
-from src.backtest.metrics import compute_metrics
+from src.backtest.metrics import DEFAULT_TRADE_COUNT_MIN_FOR_SHARPE, compute_metrics
 from src.broker.mock import InstrumentMeta, MockBroker
 from src.domain.price import PriceBar
 from src.dsl.genome import Genome
@@ -38,6 +38,7 @@ def evaluate_genome(
     metric: FitnessMetric = "total_pnl",
     warmup_bars: int = 0,
     session_close_utc: time | None = None,
+    trade_count_min_for_sharpe: int = DEFAULT_TRADE_COUNT_MIN_FOR_SHARPE,
 ) -> Decimal:
     """Clause Genome を評価して fitness を返す。
 
@@ -63,7 +64,11 @@ def evaluate_genome(
         )
         broker = MockBroker(instrument_meta=meta)
         result = run_backtest(bars, strategy, broker, backtest_config)
-        metrics = compute_metrics(result.trades, result.equity_curve)
+        metrics = compute_metrics(
+            result.trades,
+            result.equity_curve,
+            trade_count_min_for_sharpe=trade_count_min_for_sharpe,
+        )
     except Exception as exc:
         logger.warning(
             "ga.fitness.system_failure",
@@ -76,15 +81,18 @@ def evaluate_genome(
     if metric == "total_pnl":
         return metrics.total_pnl
     if metric == "sharpe":
-        if metrics.sharpe is None:
+        # T-sharpe Phase 1A: trade_sharpe_raw (v2) を使用。bar-level sharpe (v1) は
+        # 非 AF consumer 後方互換のために BacktestMetrics.sharpe で残存
+        if metrics.trade_sharpe_raw is None:
             logger.info(
                 "ga.fitness.metric_unavailable",
                 genome=genome.name,
                 metric=metric,
                 reason="insufficient_trades_or_zero_std",
+                sharpe_calc_version=metrics.sharpe_calc_version,
             )
             return _FAILURE_FITNESS
-        return metrics.sharpe
+        return metrics.trade_sharpe_raw
     if metric == "calmar":
         if metrics.calmar is None:
             logger.info(

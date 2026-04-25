@@ -27,6 +27,7 @@ class Position:
     entry_time: datetime
     entry_margin: Decimal
     leverage: int
+    equity_at_entry: Decimal = Decimal(0)  # T-sharpe: bar 開始時 pre-fill equity (SSOT)
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class Trade:
     exit_time: datetime
     pnl: Decimal
     exit_reason: ExitReason
+    equity_at_entry: Decimal = Decimal(0)  # T-sharpe: Position から伝搬
 
 
 @dataclass(frozen=True)

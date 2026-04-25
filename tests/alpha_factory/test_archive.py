@@ -66,7 +66,8 @@ def _stage_a_result(
         "alpha_a": 0.03,
         "threshold": 0.0,
         "trade_count": 25,
-        "sharpe_raw": 0.3,
+        # T-sharpe Phase 1A: payload key を sharpe_raw → trade_sharpe_raw にリネーム
+        "trade_sharpe_raw": 0.3,
     }
     payload.update(payload_overrides)
     return StageResult(
@@ -129,7 +130,8 @@ def _stage_c_result(
             reason_codes=(),
         )
     payload: dict[str, Any] = {
-        "sharpe": 1.2,
+        # T-sharpe Phase 1A: Stage C の payload key も "sharpe" → "trade_sharpe_raw"
+        "trade_sharpe_raw": 1.2,
         "total_pnl": 60000.0,
         "max_drawdown_frac": 0.15,
         "trade_count": 80,
@@ -162,8 +164,9 @@ def _make_archive() -> GenomeArchive:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_has_28_columns() -> None:
-    assert len(GENOMES_SCHEMA.names) == 28
+def test_schema_has_30_columns() -> None:
+    # T-sharpe Phase 1A: trade_sharpe_raw + sharpe_calc_version の 2 列を追加 (28→30)
+    assert len(GENOMES_SCHEMA.names) == 30
     expected = {
         "run_id", "run_number", "generation", "individual_name",
         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
@@ -172,6 +175,8 @@ def test_schema_has_28_columns() -> None:
         "calmar", "max_drawdown_pct", "active_clause", "n_nodes",
         "bootstrap_ci_lower", "bootstrap_ci_upper", "fold_sign_ratio",
         "dsr", "ii_lite_pass", "graduated",
+        # T-sharpe Phase 1A
+        "trade_sharpe_raw", "sharpe_calc_version",
     }
     assert set(GENOMES_SCHEMA.names) == expected
 
@@ -188,6 +193,8 @@ def test_template_default_values() -> None:
         "parent_a", "parent_b", "sharpe", "sortino", "calmar",
         "bootstrap_ci_lower", "bootstrap_ci_upper", "fold_sign_ratio",
         "dsr", "ii_lite_pass",
+        # T-sharpe Phase 1A: trade_sharpe_raw も nullable -> None
+        "trade_sharpe_raw",
     ):
         assert t[k] is None, f"{k} should default to None"
     # non-null bool -> False
@@ -231,7 +238,10 @@ def test_collect_stage_a_partial_fill() -> None:
     assert row["fitness_pen"] == pytest.approx(0.27)
     assert row["stage_a_pass"] is True
     assert row["trade_count"] == 25
-    assert row["sharpe"] == pytest.approx(0.3)
+    # T-sharpe Phase 1A: trade_sharpe_raw に書き込み、legacy sharpe は v2 archive で None
+    assert row["trade_sharpe_raw"] == pytest.approx(0.3)
+    assert row["sharpe_calc_version"] == "v2_trade_level"
+    assert row["sharpe"] is None
     # 上書きされていない列は default のまま
     assert row["stage_b_pass"] is False
     assert row["stage_c_pass"] is False
@@ -279,7 +289,10 @@ def test_collect_stage_b_updates_overrides_sharpe_pnl_tc() -> None:
     arc.collect_stage_b(g, "lane", 0, _stage_b_result())
     row = arc._rows[("lane", 0, "g0_i0")]
     assert row["stage_b_pass"] is True
-    assert row["sharpe"] == pytest.approx(0.5)  # is_full_sharpe で上書き
+    # T-sharpe Phase 1A: is_full_sharpe (Stage B IS monitor の trade_sharpe_raw) は
+    # archive の trade_sharpe_raw 列に上書きされる
+    assert row["trade_sharpe_raw"] == pytest.approx(0.5)
+    assert row["sharpe_calc_version"] == "v2_trade_level"
     assert row["total_pnl"] == pytest.approx(12000.0)
     assert row["trade_count"] == 200
 
@@ -418,7 +431,9 @@ def test_flush_load_roundtrip(tmp_path: Path) -> None:
     assert d["graduated"] is True
     assert d["max_drawdown_pct"] == pytest.approx(15.0)
     assert d["fold_sign_ratio"] == pytest.approx(1.0)
-    assert d["sharpe"] == pytest.approx(1.2)  # Stage C で最終上書き
+    # T-sharpe Phase 1A: trade_sharpe_raw を Stage C で最終上書き
+    assert d["trade_sharpe_raw"] == pytest.approx(1.2)
+    assert d["sharpe_calc_version"] == "v2_trade_level"
     assert d["total_pnl"] == pytest.approx(60000.0)
     assert d["trade_count"] == 80
 
@@ -462,9 +477,9 @@ def test_stage_regression_ignored_with_warn() -> None:
     with capture_logs() as logs:
         arc.collect_stage_a(g, "lane", 0, _stage_a_result(fitness_raw=99.0),
                              instrument="USD_JPY")
-    # B 値が保持される (sharpe = 0.5 = is_full_sharpe)
+    # T-sharpe Phase 1A: B 値が保持される (trade_sharpe_raw = 0.5 = is_full_sharpe)
     row = arc._rows[("lane", 0, "g0_i0")]
-    assert row["sharpe"] == pytest.approx(0.5)
+    assert row["trade_sharpe_raw"] == pytest.approx(0.5)
     # fitness_raw は 99.0 で上書きされていない
     assert row["fitness_raw"] != pytest.approx(99.0)
     assert any(
@@ -483,8 +498,9 @@ def test_stage_enrich_progresses() -> None:
     assert row["stage_a_pass"] is True
     assert row["stage_b_pass"] is True
     assert row["stage_c_pass"] is True
-    # Stage C の sharpe / total_pnl / trade_count が最終上書き
-    assert row["sharpe"] == pytest.approx(1.2)
+    # T-sharpe Phase 1A: Stage C の trade_sharpe_raw / total_pnl / trade_count が最終上書き
+    assert row["trade_sharpe_raw"] == pytest.approx(1.2)
+    assert row["sharpe_calc_version"] == "v2_trade_level"
     assert row["total_pnl"] == pytest.approx(60000.0)
     assert row["trade_count"] == 80
     # Stage B の fold_sign_ratio は保持
@@ -662,6 +678,8 @@ def test_schema_nullable_attributes() -> None:
         "parent_a", "parent_b", "sharpe", "sortino", "calmar",
         "bootstrap_ci_lower", "bootstrap_ci_upper", "fold_sign_ratio",
         "dsr", "ii_lite_pass",
+        # T-sharpe Phase 1A
+        "trade_sharpe_raw", "sharpe_calc_version",
     }
     for f in GENOMES_SCHEMA:
         if f.name in nullable_cols:
@@ -715,3 +733,57 @@ def test_get_row_snapshot_returns_row_copy_excluding_internal_key() -> None:
     snap2 = arc.get_row_snapshot("tier1_EUR_JPY", 0, "g0_i0")
     assert snap2 is not None
     assert snap2["stage_a_pass"] is True
+
+
+# ---------------------------------------------------------------------------
+# T-sharpe Phase 1A: canonical accessor (get_trade_sharpe / get_legacy_bar_sharpe)
+# ---------------------------------------------------------------------------
+
+
+def test_get_trade_sharpe_returns_value_for_v2_archive() -> None:
+    row = {
+        "trade_sharpe_raw": 0.42,
+        "sharpe_calc_version": "v2_trade_level",
+    }
+    assert GenomeArchive.get_trade_sharpe(row) == pytest.approx(0.42)
+
+
+def test_get_trade_sharpe_returns_none_when_value_missing() -> None:
+    row = {
+        "trade_sharpe_raw": None,
+        "sharpe_calc_version": "v2_trade_level",
+    }
+    assert GenomeArchive.get_trade_sharpe(row) is None
+
+
+def test_get_trade_sharpe_raises_for_v1_archive() -> None:
+    row = {"sharpe": 18.0, "sharpe_calc_version": "v1_bar_annualized"}
+    with pytest.raises(ValueError, match="v1"):
+        GenomeArchive.get_trade_sharpe(row)
+
+
+def test_get_trade_sharpe_treats_missing_version_as_v1() -> None:
+    """sharpe_calc_version 不在 (旧 archive) → v1 として例外."""
+    row = {"sharpe": 18.0}
+    with pytest.raises(ValueError):
+        GenomeArchive.get_trade_sharpe(row)
+
+
+def test_get_legacy_bar_sharpe_returns_value_for_v1_archive() -> None:
+    row = {"sharpe": 18.0, "sharpe_calc_version": "v1_bar_annualized"}
+    assert GenomeArchive.get_legacy_bar_sharpe(row) == pytest.approx(18.0)
+
+
+def test_get_legacy_bar_sharpe_raises_for_v2_archive() -> None:
+    row = {
+        "trade_sharpe_raw": 0.42,
+        "sharpe_calc_version": "v2_trade_level",
+    }
+    with pytest.raises(ValueError, match="v2"):
+        GenomeArchive.get_legacy_bar_sharpe(row)
+
+
+def test_get_legacy_bar_sharpe_returns_value_when_version_missing() -> None:
+    """旧 archive (sharpe_calc_version 列なし) は v1 とみなして読める."""
+    row = {"sharpe": 18.0}
+    assert GenomeArchive.get_legacy_bar_sharpe(row) == pytest.approx(18.0)

@@ -5,10 +5,19 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+import structlog
+
 from src.broker.orders import Trade
+
+logger = structlog.get_logger(__name__)
 
 # 1分足を前提とした年間バー数（24h * 60min * 365日 * FX 営業率 5/7）
 BARS_PER_YEAR_M1 = int(24 * 60 * 365 * 5 / 7)
+
+# T-sharpe Phase 1A: trade-level Sharpe メタ
+SHARPE_CALC_VERSION_V1 = "v1_bar_annualized"
+SHARPE_CALC_VERSION_V2 = "v2_trade_level"
+DEFAULT_TRADE_COUNT_MIN_FOR_SHARPE = 30  # config 経由で上書き可能
 
 
 @dataclass(frozen=True)
@@ -24,11 +33,14 @@ class BacktestMetrics:
     max_drawdown: Decimal
     max_drawdown_pct: Decimal
     final_equity: Decimal
-    sharpe: Decimal | None  # 年率 Sharpe。サンプル不足時 None
+    sharpe: Decimal | None  # v1 bar-level annualized。非 AF consumer 後方互換のため Phase 2 まで維持
     sortino: Decimal | None  # 年率 Sortino。損失分散ゼロ時 None
     calmar: Decimal | None  # annual_return / max_drawdown_pct。未計算時 None
     avg_trade_duration: timedelta | None
     max_trade_duration: timedelta | None
+    # T-sharpe Phase 1A: trade-level Sharpe (AF consumer の正規指標)
+    trade_sharpe_raw: Decimal | None = None  # v2 trade-level raw Sharpe (annualize なし)
+    sharpe_calc_version: str = SHARPE_CALC_VERSION_V2
 
 
 def _bar_returns(equity_curve: list[tuple[datetime, Decimal]]) -> list[float]:
@@ -50,6 +62,56 @@ def _sharpe(returns: list[float], periods_per_year: int = BARS_PER_YEAR_M1) -> f
     if std == 0:
         return None
     return (mean / std) * math.sqrt(periods_per_year)
+
+
+def _trade_returns(trades: list[Trade]) -> list[float]:
+    """各クローズドトレードの return = net_pnl / equity_at_entry。
+
+    equity_at_entry が 0 以下の trade は「未設定（バグ）」として警告ログを出してスキップ。
+    invalid_count は本関数内でログ集計し caller には返さない。
+    """
+    rets: list[float] = []
+    invalid_count = 0
+    for t in trades:
+        if t.equity_at_entry <= 0:
+            invalid_count += 1
+            logger.warning(
+                "trade_return.invalid_equity_at_entry",
+                trade_position_id=t.position_id,
+                equity_at_entry=str(t.equity_at_entry),
+            )
+            continue
+        rets.append(float(t.pnl / t.equity_at_entry))
+    if invalid_count > 0:
+        logger.warning(
+            "trade_return.invalid_equity_at_entry_total",
+            invalid_count=invalid_count,
+            total_trades=len(trades),
+        )
+    return rets
+
+
+def _trade_sharpe_raw(
+    returns: list[float],
+    trade_count_min: int = DEFAULT_TRADE_COUNT_MIN_FOR_SHARPE,
+) -> float | None:
+    """trade-level raw Sharpe (annualize なし)。
+
+    - len(returns) < max(2, trade_count_min) → None
+    - std <= 1e-15 → None
+    - 非有限 (NaN/Inf) → None
+    """
+    if len(returns) < max(2, trade_count_min):  # ゼロ除算防止 (len-1>=1)
+        return None
+    mean = sum(returns) / len(returns)
+    var = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+    std = math.sqrt(var)
+    if std <= 1e-15:
+        return None
+    result = mean / std
+    if not math.isfinite(result):
+        return None
+    return result
 
 
 def _sortino(returns: list[float], periods_per_year: int = BARS_PER_YEAR_M1) -> float | None:
@@ -82,7 +144,12 @@ def _calmar(equity_curve: list[tuple[datetime, Decimal]], max_dd_pct: Decimal) -
     return annual_return_pct / max_dd_pct
 
 
-def compute_metrics(trades: list[Trade], equity_curve: list[tuple[datetime, Decimal]]) -> BacktestMetrics:
+def compute_metrics(
+    trades: list[Trade],
+    equity_curve: list[tuple[datetime, Decimal]],
+    *,
+    trade_count_min_for_sharpe: int = DEFAULT_TRADE_COUNT_MIN_FOR_SHARPE,
+) -> BacktestMetrics:
     trade_count = len(trades)
     wins = [t.pnl for t in trades if t.pnl > 0]
     losses = [t.pnl for t in trades if t.pnl < 0]
@@ -118,6 +185,15 @@ def compute_metrics(trades: list[Trade], equity_curve: list[tuple[datetime, Deci
     sortino = Decimal(str(sortino_f)) if sortino_f is not None else None
     calmar = _calmar(equity_curve, max_drawdown_pct)
 
+    # T-sharpe Phase 1A: trade-level raw Sharpe
+    trade_rets = _trade_returns(trades)
+    trade_sharpe_f = _trade_sharpe_raw(
+        trade_rets, trade_count_min=trade_count_min_for_sharpe
+    )
+    trade_sharpe_raw = (
+        Decimal(str(trade_sharpe_f)) if trade_sharpe_f is not None else None
+    )
+
     # トレード保有時間
     durations = [t.exit_time - t.entry_time for t in trades]
     avg_duration = sum(durations, timedelta(0)) / len(durations) if durations else None
@@ -140,4 +216,6 @@ def compute_metrics(trades: list[Trade], equity_curve: list[tuple[datetime, Deci
         calmar=calmar,
         avg_trade_duration=avg_duration,
         max_trade_duration=max_duration,
+        trade_sharpe_raw=trade_sharpe_raw,
+        sharpe_calc_version=SHARPE_CALC_VERSION_V2,
     )

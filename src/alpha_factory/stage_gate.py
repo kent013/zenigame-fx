@@ -90,6 +90,10 @@ class StageGateConfig:
     spread_stress_min_total_pnl: float = 0.0
     spread_stress_min_sharpe: float = 0.0
 
+    # T-sharpe Phase 1A: trade-level Sharpe sample-size guard
+    # config から compute_metrics へ伝搬する canonical 値
+    trade_count_min_for_sharpe: int = 30
+
     # live_criteria
     live_criteria: Mapping[str, float | int] = field(
         default_factory=lambda: {
@@ -276,9 +280,16 @@ def evaluate_stage_a(
         strategy = DslStrategy(genome, primitive_evaluator)
         broker = MockBroker(instrument_meta=meta)
         result = run_backtest(bars_60d, strategy, broker, backtest_config)
-        bt = compute_metrics(result.trades, result.equity_curve)
+        bt = compute_metrics(
+            result.trades,
+            result.equity_curve,
+            trade_count_min_for_sharpe=stage_config.trade_count_min_for_sharpe,
+        )
         trade_count = bt.trade_count
-        sharpe_raw = float(bt.sharpe) if bt.sharpe is not None else None
+        # T-sharpe Phase 1A: trade_sharpe_raw (v2) を fitness の入力に使用
+        sharpe_raw = (
+            float(bt.trade_sharpe_raw) if bt.trade_sharpe_raw is not None else None
+        )
     except Exception as exc:
         logger.warning(
             "stage_a.system_failure",
@@ -329,7 +340,8 @@ def evaluate_stage_a(
             "alpha_a": stage_config.stage_a_alpha,
             "threshold": stage_config.stage_a_threshold,
             "trade_count": trade_count,
-            "sharpe_raw": sharpe_raw,
+            # T-sharpe Phase 1A: payload key を "sharpe_raw" → "trade_sharpe_raw"
+            "trade_sharpe_raw": sharpe_raw,
         },
     }
     return StageResult(
@@ -386,8 +398,15 @@ def evaluate_stage_b(
         strategy = DslStrategy(genome, primitive_evaluator)
         broker = MockBroker(instrument_meta=meta)
         res = run_backtest(bars_18m, strategy, broker, backtest_config)
-        bt = compute_metrics(res.trades, res.equity_curve)
-        is_full_sharpe = float(bt.sharpe) if bt.sharpe is not None else None
+        bt = compute_metrics(
+            res.trades,
+            res.equity_curve,
+            trade_count_min_for_sharpe=stage_config.trade_count_min_for_sharpe,
+        )
+        # T-sharpe Phase 1A: trade_sharpe_raw (v2) を使用
+        is_full_sharpe = (
+            float(bt.trade_sharpe_raw) if bt.trade_sharpe_raw is not None else None
+        )
         is_full_total_pnl = float(bt.total_pnl)
         is_full_trade_count = bt.trade_count
     except Exception as exc:
@@ -406,8 +425,19 @@ def evaluate_stage_b(
             strategy = DslStrategy(genome, primitive_evaluator)
             broker = MockBroker(instrument_meta=meta)
             res = run_backtest(test_bars, strategy, broker, backtest_config)
-            bt = compute_metrics(res.trades, res.equity_curve)
-            fold_sharpe = float(bt.sharpe) if bt.sharpe is not None else None
+            bt = compute_metrics(
+                res.trades,
+                res.equity_curve,
+                trade_count_min_for_sharpe=stage_config.trade_count_min_for_sharpe,
+            )
+            # T-sharpe Phase 1A: trade_sharpe_raw (v2) を使用
+            # NOTE: stage_b_median_oos_sharpe_min=0.20 は v1 bar-level Sharpe スケール前提。
+            # Phase 1B replay で v2 trade-level スケールに再校正する。
+            fold_sharpe = (
+                float(bt.trade_sharpe_raw)
+                if bt.trade_sharpe_raw is not None
+                else None
+            )
         except Exception as exc:
             logger.warning(
                 "stage_b.fold_failure",
@@ -515,8 +545,17 @@ def evaluate_stage_c(
         strategy = DslStrategy(genome, primitive_evaluator)
         broker = MockBroker(instrument_meta=meta)
         res = run_backtest(bars_holdout, strategy, broker, backtest_config)
-        bt = compute_metrics(res.trades, res.equity_curve)
-        base_sharpe = float(bt.sharpe) if bt.sharpe is not None else None
+        bt = compute_metrics(
+            res.trades,
+            res.equity_curve,
+            trade_count_min_for_sharpe=stage_config.trade_count_min_for_sharpe,
+        )
+        # T-sharpe Phase 1A: trade_sharpe_raw (v2) を使用
+        # NOTE: live_criteria.sharpe_min=1.0 は v1 bar-level Sharpe スケール前提。
+        # Phase 1B replay で v2 trade-level スケールに再校正する。
+        base_sharpe = (
+            float(bt.trade_sharpe_raw) if bt.trade_sharpe_raw is not None else None
+        )
         base_total_pnl = float(bt.total_pnl)
         base_max_dd_frac = float(bt.max_drawdown_pct) / 100.0
         base_trade_count = bt.trade_count
@@ -580,8 +619,15 @@ def evaluate_stage_c(
             strategy = DslStrategy(genome, primitive_evaluator)
             broker = MockBroker(instrument_meta=meta)
             res = run_backtest(bars_holdout, strategy, broker, stress_config)
-            bt = compute_metrics(res.trades, res.equity_curve)
-            s_sharpe = float(bt.sharpe) if bt.sharpe is not None else None
+            bt = compute_metrics(
+                res.trades,
+                res.equity_curve,
+                trade_count_min_for_sharpe=stage_config.trade_count_min_for_sharpe,
+            )
+            # T-sharpe Phase 1A: trade_sharpe_raw (v2) を使用
+            s_sharpe = (
+                float(bt.trade_sharpe_raw) if bt.trade_sharpe_raw is not None else None
+            )
             s_total_pnl = float(bt.total_pnl)
             s_trade_count = bt.trade_count
             stress_payload["sharpe"] = s_sharpe
@@ -667,7 +713,9 @@ def evaluate_stage_c(
         "n_bars": len(bars_holdout),
         "wall_time_seconds": elapsed,
         "payload": {
-            "sharpe": base_sharpe,
+            # T-sharpe Phase 1A: payload "sharpe" → "trade_sharpe_raw" にリネーム
+            # base_sharpe には trade_sharpe_raw (v2) が入っている
+            "trade_sharpe_raw": base_sharpe,
             "total_pnl": base_total_pnl,
             "max_drawdown_frac": base_max_dd_frac,
             "trade_count": base_trade_count,

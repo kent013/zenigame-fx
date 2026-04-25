@@ -25,6 +25,11 @@ ga:
   elite_count: 2
   max_depth: 4
   fitness_metric: sharpe
+  # T-sharpe Phase 1A: trade-level Sharpe のサンプルサイズ最小値。
+  # @why: trade_count<N で trade_sharpe_raw を None にして GA fitness の選抜から外す。
+  # 30 は Andrew W. Lo (2002) "The Statistics of Sharpe Ratios" の経験則。
+  # Phase 1B replay で N=20/30/50 の感度分析を実施し再校正する。
+  trade_count_min_for_sharpe: 30
   seed: null  # null = 毎 Run ランダム
 
 # 使命達成判定 — 全てを満たす個体が出現すれば使命達成

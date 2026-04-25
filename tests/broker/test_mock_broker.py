@@ -118,3 +118,46 @@ def test_snapshot_exposes_equity_and_margin(broker: MockBroker) -> None:
     # margin_used = 10000 * 154.110 / 10 = 154,110
     assert snap.margin_used == Decimal("10000") * Decimal("154.110") / Decimal(10)
     assert snap.margin_level_pct is not None
+
+
+# ---------------------------------------------------------------------------
+# T-sharpe Phase 1A: equity_at_entry 伝搬
+# ---------------------------------------------------------------------------
+
+
+def test_position_records_equity_at_entry(broker: MockBroker) -> None:
+    """_open_position 経由で Position.equity_at_entry が pre-fill equity でセットされる."""
+    bar = make_bar(0, bid_close="154.100", ask_close="154.110")
+    broker.submit(OrderSignal(kind="open_long", units=10000), leverage=1)
+    broker.fill_pending(bar)
+    pos = broker.open_positions[0]
+    # bar 処理開始時点では cash=1000000, positions=空 なので equity=1000000
+    assert pos.equity_at_entry == Decimal("1000000")
+
+
+def test_trade_propagates_equity_at_entry_from_position(broker: MockBroker) -> None:
+    """Position.equity_at_entry が Trade.equity_at_entry へ伝搬される."""
+    bar_open = make_bar(0, bid_close="154.100", ask_close="154.110")
+    bar_next = make_bar(1, bid_close="154.500", ask_close="154.510")
+    broker.submit(OrderSignal(kind="open_long", units=10000), leverage=1)
+    broker.fill_pending(bar_open)
+    pos_id = broker.open_positions[0].id
+    broker.submit(OrderSignal(kind="close_position", position_id=pos_id), leverage=1)
+    broker.fill_pending(bar_next)
+    trade = broker.trades[0]
+    assert trade.equity_at_entry == Decimal("1000000")
+
+
+def test_same_bar_multiple_fills_share_pre_fill_equity(broker: MockBroker) -> None:
+    """同一 bar 内の複数 open は同じ pre-fill equity を共有する (fill 順依存禁止)."""
+    bar = make_bar(0, bid_close="154.100", ask_close="154.110")
+    # 同 bar に 2 つの open を投入
+    broker.submit(OrderSignal(kind="open_long", units=10000), leverage=1)
+    broker.submit(OrderSignal(kind="open_short", units=5000), leverage=1)
+    broker.fill_pending(bar)
+    positions = broker.open_positions
+    assert len(positions) == 2
+    # 両方とも bar 開始時 equity (=1000000) が記録されている
+    assert positions[0].equity_at_entry == Decimal("1000000")
+    assert positions[1].equity_at_entry == Decimal("1000000")
+    assert positions[0].equity_at_entry == positions[1].equity_at_entry
