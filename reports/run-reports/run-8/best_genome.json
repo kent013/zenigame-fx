@@ -1,0 +1,37 @@
+{
+  "name": "g2_i7",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "P2",
+          "weight": 0.6152095856549392,
+          "params": {
+            "atr_n": 28
+          }
+        },
+        {
+          "name": "P1",
+          "weight": 1.2731546685025474,
+          "params": {
+            "n": 4,
+            "scale": 0.007516694645305024
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.5223145528065981
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.4227280495245832,
+    "exit_threshold": 0.06135641792813051,
+    "max_pos": 2,
+    "time_stop_min": 88
+  },
+  "risk": {
+    "stop_atr": 2.6645999341738076,
+    "take_atr": 3.8665962788737516
+  }
+}

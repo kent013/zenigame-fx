@@ -1,0 +1,52 @@
+{
+  "name": "g5_i7",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F14",
+          "weight": 1.410307534873374,
+          "params": {
+            "fast_n": 15,
+            "slow_n": 57,
+            "rv_n": 55,
+            "scale": 4.569136921599103,
+            "k_scale": 1.9496591292238832
+          }
+        },
+        {
+          "name": "P2",
+          "weight": 0.6154386997559279,
+          "params": {
+            "atr_n": 12
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "P11",
+          "weight": 0.5792834046126911,
+          "params": {
+            "dxy_n": 64,
+            "vix_threshold": 26.33267813888712,
+            "vix_scale": 3.0209909641382553,
+            "vix_staleness_days": 11.979947661477178,
+            "dxy_staleness_bars": 393
+          }
+        }
+      ],
+      "weight": 0.948846688060518
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.37241296099156884,
+    "exit_threshold": 0.1373879879999503,
+    "max_pos": 2,
+    "time_stop_min": 129
+  },
+  "risk": {
+    "stop_atr": 1.6220397684388899,
+    "take_atr": 2.9789988465577917
+  }
+}

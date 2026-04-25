@@ -1,0 +1,58 @@
+{
+  "name": "g4_i7",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "P2",
+          "weight": 0.780992526779228,
+          "params": {
+            "atr_n": 22
+          }
+        },
+        {
+          "name": "F14",
+          "weight": 1.4956893116411036,
+          "params": {
+            "fast_n": 20,
+            "slow_n": 63,
+            "rv_n": 55,
+            "scale": 4.780413613308286,
+            "k_scale": 2.9092884053798915
+          }
+        },
+        {
+          "name": "P8",
+          "weight": 1.1228092435824262,
+          "params": {
+            "mom_n": 3,
+            "scale": 0.012318645885533178,
+            "staleness_bars": 396
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "M3",
+          "weight": 1.497364995751469,
+          "params": {
+            "threshold_bps": 14.559501318461296,
+            "k": 0.2526668298884666
+          }
+        }
+      ],
+      "weight": 1.16603124372336
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.39383440336134257,
+    "exit_threshold": 0.2864795031760132,
+    "max_pos": 2,
+    "time_stop_min": 171
+  },
+  "risk": {
+    "stop_atr": 2.044648605315513,
+    "take_atr": 2.540780910409426
+  }
+}

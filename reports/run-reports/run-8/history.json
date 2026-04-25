@@ -1,0 +1,50 @@
+[
+  {
+    "generation": 0,
+    "best_fitness": "3.8878358054188493",
+    "stage_a_pass": 2,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 1,
+    "best_fitness": "3.8878358054188493",
+    "stage_a_pass": 7,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 2,
+    "best_fitness": "9.651541951434448",
+    "stage_a_pass": 11,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 3,
+    "best_fitness": "9.651541951434448",
+    "stage_a_pass": 14,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 4,
+    "best_fitness": "9.651541951434448",
+    "stage_a_pass": 15,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 5,
+    "best_fitness": "9.651541951434448",
+    "stage_a_pass": 17,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  }
+]

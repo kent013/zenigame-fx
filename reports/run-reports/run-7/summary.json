@@ -1,0 +1,159 @@
+{
+  "run_id": "run_20260425_002300",
+  "run_number": 7,
+  "generated_at": "2026-04-25T00:23:01.021254+00:00",
+  "dataset": {
+    "instrument": "EUR_JPY",
+    "start": "2026-03-01T00:00:00+00:00",
+    "end": "2026-03-15T00:00:00+00:00",
+    "bars": 14351,
+    "bars_stage_a": 14351,
+    "bars_stage_b": 14351,
+    "bars_holdout": 37832
+  },
+  "ga_config": {
+    "population_size": 20,
+    "generations": 5,
+    "crossover_rate": 0.7,
+    "mutation_rate": 0.3,
+    "tournament_size": 3,
+    "elite_count": 2,
+    "max_depth": 4,
+    "max_clause": 1,
+    "units": 10000,
+    "fitness_metric": "sharpe",
+    "seed": null
+  },
+  "backtest_config": {
+    "initial_cash": "1000000",
+    "leverage": 25,
+    "units": 10000
+  },
+  "stage_gate_config": {
+    "stage_a_window_days": 60,
+    "stage_a_alpha": 0.03,
+    "stage_a_threshold": 0.0,
+    "stage_b_window_months": 18,
+    "stage_c_holdout_days": 60,
+    "spread_stress_multiplier": 1.5
+  },
+  "cross_pair_config": {
+    "mode": "shadow",
+    "aggregator_lambda": 0.5
+  },
+  "cross_pair_runtime_mode": "skipped_single_instrument",
+  "per_generation": [
+    {
+      "generation": 0,
+      "n_evaluated": 20,
+      "stage_a_pass": 1,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 3.430835130396937,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 1,
+      "n_evaluated": 20,
+      "stage_a_pass": 3,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 3.430835130396937,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 2,
+      "n_evaluated": 20,
+      "stage_a_pass": 7,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 4.273669500757904,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 3,
+      "n_evaluated": 20,
+      "stage_a_pass": 11,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 9.08582000521702,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 4,
+      "n_evaluated": 20,
+      "stage_a_pass": 13,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 10.14573845027518,
+      "best_fitness_pen_finite": true
+    },
+    {
+      "generation": 5,
+      "n_evaluated": 20,
+      "stage_a_pass": 13,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 10.14573845027518,
+      "best_fitness_pen_finite": true
+    }
+  ],
+  "best": {
+    "name": "g4_i7",
+    "generation": 4,
+    "fitness": "10.14573845027518",
+    "fitness_finite": true,
+    "stage_a_pass": true,
+    "stage_b_pass": false,
+    "stage_c_pass": false,
+    "selection_score": [
+      0,
+      0,
+      1,
+      10.14573845027518
+    ],
+    "metrics": {
+      "total_pnl": "4580.0",
+      "sharpe": "10.165238450275181",
+      "sortino": null,
+      "calmar": null,
+      "max_drawdown_pct": "0.0",
+      "trade_count": 2
+    }
+  },
+  "live_criteria": {
+    "checks": {
+      "sharpe": {
+        "value": "10.165238450275181",
+        "threshold": "1.0",
+        "pass": true
+      },
+      "total_pnl": {
+        "value": "4580.0",
+        "threshold": "50000.0",
+        "pass": false
+      },
+      "max_drawdown_pct": {
+        "value": "0.0",
+        "threshold": "20.0",
+        "pass": true
+      },
+      "trade_count": {
+        "value": 2,
+        "threshold_min": 50,
+        "threshold_max": 5000,
+        "pass": false
+      }
+    },
+    "all_pass": false
+  },
+  "population_size": 20,
+  "graduation_count": 0,
+  "archive_parquet": ".cache/alpha_factory/runs/genomes_run_20260425_002300.parquet"
+}

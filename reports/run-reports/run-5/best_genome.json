@@ -1,0 +1,46 @@
+{
+  "name": "g3_i15",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "P1",
+          "weight": 1.2552563539444022,
+          "params": {
+            "n": 19,
+            "scale": 0.014004512520996685
+          }
+        },
+        {
+          "name": "F11",
+          "weight": 1.4588981416298887,
+          "params": {
+            "n": 60
+          }
+        },
+        {
+          "name": "F6",
+          "weight": 1.001885777877813,
+          "params": {
+            "session": 1,
+            "k": 2.6974018767029952,
+            "atr_n": 13
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.4933626879650377
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.4933508875622352,
+    "exit_threshold": 0.21381676478767753,
+    "max_pos": 2,
+    "time_stop_min": 216
+  },
+  "risk": {
+    "stop_atr": 1.6529864761245612,
+    "take_atr": 3.7479278450501483
+  }
+}
