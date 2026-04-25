@@ -1,0 +1,39 @@
+{
+  "name": "g58_i71",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F13",
+          "weight": 1.8565279535471149,
+          "params": {
+            "w": 155,
+            "lag": 5
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "M3",
+          "weight": -1.128383597296453,
+          "params": {
+            "threshold_bps": 2.2004212663034326,
+            "k": 4.9600839525323295
+          }
+        }
+      ],
+      "weight": 0.6995497103608339
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.22338128043639166,
+    "exit_threshold": 0.010834907407891253,
+    "max_pos": 2,
+    "time_stop_min": 65
+  },
+  "risk": {
+    "stop_atr": 1.4830882764835382,
+    "take_atr": 0.5810346783565168
+  }
+}
