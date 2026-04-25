@@ -117,7 +117,10 @@ warning ログのみ、レポートは部分生成（archive 依存セクショ�
 
 ## SSoT / 設計上の注意
 
-- **Best 個体のソース**: `summary["best"]` が SSoT。`run_ga.py` の Best 選定は `(stage_c_pass, stage_b_pass, stage_a_pass, fitness_pen)` の辞書式最大なので、archive の `fitness_pen` 単独 max とは異なる結果になり得る（**設計通り**、WARN は出さない）
+- **Best 個体のソース**: `summary["best"]` が SSoT。`run_ga.py` の Best 選定は `selection_score_schema` により以下のいずれかの辞書式最大:
+  - `v1_legacy`: `(stage_c_pass, stage_b_pass, stage_a_pass, fitness_pen)` 4 要素
+  - `v2_feasibility` (T031, 現行): `(feasible, -violation, stage_c_pass, stage_b_pass, stage_a_pass, fitness_pen)` 6 要素
+  archive の `fitness_pen` 単独 max とは異なる結果になり得る（**設計通り**、WARN は出さない）
 - archive Top-5 セクションは「archive 視点での観察」、Best とは別物（混同注意）
 - 旧 RUN（拡張キー欠落）でも部分生成で動く（Defensive）
 

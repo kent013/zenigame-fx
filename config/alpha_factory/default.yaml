@@ -30,7 +30,14 @@ ga:
   # 30 は Andrew W. Lo (2002) "The Statistics of Sharpe Ratios" の経験則。
   # Phase 1B replay で N=20/30/50 の感度分析を実施し再校正する。
   trade_count_min_for_sharpe: 30
-  seed:       # null = 毎 Run ランダム
+  seed: null  # null = 毎 Run ランダム
+  # T031 RPC Phase 1: trade_count=0 個体を selection_score の feasibility 要素で淘汰。
+  # @why: Run 10 で best=trade_count=3 / sharpe=18.5 (見かけ Sharpe) という no-trade attractor を破壊し、
+  # Stage A 通過個体に最低取引密度 (>=1) を構造的に要求する。
+  feasibility:
+    entry_count_min: 1                          # Phase 1: trade_count >= 1 を feasible 条件
+    apply_from_generation: 0                    # 0 世代目から制約適用
+    enable_fallback_when_all_infeasible: true   # 全個体 infeasible で旧 4 要素にフォールバック
 
 # 使命達成判定 — 全てを満たす個体が出現すれば使命達成
 live_criteria:
