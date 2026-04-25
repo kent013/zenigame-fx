@@ -196,12 +196,22 @@ class MockBroker:
                     max_spread_bps=str(self._max_spread_bps),
                 )
 
+        # T-sharpe: bar 処理開始時点（全 fill 前）の equity を一度だけ取得し、
+        # 同一 bar 内のすべての _open_position に共通で渡す（fill 順依存禁止）
+        pre_fill_equity = self._snapshot_at(bar).equity
+
         trades: list[Trade] = []
         for signal, leverage in self._pending:
             if signal.kind == "open_long":
-                self._open_position("long", cast(int, signal.units), bar.ask.open, bar.bar_time, leverage)
+                self._open_position(
+                    "long", cast(int, signal.units), bar.ask.open, bar.bar_time, leverage,
+                    equity_at_entry=pre_fill_equity,
+                )
             elif signal.kind == "open_short":
-                self._open_position("short", cast(int, signal.units), bar.bid.open, bar.bar_time, leverage)
+                self._open_position(
+                    "short", cast(int, signal.units), bar.bid.open, bar.bar_time, leverage,
+                    equity_at_entry=pre_fill_equity,
+                )
             elif signal.kind == "close_position":
                 if signal.position_id is None:
                     raise ValueError("close_position requires position_id")
@@ -303,7 +313,14 @@ class MockBroker:
     # ---- internal ---------------------------------------------------------
 
     def _open_position(
-        self, side: PositionSide, units: int, entry_price: Decimal, entry_time, leverage: int
+        self,
+        side: PositionSide,
+        units: int,
+        entry_price: Decimal,
+        entry_time,
+        leverage: int,
+        *,
+        equity_at_entry: Decimal,
     ) -> Position:
         notional = notional_home_currency(units=units, price_quote_per_base=entry_price, quote_is_home=True)
         margin = required_margin(notional, leverage)
@@ -316,6 +333,7 @@ class MockBroker:
             entry_time=entry_time,
             entry_margin=margin,
             leverage=leverage,
+            equity_at_entry=equity_at_entry,
         )
         self._next_position_id += 1
         self._positions[pos.id] = pos
@@ -347,6 +365,7 @@ class MockBroker:
             exit_time=bar.bar_time,
             pnl=net_pnl,
             exit_reason=reason,
+            equity_at_entry=pos.equity_at_entry,
         )
         self._trades.append(trade)
         self._invalidate_snapshot_cache()

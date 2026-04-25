@@ -7,7 +7,7 @@ selection に影響しないことを保証する。
 
 cache 有効化 (デフォルト) と cache 無効化 (monkeypatch で
 MockBroker._snapshot_at を cache を一切書かない版に差し替え) の 2 経路で
-StageResult.passed / fitness_pen / sharpe_raw / trade_count が完全一致
+StageResult.passed / fitness_pen / trade_sharpe_raw / trade_count が完全一致
 することを assert する。
 """
 
@@ -155,7 +155,7 @@ def test_stage_a_outcome_bit_identical_with_and_without_cache(
     """Stage A 評価が cache 有効 / 無効で完全一致することを検証する。
 
     - passed / reason_codes が一致
-    - payload の fitness_raw / fitness_pen / sharpe_raw / trade_count / threshold
+    - payload の fitness_raw / fitness_pen / trade_sharpe_raw / trade_count / threshold
       が bit-identical
     """
     bars = _make_oscillating_bars(5, bars_per_day=4)
@@ -191,7 +191,7 @@ def test_stage_a_outcome_bit_identical_with_and_without_cache(
     # payload の数値が完全一致 (bit-identical)
     p_on = _payload(res_with_cache)
     p_off = _payload(res_without_cache)
-    for key in ("fitness_raw", "fitness_pen", "sharpe_raw", "trade_count", "threshold", "size_norm", "alpha_a"):
+    for key in ("fitness_raw", "fitness_pen", "trade_sharpe_raw", "trade_count", "threshold", "size_norm", "alpha_a"):
         assert p_on[key] == p_off[key], (
             f"payload[{key!r}] mismatch: cache_on={p_on[key]!r} "
             f"cache_off={p_off[key]!r}"
@@ -229,5 +229,5 @@ def test_stage_a_trade_count_bit_identical_with_and_without_cache(
     p_on = _payload(res_with_cache)
     p_off = _payload(res_without_cache)
     assert p_on["trade_count"] == p_off["trade_count"]
-    # sharpe_raw も一致 (trade_count が同じなら sharpe も bit-identical のはず)
-    assert p_on["sharpe_raw"] == p_off["sharpe_raw"]
+    # trade_sharpe_raw も一致 (trade_count が同じなら sharpe も bit-identical のはず)
+    assert p_on["trade_sharpe_raw"] == p_off["trade_sharpe_raw"]

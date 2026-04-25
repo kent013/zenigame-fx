@@ -24,6 +24,7 @@ GA Run 終了後に archive Parquet から Stage A の実通過率を集計し�
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -407,10 +408,27 @@ def compute_monitoring(
     stage_b_pass = sum(1 for r in rows_list if bool(r.get("stage_b_pass", False)))
     stage_c_pass = sum(1 for r in rows_list if bool(r.get("stage_c_pass", False)))
 
-    # null/None 安全: nullable カラムは事前にフィルタしてから float/int 変換
-    valid_sharpes = [
-        float(r["sharpe"]) for r in rows_list if r.get("sharpe") is not None
-    ]
+    # T-sharpe Phase 1A: trade_sharpe_raw (v2) を使用。v2 行のみを集計し、
+    # v1/未知バージョン行は除外する。None は v1 として扱う（後方互換）
+    unknown_versions: set[str] = set()
+    valid_sharpes: list[float] = []
+    for r in rows_list:
+        raw_version = r.get("sharpe_calc_version")
+        version = "v1_bar_annualized" if raw_version is None else raw_version
+        if version == "v2_trade_level":
+            v = r.get("trade_sharpe_raw")
+            if v is not None:
+                fv = float(v)
+                if math.isfinite(fv):  # NaN/Inf ガード
+                    valid_sharpes.append(fv)
+        elif version != "v1_bar_annualized":
+            unknown_versions.add(version)
+    if unknown_versions:
+        logger.warning(
+            "calibrate_gate.unknown_sharpe_calc_version",
+            unknown_versions=sorted(unknown_versions),
+            total_rows=len(rows_list),
+        )
     best_sharpe = max(valid_sharpes) if valid_sharpes else None
 
     pnl_vals = [

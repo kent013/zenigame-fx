@@ -51,7 +51,7 @@ from src.alpha_factory.config import (
 )
 from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
 from src.backtest.engine import BacktestConfig, run_backtest
-from src.backtest.metrics import compute_metrics
+from src.backtest.metrics import DEFAULT_TRADE_COUNT_MIN_FOR_SHARPE, compute_metrics
 from src.broker import InstrumentMeta
 from src.broker.mock import MockBroker
 from src.db.connection import SessionLocal
@@ -90,6 +90,8 @@ class SieveConfig:
     sharpe_min: float = 0.5  # strict gt
     trade_count_min: int = 30  # >=
     total_pnl_min: float = 0.0  # strict gt
+    # T-sharpe Phase 1A: trade-level Sharpe sample-size guard
+    trade_count_min_for_sharpe: int = DEFAULT_TRADE_COUNT_MIN_FOR_SHARPE
 
     def __post_init__(self) -> None:
         if self.sieve_window_days < 1:
@@ -226,10 +228,33 @@ def _load_stage_c_passers(parquet_path: Path) -> list[CandidateRow]:
         name: table.column(name).to_pylist() for name in table.schema.names
     }
     out: list[CandidateRow] = []
+    # T-sharpe Phase 1A: 新 archive (v2) は trade_sharpe_raw 列を持つ。
+    # 旧 archive (v1) との混在防止のため version 列を見て v2 のみ受け入れる。
+    has_v2_cols = (
+        "trade_sharpe_raw" in cols and "sharpe_calc_version" in cols
+    )
+    skipped_v1 = 0
+    skipped_unknown_versions: set[str] = set()
     for i in range(n_rows):
         if not bool(cols["stage_c_pass"][i]):
             continue
-        sharpe_raw = cols["sharpe"][i]
+        if has_v2_cols:
+            raw_version = cols["sharpe_calc_version"][i]
+            version = "v1_bar_annualized" if raw_version is None else str(raw_version)
+            if version != "v2_trade_level":
+                # v1 archive 行 → v2 sieve から比較禁止のため None
+                sharpe_value: float | None = None
+                if version == "v1_bar_annualized":
+                    skipped_v1 += 1
+                else:
+                    skipped_unknown_versions.add(version)
+            else:
+                v = cols["trade_sharpe_raw"][i]
+                sharpe_value = float(v) if v is not None else None
+        else:
+            # v2 列が schema に無い → 完全に旧 archive。比較禁止
+            sharpe_value = None
+            skipped_v1 += 1
         out.append(
             CandidateRow(
                 individual_name=str(cols["individual_name"][i]),
@@ -237,12 +262,16 @@ def _load_stage_c_passers(parquet_path: Path) -> list[CandidateRow]:
                 instrument=str(cols["instrument"][i]),
                 generation=int(cols["generation"][i]),
                 genome_json=str(cols["genome_json"][i]),
-                stage_c_sharpe=(
-                    float(sharpe_raw) if sharpe_raw is not None else None
-                ),
+                stage_c_sharpe=sharpe_value,
                 stage_c_total_pnl=float(cols["total_pnl"][i] or 0.0),
                 stage_c_trade_count=int(cols["trade_count"][i] or 0),
             )
+        )
+    if skipped_v1 > 0 or skipped_unknown_versions:
+        logger.warning(
+            "alpha_sieve.skipped_non_v2_rows",
+            skipped_v1=skipped_v1,
+            unknown_versions=sorted(skipped_unknown_versions),
         )
     return out
 
@@ -398,8 +427,15 @@ def _evaluate_one(
         strategy = DslStrategy(genome, primitive_evaluator)
         broker = MockBroker(instrument_meta=meta)
         result = run_backtest(bars, strategy, broker, backtest_config)
-        bt = compute_metrics(result.trades, result.equity_curve)
-        sharpe = float(bt.sharpe) if bt.sharpe is not None else None
+        bt = compute_metrics(
+            result.trades,
+            result.equity_curve,
+            trade_count_min_for_sharpe=sieve_config.trade_count_min_for_sharpe,
+        )
+        # T-sharpe Phase 1A: trade_sharpe_raw (v2) を使用
+        sharpe = (
+            float(bt.trade_sharpe_raw) if bt.trade_sharpe_raw is not None else None
+        )
         total_pnl = float(bt.total_pnl)
         trade_count = bt.trade_count
         max_dd_pct = float(bt.max_drawdown_pct)

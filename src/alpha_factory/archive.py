@@ -81,6 +81,9 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
         pa.field("dsr", pa.float64(), nullable=True),
         pa.field("ii_lite_pass", pa.bool_(), nullable=True),
         pa.field("graduated", pa.bool_(), nullable=False),
+        # T-sharpe Phase 1A: trade-level Sharpe (v2) と calc version
+        pa.field("trade_sharpe_raw", pa.float64(), nullable=True),
+        pa.field("sharpe_calc_version", pa.string(), nullable=True),
     ]
 )
 
@@ -136,6 +139,9 @@ def _create_row_template() -> dict[str, Any]:
         "dsr": None,
         "ii_lite_pass": None,
         "graduated": False,
+        # T-sharpe Phase 1A
+        "trade_sharpe_raw": None,
+        "sharpe_calc_version": "v2_trade_level",
     }
 
 
@@ -339,7 +345,12 @@ class GenomeArchive:
         row["fitness_pen"] = _required_float(payload, "fitness_pen")
         row["stage_a_pass"] = bool(stage_result.passed)
         row["trade_count"] = _required_int(payload, "trade_count")
-        row["sharpe"] = _opt_float(payload, "sharpe_raw")
+        # T-sharpe Phase 1A: payload key を "sharpe_raw" → "trade_sharpe_raw" にリネーム
+        # 旧 archive 互換のため "sharpe" 列は v1 値で残す経路を維持しないが、
+        # 既存 schema 順守のため None を入れる (Phase 2 で sharpe 列削除予定)
+        row["trade_sharpe_raw"] = _opt_float(payload, "trade_sharpe_raw")
+        row["sharpe_calc_version"] = "v2_trade_level"
+        row["sharpe"] = None  # v2 archive では legacy sharpe は埋めない
         row["n_nodes"] = _compute_n_nodes(genome)
         row["active_clause"] = _compute_active_clause_placeholder()
         row["genome_json"] = json.dumps(genome_to_dict(genome), sort_keys=True)
@@ -390,9 +401,12 @@ class GenomeArchive:
             row["fold_sign_ratio"] = float(fold_sign_ratio(oos))
 
         row["dsr"] = _opt_float(payload, "dsr")
+        # T-sharpe Phase 1A: stage_b は is_full_sharpe を trade_sharpe_raw に書く。
+        # is_full_sharpe は stage_gate.py で trade_sharpe_raw (v2) を入れる
         is_sharpe = _opt_float(payload, "is_full_sharpe")
         if is_sharpe is not None:
-            row["sharpe"] = is_sharpe
+            row["trade_sharpe_raw"] = is_sharpe
+            row["sharpe_calc_version"] = "v2_trade_level"
         is_pnl = _opt_float(payload, "is_full_total_pnl")
         if is_pnl is not None:
             row["total_pnl"] = is_pnl
@@ -440,9 +454,11 @@ class GenomeArchive:
         payload = _extract_payload(stage_result)
         row["stage_c_pass"] = bool(stage_result.passed)
 
-        sharpe = _opt_float(payload, "sharpe")
+        # T-sharpe Phase 1A: payload key "sharpe" → "trade_sharpe_raw" にリネーム
+        sharpe = _opt_float(payload, "trade_sharpe_raw")
         if sharpe is not None:
-            row["sharpe"] = sharpe
+            row["trade_sharpe_raw"] = sharpe
+            row["sharpe_calc_version"] = "v2_trade_level"
         total_pnl = _opt_float(payload, "total_pnl")
         if total_pnl is not None:
             row["total_pnl"] = total_pnl
@@ -514,6 +530,56 @@ class GenomeArchive:
     def load(parquet_path: Path) -> pa.Table:
         """Parquet ファイルを ``pyarrow.Table`` として読み戻す。"""
         return pq.read_table(parquet_path)
+
+    # ------------------------------------------------------------------
+    # T-sharpe Phase 1A: canonical Sharpe accessor
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def get_trade_sharpe(row: Mapping[str, Any]) -> float | None:
+        """v2 archive 行の ``trade_sharpe_raw`` を返す比較用 accessor。
+
+        v1 archive 行（``sharpe_calc_version`` が ``"v2_trade_level"`` 以外）の
+        場合は ``ValueError`` を送出して静かな v1/v2 混在を防ぐ。
+
+        Args:
+            row: archive 行 (Mapping)。
+
+        Raises:
+            ValueError: v1/未知 archive 行に対して呼び出された場合。
+        """
+        raw_version = row.get("sharpe_calc_version")
+        version = "v1_bar_annualized" if raw_version is None else raw_version
+        if version != "v2_trade_level":
+            raise ValueError(
+                f"get_trade_sharpe: sharpe_calc_version={version!r} は v2 専用 "
+                f"accessor では読めません。v1 archive との比較は禁止されています。"
+            )
+        v = row.get("trade_sharpe_raw")
+        return float(v) if v is not None else None
+
+    @staticmethod
+    def get_legacy_bar_sharpe(row: Mapping[str, Any]) -> float | None:
+        """v1 archive 行の bar-level annualized ``sharpe`` を返す閲覧専用 accessor。
+
+        H2 検証など過去 archive の bar-level Sharpe を読む用途専用。
+        比較・判定には絶対に使用しない。v2 archive 行に対しては ``ValueError``。
+
+        Args:
+            row: archive 行 (Mapping)。
+
+        Raises:
+            ValueError: v2 archive 行に対して呼び出された場合。
+        """
+        raw_version = row.get("sharpe_calc_version")
+        version = "v1_bar_annualized" if raw_version is None else raw_version
+        if version == "v2_trade_level":
+            raise ValueError(
+                "get_legacy_bar_sharpe: v2 archive には v1 bar-level Sharpe は"
+                "存在しません。"
+            )
+        v = row.get("sharpe")
+        return float(v) if v is not None else None
 
     # ------------------------------------------------------------------
     # Row snapshot (run_ga.py selection cache 用; T018)

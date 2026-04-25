@@ -38,7 +38,14 @@ def _row(
     total_pnl: float = 0.0,
     max_drawdown_pct: float = 0.0,
     trade_count: int = 0,
+    # T-sharpe Phase 1A: trade_sharpe_raw (v2) を default で v2 archive 行とみなす
+    trade_sharpe_raw: float | None = None,
+    sharpe_calc_version: str | None = "v2_trade_level",
 ) -> dict[str, Any]:
+    # T-sharpe Phase 1A: 旧 fixture 互換のため `sharpe` 引数を受けたら
+    # trade_sharpe_raw=v2 として扱う (v2 archive 行をシミュレート)
+    if trade_sharpe_raw is None and sharpe is not None:
+        trade_sharpe_raw = sharpe
     return {
         "generation": generation,
         "stage_a_pass": stage_a_pass,
@@ -49,6 +56,8 @@ def _row(
         "total_pnl": total_pnl,
         "max_drawdown_pct": max_drawdown_pct,
         "trade_count": trade_count,
+        "trade_sharpe_raw": trade_sharpe_raw,
+        "sharpe_calc_version": sharpe_calc_version,
     }
 
 

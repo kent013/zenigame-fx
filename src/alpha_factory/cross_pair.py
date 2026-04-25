@@ -35,7 +35,7 @@ import structlog
 
 from src.alpha_factory.stage_gate import CrossPairResult
 from src.backtest.engine import BacktestConfig, run_backtest
-from src.backtest.metrics import compute_metrics
+from src.backtest.metrics import DEFAULT_TRADE_COUNT_MIN_FOR_SHARPE, compute_metrics
 from src.broker.mock import InstrumentMeta, MockBroker
 from src.domain.price import PriceBar
 from src.dsl.genome import Genome
@@ -127,6 +127,7 @@ def _run_pair_sharpe(
     meta: InstrumentMeta,
     backtest_config: BacktestConfig,
     primitive_evaluator: PrimitiveEvaluator,
+    trade_count_min_for_sharpe: int = DEFAULT_TRADE_COUNT_MIN_FOR_SHARPE,
 ) -> tuple[float, str | None]:
     """単一ペアで backtest 実行し、Sharpe を返す。
 
@@ -142,10 +143,16 @@ def _run_pair_sharpe(
         strategy = DslStrategy(genome, primitive_evaluator)
         broker = MockBroker(instrument_meta=meta)
         result = run_backtest(bars, strategy, broker, pair_config)
-        bt = compute_metrics(result.trades, result.equity_curve)
-        if bt.sharpe is None:
+        bt = compute_metrics(
+            result.trades,
+            result.equity_curve,
+            trade_count_min_for_sharpe=trade_count_min_for_sharpe,
+        )
+        # T-sharpe Phase 1A: trade_sharpe_raw (v2) を使用。
+        # None は fail-fast (skip 扱い禁止) — 呼び出し元の集計で 0.0 として混入させる
+        if bt.trade_sharpe_raw is None:
             return 0.0, "metric_unavailable"
-        return float(bt.sharpe), None
+        return float(bt.trade_sharpe_raw), None
     except Exception as exc:
         logger.warning(
             "cross_pair.pair_failure",

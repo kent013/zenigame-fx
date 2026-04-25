@@ -343,7 +343,8 @@ class TestStageA:
             "alpha_a",
             "threshold",
             "trade_count",
-            "sharpe_raw",
+            # T-sharpe Phase 1A: payload key を sharpe_raw → trade_sharpe_raw に
+            "trade_sharpe_raw",
         ):
             assert key in payload
 
@@ -408,7 +409,9 @@ class TestStageA:
         bars = _make_oscillating_bars(5, bars_per_day=4)
         ev = _AlternatingEvaluator()
         cfg = _backtest_config()
-        stage_cfg = StageGateConfig(stage_a_alpha=0.5)  # 大きめ alpha で penalty を顕著化
+        # T-sharpe Phase 1A: 短期 backtest で trade_sharpe_raw を有限値にするため
+        # sample-size guard を緩める (production default=30)
+        stage_cfg = StageGateConfig(stage_a_alpha=0.5, trade_count_min_for_sharpe=2)
 
         res_simple = evaluate_stage_a(
             _one_clause_genome("simple"),
@@ -625,7 +628,8 @@ class TestStageC:
         assert isinstance(env["wall_time_seconds"], float)
         payload = cast(dict[str, Any], env["payload"])
         for key in (
-            "sharpe",
+            # T-sharpe Phase 1A: Stage C payload key も "sharpe" → "trade_sharpe_raw"
+            "trade_sharpe_raw",
             "total_pnl",
             "max_drawdown_frac",
             "trade_count",
@@ -709,6 +713,8 @@ class TestStageC:
             live_criteria=relaxed_lc,
             spread_stress_min_total_pnl=-1e9,
             spread_stress_min_sharpe=-1e9,
+            # T-sharpe Phase 1A: 短期 backtest で trade_sharpe_raw を計算可能にする
+            trade_count_min_for_sharpe=2,
         )
         res = evaluate_stage_c(
             _one_clause_genome(),
@@ -801,7 +807,9 @@ class TestStageC:
         bars = _make_oscillating_bars(5, bars_per_day=4)
         ev = ConstantPrimitiveEvaluator(value=0.0)
 
-        # 日跨ぎ Trade を 1 本含む synthetic result
+        # 日跨ぎ Trade を 2 本含む synthetic result
+        # T-sharpe Phase 1A: equity_at_entry を明示し、複数 trade で trade_sharpe_raw が
+        # 計算されるようにする
         overnight_trade = Trade(
             position_id=1,
             instrument="USD_JPY",
@@ -813,6 +821,20 @@ class TestStageC:
             exit_time=datetime(2026, 1, 2, 1, 0, tzinfo=UTC),  # 翌日
             pnl=Decimal("1000"),
             exit_reason="signal",
+            equity_at_entry=Decimal("1000000"),
+        )
+        overnight_trade2 = Trade(
+            position_id=2,
+            instrument="USD_JPY",
+            side="long",
+            units=10000,
+            entry_price=Decimal("154.10"),
+            entry_time=datetime(2026, 1, 2, 22, 0, tzinfo=UTC),
+            exit_price=Decimal("154.20"),
+            exit_time=datetime(2026, 1, 3, 1, 0, tzinfo=UTC),  # 翌日
+            pnl=Decimal("500"),
+            exit_reason="signal",
+            equity_at_entry=Decimal("1001000"),
         )
 
         from src.alpha_factory import stage_gate as sg_module
@@ -831,7 +853,7 @@ class TestStageC:
         ]
         result = BacktestResult(
             config=_backtest_config(),
-            trades=[overnight_trade],
+            trades=[overnight_trade, overnight_trade2],
             equity_curve=equity,
         )
 
@@ -852,6 +874,8 @@ class TestStageC:
             live_criteria=relaxed_lc,
             spread_stress_min_total_pnl=-1e9,
             spread_stress_min_sharpe=-1e9,
+            # T-sharpe Phase 1A: 2 trade のみで sharpe を計算できるようにする
+            trade_count_min_for_sharpe=2,
         )
         res = evaluate_stage_c(
             _one_clause_genome(),
@@ -868,7 +892,8 @@ class TestStageC:
         assert set(res.reason_codes) == {"intraday_constraint_violation"}
         payload = _payload(res)
         assert payload["intraday_compliant"] is False
-        assert payload["overnight_violations"] == 1
+        # T-sharpe Phase 1A: trade_sharpe_raw 計算のため 2 trade に増やしたので 2
+        assert payload["overnight_violations"] == 2
 
     def test_cross_pair_none_skipped(self) -> None:
         """cross_pair_evaluator=None で cross_pair.skipped=True、passed には影響しない."""
@@ -885,6 +910,8 @@ class TestStageC:
             live_criteria=relaxed_lc,
             spread_stress_min_total_pnl=-1e9,
             spread_stress_min_sharpe=-1e9,
+            # T-sharpe Phase 1A: 短期 backtest で trade_sharpe_raw を計算可能にする
+            trade_count_min_for_sharpe=2,
         )
         res = evaluate_stage_c(
             _one_clause_genome(),
@@ -940,6 +967,8 @@ class TestStageC:
             live_criteria=relaxed_lc,
             spread_stress_min_total_pnl=-1e9,
             spread_stress_min_sharpe=-1e9,
+            # T-sharpe Phase 1A: 短期 backtest で trade_sharpe_raw を計算可能にする
+            trade_count_min_for_sharpe=2,
         )
         res = evaluate_stage_c(
             _one_clause_genome(),

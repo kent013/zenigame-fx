@@ -88,7 +88,7 @@ class TestTotalPnl:
 
 class TestSharpe:
     def test_returns_failure_when_insufficient_trades(self) -> None:
-        # equity curve flat → std=0 → sharpe None → FAILURE
+        # T-sharpe Phase 1A: trade_count<30 → trade_sharpe_raw None → FAILURE
         ev = ConstantPrimitiveEvaluator(value=0.0)
         v = evaluate_genome(
             _genome(),
@@ -99,6 +99,49 @@ class TestSharpe:
             metric="sharpe",
         )
         assert v == _FAILURE_FITNESS
+
+    def test_uses_trade_sharpe_raw_not_legacy_bar_sharpe(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """metric=sharpe は trade_sharpe_raw (v2) を読む。bar-level sharpe (v1) は無視."""
+
+        # 偽の BacktestMetrics を返す compute_metrics を patch
+        def fake_compute_metrics(*args, **kwargs):  # type: ignore[no-untyped-def]
+            from src.backtest.metrics import (
+                SHARPE_CALC_VERSION_V2,
+                BacktestMetrics,
+            )
+            return BacktestMetrics(
+                trade_count=50,
+                win_count=25,
+                loss_count=25,
+                win_rate=Decimal("0.5"),
+                total_pnl=Decimal("100"),
+                avg_win=Decimal("10"),
+                avg_loss=Decimal("-10"),
+                profit_factor=None,
+                max_drawdown=Decimal("0"),
+                max_drawdown_pct=Decimal("0"),
+                final_equity=Decimal("1000100"),
+                sharpe=Decimal("99.0"),  # legacy v1 値（無視されるべき）
+                sortino=None,
+                calmar=None,
+                avg_trade_duration=None,
+                max_trade_duration=None,
+                trade_sharpe_raw=Decimal("0.5"),  # v2 値（採用されるべき）
+                sharpe_calc_version=SHARPE_CALC_VERSION_V2,
+            )
+
+        monkeypatch.setattr("src.ga.fitness.compute_metrics", fake_compute_metrics)
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        v = evaluate_genome(
+            _genome(),
+            _bars_two_days(),
+            usd_jpy_meta(),
+            _cfg(),
+            ev,
+            metric="sharpe",
+        )
+        # 採用されるのは trade_sharpe_raw (0.5) の方
+        assert v == Decimal("0.5")
 
 
 class TestCalmar:
