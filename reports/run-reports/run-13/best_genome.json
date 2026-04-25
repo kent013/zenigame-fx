@@ -1,0 +1,52 @@
+{
+  "name": "g38_i78",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "P7",
+          "weight": 1.458076177309168,
+          "params": {
+            "spx_n": 46,
+            "vix_threshold": 14.492527027599033,
+            "vix_scale": 5.47641131455348,
+            "vix_staleness_days": 2.7956317567716162,
+            "spx_staleness_bars": 480
+          }
+        },
+        {
+          "name": "F14",
+          "weight": 1.3512185388383353,
+          "params": {
+            "fast_n": 30,
+            "slow_n": 24,
+            "rv_n": 15,
+            "scale": 4.060103607940178,
+            "k_scale": 2.1410320710960633
+          }
+        },
+        {
+          "name": "F7",
+          "weight": 0.9459088372252711,
+          "params": {
+            "n": 24,
+            "scale": 23.402392709862518
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.5684904540234004
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.23577629273370984,
+    "exit_threshold": 0.09921844064186101,
+    "max_pos": 1,
+    "time_stop_min": 40
+  },
+  "risk": {
+    "stop_atr": 1.7272846502531882,
+    "take_atr": 1.623324097932514
+  }
+}
