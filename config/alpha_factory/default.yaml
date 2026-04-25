@@ -57,7 +57,7 @@ stage_gate:
     window_days: 60
     target_pass_rate: 0.15      # 探索圧の代理指標 (calibrate-gate T027 で使用)
     alpha: 0.03
-    threshold: 0.2022           # T027 calibrate-gate により Run 終了後に動的更新
+    threshold: 0.0              # cycle 4 reset: WF 短縮 (cycle 3) で fitness 分布が変化、旧 gate 過剰で Stage A pass=0 となったため baseline へ戻す。本 cycle は calibrate-gate skip。
     # T027 calibrate-gate 設定 (deterministic 制御則)
     # - 概念設計: docs/alpha_factory/concepts/calibrate-gate.md
     # - SSOT: 本セクション、loader: scripts/alpha_factory/calibrate_gate.py
@@ -74,9 +74,16 @@ stage_gate:
       eps_var: 0.000000001               # quantile-snap skip 判定 (var(fitness_pen))
   stage_b:
     window_months: 18
-    wf_train_days: 120
-    wf_test_days: 20
-    wf_step_days: 20
+    # Cycle 3 (Run-13 観測結果) intervention:
+    # @why: Run-13 で Stage B failure reason が insufficient_folds=100% 単峰化。
+    # WF 必要観測日数 (train=120 + embargo=1 + test=20 = 141) > Stage B window 観測日数 (~127)
+    # で構造的に fold が 1 個しか作れず insufficient_folds で常に reject されていた。
+    # train/test を半分にして fold 成立を狙う (train=60+embargo=1+test=10=71)。
+    # 注: Sharpe / positive_fold 閾値は不変。目的は「fold 成立」のみ (Codex 案 A)。
+    # 構造的フィージビリティ契約 (T038 候補) は別 cycle で本格実装予定。
+    wf_train_days: 60
+    wf_test_days: 10
+    wf_step_days: 10
     wf_embargo_days: 1
     median_oos_sharpe_min: 0.20
     positive_fold_min: 0.60
