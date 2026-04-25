@@ -16,6 +16,7 @@ dist/
 build/
 .DS_Store
 pgdata/
+tmp/
 devnotes/**/tmp/
 paper-logs/
 reports/backtests/
