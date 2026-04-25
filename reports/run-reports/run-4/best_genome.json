@@ -1,0 +1,54 @@
+{
+  "name": "g4_i11",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "P2",
+          "weight": 1.2007342144304027,
+          "params": {
+            "atr_n": 13
+          }
+        },
+        {
+          "name": "F13",
+          "weight": 1.013859979258827,
+          "params": {
+            "w": 144,
+            "lag": 8
+          }
+        },
+        {
+          "name": "F8",
+          "weight": 1.3135704953941278,
+          "params": {
+            "n": 55,
+            "k": 2.423797324359169
+          }
+        },
+        {
+          "name": "F6",
+          "weight": 1.396877115196748,
+          "params": {
+            "session": 1,
+            "k": 1.4727077502306578,
+            "atr_n": 24
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.8854573734303399
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.47114854260990485,
+    "exit_threshold": 0.17153388113381984,
+    "max_pos": 2,
+    "time_stop_min": 44
+  },
+  "risk": {
+    "stop_atr": 1.3177957528520665,
+    "take_atr": 2.258431161425528
+  }
+}

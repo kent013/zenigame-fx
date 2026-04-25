@@ -1,0 +1,77 @@
+{
+  "run_id": "run_20260421_090442",
+  "run_number": 1,
+  "generated_at": "2026-04-21T09:04:42.269019+00:00",
+  "dataset": {
+    "instrument": "EUR_JPY",
+    "start": "2026-03-01T00:00:00+00:00",
+    "end": "2026-03-15T00:00:00+00:00",
+    "bars": 14351
+  },
+  "ga_config": {
+    "population_size": 12,
+    "generations": 3,
+    "crossover_rate": 0.7,
+    "mutation_rate": 0.3,
+    "tournament_size": 3,
+    "elite_count": 2,
+    "max_depth": 4,
+    "units": 10000,
+    "fitness_metric": "sharpe",
+    "seed": 42
+  },
+  "backtest_config": {
+    "initial_cash": "1000000",
+    "leverage": 25,
+    "units": 10000
+  },
+  "best": {
+    "name": "g0_i7",
+    "fitness": "0.07608531885206603",
+    "metrics": {
+      "trade_count": 12,
+      "win_count": 5,
+      "loss_count": 7,
+      "win_rate": "0.4166666666666666666666666667",
+      "total_pnl": "50.000000",
+      "avg_win": "5134.000000",
+      "avg_loss": "-3660.000000",
+      "profit_factor": "1.001951600312256049960967994",
+      "max_drawdown": "32530.000000",
+      "max_drawdown_pct": "3.200795033011581112062264467",
+      "final_equity": "1000050.000000",
+      "sharpe": "0.07608531885206603",
+      "sortino": "0.07498351162289076",
+      "calmar": "0.04769364001807487694034760943",
+      "avg_trade_duration": 71595.0,
+      "max_trade_duration": 86280.0
+    }
+  },
+  "live_criteria": {
+    "checks": {
+      "sharpe": {
+        "value": "0.07608531885206603",
+        "threshold": "1.0",
+        "pass": false
+      },
+      "total_pnl": {
+        "value": "50.000000",
+        "threshold": "50000",
+        "pass": false
+      },
+      "max_drawdown_pct": {
+        "value": "3.200795033011581112062264467",
+        "threshold": "20.0",
+        "pass": true
+      },
+      "trade_count": {
+        "value": 12,
+        "threshold_min": 50,
+        "threshold_max": 5000,
+        "pass": false
+      }
+    },
+    "all_pass": false
+  },
+  "population_size": 12
+}

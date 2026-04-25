@@ -1,0 +1,198 @@
+{
+  "name": "g0_i7",
+  "units": 10000,
+  "entry_long": {
+    "kind": "compare",
+    "op": "<=",
+    "lhs": {
+      "kind": "indicator",
+      "name": "ema",
+      "window": 14,
+      "of": {
+        "kind": "var",
+        "name": "high"
+      }
+    },
+    "rhs": {
+      "kind": "binop",
+      "op": "/",
+      "lhs": {
+        "kind": "indicator",
+        "name": "sma",
+        "window": 14,
+        "of": {
+          "kind": "var",
+          "name": "low"
+        }
+      },
+      "rhs": {
+        "kind": "binop",
+        "op": "-",
+        "lhs": {
+          "kind": "indicator",
+          "name": "sma",
+          "window": 50,
+          "of": {
+            "kind": "binop",
+            "op": "+",
+            "lhs": {
+              "kind": "const",
+              "value": "1.0"
+            },
+            "rhs": {
+              "kind": "var",
+              "name": "open"
+            }
+          }
+        },
+        "rhs": {
+          "kind": "const",
+          "value": "0.5"
+        }
+      }
+    }
+  },
+  "entry_short": {
+    "kind": "compare",
+    "op": "<=",
+    "lhs": {
+      "kind": "const",
+      "value": "3.0"
+    },
+    "rhs": {
+      "kind": "binop",
+      "op": "+",
+      "lhs": {
+        "kind": "indicator",
+        "name": "ema",
+        "window": 30,
+        "of": {
+          "kind": "binop",
+          "op": "-",
+          "lhs": {
+            "kind": "binop",
+            "op": "*",
+            "lhs": {
+              "kind": "indicator",
+              "name": "ema",
+              "window": 20,
+              "of": {
+                "kind": "var",
+                "name": "high"
+              }
+            },
+            "rhs": {
+              "kind": "indicator",
+              "name": "rsi",
+              "window": 10,
+              "of": {
+                "kind": "var",
+                "name": "open"
+              }
+            }
+          },
+          "rhs": {
+            "kind": "const",
+            "value": "3.0"
+          }
+        }
+      },
+      "rhs": {
+        "kind": "indicator",
+        "name": "rsi",
+        "window": 20,
+        "of": {
+          "kind": "var",
+          "name": "high"
+        }
+      }
+    }
+  },
+  "exit_long": {
+    "kind": "logical",
+    "op": "not",
+    "args": [
+      {
+        "kind": "compare",
+        "op": "<=",
+        "lhs": {
+          "kind": "indicator",
+          "name": "ema",
+          "window": 14,
+          "of": {
+            "kind": "const",
+            "value": "3.0"
+          }
+        },
+        "rhs": {
+          "kind": "indicator",
+          "name": "sma",
+          "window": 14,
+          "of": {
+            "kind": "var",
+            "name": "high"
+          }
+        }
+      }
+    ]
+  },
+  "exit_short": {
+    "kind": "compare",
+    "op": "<=",
+    "lhs": {
+      "kind": "binop",
+      "op": "-",
+      "lhs": {
+        "kind": "indicator",
+        "name": "sma",
+        "window": 20,
+        "of": {
+          "kind": "indicator",
+          "name": "stddev",
+          "window": 10,
+          "of": {
+            "kind": "var",
+            "name": "low"
+          }
+        }
+      },
+      "rhs": {
+        "kind": "binop",
+        "op": "+",
+        "lhs": {
+          "kind": "var",
+          "name": "high"
+        },
+        "rhs": {
+          "kind": "binop",
+          "op": "*",
+          "lhs": {
+            "kind": "binop",
+            "op": "-",
+            "lhs": {
+              "kind": "indicator",
+              "name": "rsi",
+              "window": 20,
+              "of": {
+                "kind": "var",
+                "name": "close"
+              }
+            },
+            "rhs": {
+              "kind": "var",
+              "name": "close"
+            }
+          },
+          "rhs": {
+            "kind": "var",
+            "name": "low"
+          }
+        }
+      }
+    },
+    "rhs": {
+      "kind": "const",
+      "value": "0.5"
+    }
+  }
+}

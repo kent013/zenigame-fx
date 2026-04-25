@@ -1,0 +1,77 @@
+{
+  "run_id": "run_20260421_091614",
+  "run_number": 2,
+  "generated_at": "2026-04-21T09:16:14.168285+00:00",
+  "dataset": {
+    "instrument": "EUR_JPY",
+    "start": "2026-03-01T00:00:00+00:00",
+    "end": "2026-03-15T00:00:00+00:00",
+    "bars": 14351
+  },
+  "ga_config": {
+    "population_size": 12,
+    "generations": 3,
+    "crossover_rate": 0.7,
+    "mutation_rate": 0.35,
+    "tournament_size": 3,
+    "elite_count": 2,
+    "max_depth": 4,
+    "units": 10000,
+    "fitness_metric": "sharpe",
+    "seed": null
+  },
+  "backtest_config": {
+    "initial_cash": "1000000",
+    "leverage": 25,
+    "units": 10000
+  },
+  "best": {
+    "name": "g1_i3",
+    "fitness": "1.3130627678387203",
+    "metrics": {
+      "trade_count": 12,
+      "win_count": 6,
+      "loss_count": 6,
+      "win_rate": "0.5",
+      "total_pnl": "6150.000000",
+      "avg_win": "4303.333333333333333333333333",
+      "avg_loss": "-3278.333333333333333333333333",
+      "profit_factor": "1.312658871377732587697000508",
+      "max_drawdown": "32450.000000",
+      "max_drawdown_pct": "3.174836121710204480970550827",
+      "final_equity": "1006150.000000",
+      "sharpe": "1.3130627678387203",
+      "sortino": "1.2819575657427764",
+      "calmar": "5.914283417326507022926480027",
+      "avg_trade_duration": 69625.0,
+      "max_trade_duration": 86220.0
+    }
+  },
+  "live_criteria": {
+    "checks": {
+      "sharpe": {
+        "value": "1.3130627678387203",
+        "threshold": "1.0",
+        "pass": true
+      },
+      "total_pnl": {
+        "value": "6150.000000",
+        "threshold": "50000",
+        "pass": false
+      },
+      "max_drawdown_pct": {
+        "value": "3.174836121710204480970550827",
+        "threshold": "20.0",
+        "pass": true
+      },
+      "trade_count": {
+        "value": 12,
+        "threshold_min": 50,
+        "threshold_max": 5000,
+        "pass": false
+      }
+    },
+    "all_pass": false
+  },
+  "population_size": 12
+}

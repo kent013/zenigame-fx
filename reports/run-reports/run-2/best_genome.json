@@ -1,0 +1,294 @@
+{
+  "name": "g1_i3",
+  "units": 10000,
+  "entry_long": {
+    "kind": "compare",
+    "op": ">",
+    "lhs": {
+      "kind": "binop",
+      "op": "+",
+      "lhs": {
+        "kind": "binop",
+        "op": "/",
+        "lhs": {
+          "kind": "binop",
+          "op": "+",
+          "lhs": {
+            "kind": "indicator",
+            "name": "stddev",
+            "window": 30,
+            "of": {
+              "kind": "const",
+              "value": "1.0"
+            }
+          },
+          "rhs": {
+            "kind": "const",
+            "value": "0.25"
+          }
+        },
+        "rhs": {
+          "kind": "var",
+          "name": "open"
+        }
+      },
+      "rhs": {
+        "kind": "indicator",
+        "name": "stddev",
+        "window": 5,
+        "of": {
+          "kind": "indicator",
+          "name": "sma",
+          "window": 14,
+          "of": {
+            "kind": "var",
+            "name": "close"
+          }
+        }
+      }
+    },
+    "rhs": {
+      "kind": "binop",
+      "op": "-",
+      "lhs": {
+        "kind": "binop",
+        "op": "*",
+        "lhs": {
+          "kind": "binop",
+          "op": "/",
+          "lhs": {
+            "kind": "binop",
+            "op": "+",
+            "lhs": {
+              "kind": "var",
+              "name": "open"
+            },
+            "rhs": {
+              "kind": "var",
+              "name": "open"
+            }
+          },
+          "rhs": {
+            "kind": "const",
+            "value": "1.5"
+          }
+        },
+        "rhs": {
+          "kind": "binop",
+          "op": "+",
+          "lhs": {
+            "kind": "var",
+            "name": "low"
+          },
+          "rhs": {
+            "kind": "binop",
+            "op": "+",
+            "lhs": {
+              "kind": "indicator",
+              "name": "rsi",
+              "window": 50,
+              "of": {
+                "kind": "var",
+                "name": "high"
+              }
+            },
+            "rhs": {
+              "kind": "const",
+              "value": "0.25"
+            }
+          }
+        }
+      },
+      "rhs": {
+        "kind": "binop",
+        "op": "-",
+        "lhs": {
+          "kind": "indicator",
+          "name": "stddev",
+          "window": 20,
+          "of": {
+            "kind": "var",
+            "name": "close"
+          }
+        },
+        "rhs": {
+          "kind": "indicator",
+          "name": "stddev",
+          "window": 10,
+          "of": {
+            "kind": "binop",
+            "op": "/",
+            "lhs": {
+              "kind": "const",
+              "value": "3.0"
+            },
+            "rhs": {
+              "kind": "var",
+              "name": "close"
+            }
+          }
+        }
+      }
+    }
+  },
+  "entry_short": {
+    "kind": "compare",
+    "op": ">=",
+    "lhs": {
+      "kind": "binop",
+      "op": "/",
+      "lhs": {
+        "kind": "const",
+        "value": "3.0"
+      },
+      "rhs": {
+        "kind": "binop",
+        "op": "*",
+        "lhs": {
+          "kind": "indicator",
+          "name": "rsi",
+          "window": 50,
+          "of": {
+            "kind": "var",
+            "name": "high"
+          }
+        },
+        "rhs": {
+          "kind": "var",
+          "name": "open"
+        }
+      }
+    },
+    "rhs": {
+      "kind": "indicator",
+      "name": "rsi",
+      "window": 10,
+      "of": {
+        "kind": "binop",
+        "op": "-",
+        "lhs": {
+          "kind": "indicator",
+          "name": "sma",
+          "window": 20,
+          "of": {
+            "kind": "const",
+            "value": "0.5"
+          }
+        },
+        "rhs": {
+          "kind": "indicator",
+          "name": "sma",
+          "window": 10,
+          "of": {
+            "kind": "var",
+            "name": "close"
+          }
+        }
+      }
+    }
+  },
+  "exit_long": {
+    "kind": "logical",
+    "op": "or",
+    "args": [
+      {
+        "kind": "compare",
+        "op": ">",
+        "lhs": {
+          "kind": "indicator",
+          "name": "stddev",
+          "window": 5,
+          "of": {
+            "kind": "var",
+            "name": "open"
+          }
+        },
+        "rhs": {
+          "kind": "const",
+          "value": "0.25"
+        }
+      },
+      {
+        "kind": "logical",
+        "op": "and",
+        "args": [
+          {
+            "kind": "compare",
+            "op": "<=",
+            "lhs": {
+              "kind": "const",
+              "value": "1.5"
+            },
+            "rhs": {
+              "kind": "binop",
+              "op": "/",
+              "lhs": {
+                "kind": "binop",
+                "op": "-",
+                "lhs": {
+                  "kind": "var",
+                  "name": "open"
+                },
+                "rhs": {
+                  "kind": "var",
+                  "name": "high"
+                }
+              },
+              "rhs": {
+                "kind": "binop",
+                "op": "-",
+                "lhs": {
+                  "kind": "var",
+                  "name": "high"
+                },
+                "rhs": {
+                  "kind": "var",
+                  "name": "high"
+                }
+              }
+            }
+          },
+          {
+            "kind": "compare",
+            "op": "<",
+            "lhs": {
+              "kind": "indicator",
+              "name": "sma",
+              "window": 5,
+              "of": {
+                "kind": "var",
+                "name": "low"
+              }
+            },
+            "rhs": {
+              "kind": "indicator",
+              "name": "ema",
+              "window": 20,
+              "of": {
+                "kind": "var",
+                "name": "open"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "exit_short": {
+    "kind": "compare",
+    "op": ">",
+    "lhs": {
+      "kind": "const",
+      "value": "2.0"
+    },
+    "rhs": {
+      "kind": "indicator",
+      "name": "sma",
+      "window": 14,
+      "of": {
+        "kind": "var",
+        "name": "high"
+      }
+    }
+  }
+}
