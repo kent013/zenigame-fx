@@ -1,0 +1,679 @@
+# 詳細設計: factor-shadow-plane (FSP) — single instrument 専用 diagnostic layer (Round 6 / APPROVED)
+
+概念設計: [conceptual-design.md](./conceptual-design.md) (Round 6 / APPROVED)
+
+## 1. 変更対象ファイル一覧
+
+| ファイル | 変更種別 | 内容 |
+|--------|---------|-----|
+| `config/alpha_factory/default.yaml` | 追加 | `factor_shadow.*` セクション |
+| `src/alpha_factory/config.py` | 追加 | `FspConfig` dataclass |
+| `src/alpha_factory/archive.py` | 変更 | GENOMES_SCHEMA に 6 列追加、`_create_row_template` に初期値追加 |
+| `src/alpha_factory/fsp_updater.py` | 新規作成 | post-RUN FSP 計算・Parquet 書き戻し |
+| `tests/alpha_factory/test_fsp_updater.py` | 新規作成 | FSP updater の unit test |
+| `tests/alpha_factory/test_archive_schema.py` | 変更/追加 | schema 互換テスト 3 ケース追加 |
+
+## 2. config 追加
+
+### `config/alpha_factory/default.yaml` 追加セクション
+
+```yaml
+# Factor Shadow Plane (FSP) — single instrument 専用 外生因子 diagnostic layer (T_FSP)
+# - 概念設計: devnotes/20260425-0956-factor-shadow-plane-single-instr/conceptual-design.md
+# - Phase 1: diagnostic-only (選抜介入なし)、post-RUN 独立計算
+# - default で無効化 (enabled: false)。単体検証時は CLI/test fixture で上書き
+factor_shadow:
+  enabled: false
+  factors: ["DXY"]
+  sampling_mode: "daily"
+  window_days: 60
+  factor_asof_lag: 1
+  conditioning_set: "all_bars_all_individuals"
+```
+
+## 3. `FspConfig` dataclass
+
+### `src/alpha_factory/config.py` に追加
+
+```python
+from dataclasses import dataclass
+from typing import Literal
+
+@dataclass(frozen=True)
+class FspConfig:
+    """Factor Shadow Plane 設定 (T_FSP)。
+
+    概念設計: devnotes/20260425-0956-factor-shadow-plane-single-instr/conceptual-design.md
+    """
+    enabled: bool = False
+    factors: list[str] = field(default_factory=lambda: ["DXY"])
+    sampling_mode: Literal["daily"] = "daily"
+    window_days: int = 60
+    factor_asof_lag: int = 1
+    conditioning_set: Literal["all_bars_all_individuals"] = "all_bars_all_individuals"
+```
+
+### `AlphaFactoryConfig` に `fsp` フィールド追加
+
+```python
+@dataclass(frozen=True)
+class AlphaFactoryConfig:
+    ...
+    fsp: FspConfig = field(default_factory=FspConfig)
+```
+
+### YAML loader 対応
+
+`load_config()` で `config.get("factor_shadow", {})` を読み込んで `FspConfig(**kw)` に変換。
+
+## 4. `archive.py` schema 拡張
+
+### 4-1. `GENOMES_SCHEMA` 追加列 (D4a)
+
+既存の 28 列末尾に以下を追加 (すべて nullable):
+
+```python
+# FSP columns (T_FSP) — post-RUN updater が書き込む (collect_stage_* は null 初期化のみ)
+pa.field("fsp_runtime_mode", pa.string(), nullable=True),
+pa.field("fsp_sampling_mode", pa.string(), nullable=True),
+pa.field("fsp_factor_set", pa.list_(pa.string()), nullable=True),
+pa.field("fsp_rolling_corr_60d", pa.list_(pa.float64()), nullable=True),
+pa.field("fsp_explained_variance", pa.float64(), nullable=True),
+pa.field("fsp_idio_ratio", pa.float64(), nullable=True),
+```
+
+### 4-2. `_create_row_template` 追加初期値 (D4b)
+
+```python
+# FSP columns — null 初期化 (値埋めは post-RUN FSP updater のみが行う)
+"fsp_runtime_mode": None,
+"fsp_sampling_mode": None,
+"fsp_factor_set": None,
+"fsp_rolling_corr_60d": None,
+"fsp_explained_variance": None,
+"fsp_idio_ratio": None,
+```
+
+注: `collect_stage_*` は FSP 列を一切変更しない (null のまま flush)。
+
+### 4-3. import-time assert (既存の自動検証)
+
+`archive.py` 末尾の `_TEMPLATE_KEYS == _SCHEMA_NAMES` assert が自動的に FSP 6 列の整合性を検証する。
+
+## 5. `fsp_updater.py` — post-RUN FSP 計算・書き戻し (D4c/D4d/D5)
+
+### ファイル位置
+
+`src/alpha_factory/fsp_updater.py`
+
+### 設計概要
+
+```
+FSP updater ライフサイクル:
+  1. archive Parquet 読み込み
+  2. dispatch check: single instrument かつ enabled かつ factor data available かつ bars >= window
+  3. DXY daily series 読み込み (data/raw/fred/)
+  4. genome_hash キー結合 (missing/duplicate/unmatched → skipped_conditioning_mismatch)
+  5. daily PnL 集計 (全 bar grid)
+  6. rolling 60d Spearman + OLS R²
+  7. archive DataFrame に FSP 列を書き込み
+  8. atomic write: tmp -> fsync -> rename
+```
+
+### キー結合方式
+
+archive の `(run_id, lane_id, generation, individual_name)` を複合キーとして使用。
+- `genome_hash` は現在 GENOMES_SCHEMA に存在しないため、Run 内一意の複合キーを採用
+- `missing`: FSP 計算結果にキーがあるが archive にない → `skipped_conditioning_mismatch`
+- `duplicate`: archive に重複キーがある → `skipped_conditioning_mismatch`
+- `unmatched`: キー集合に差異あり → `skipped_conditioning_mismatch`
+
+### fsp_runtime_mode enum 値 (単一定義 — D6/D7 の参照先)
+
+```python
+FSP_RUNTIME_MODES = frozenset({
+    "active",
+    "skipped_no_factor_data",
+    "skipped_disabled",
+    "skipped_multi_pair_run",
+    "skipped_window_too_short",
+    "skipped_conditioning_mismatch",
+})
+```
+
+### dispatch logic
+
+```python
+def _decide_runtime_mode(
+    fsp_cfg: FspConfig,
+    is_multi_pair: bool,
+    factor_data_available: bool,
+    min_bars: int,
+) -> str:
+    """6 パスの dispatch matrix を実装。"""
+    if is_multi_pair:
+        return "skipped_multi_pair_run"
+    if not fsp_cfg.enabled:
+        return "skipped_disabled"
+    if not factor_data_available:
+        return "skipped_no_factor_data"
+    if min_bars < fsp_cfg.window_days:
+        return "skipped_window_too_short"
+    return "active"  # 件数整合チェックは呼び出し元で行う
+```
+
+### conditioning set キー結合チェック (2段構成 — Round 3 [Critical] 対応)
+
+重複キー検知は **全件 archive_df** に対して先行実施し、TARGET_ROWS のスコープとは分離する:
+
+1. **Step A (全件重複検知)**: `archive_df` 全行でキー重複チェック。重複があれば即 `skipped_conditioning_mismatch`
+2. **Step B (TARGET_ROWS 整合)**: `target_df` と `fsp_results` のキー集合一致チェック
+
+これにより「既処理行+未処理行にまたがる重複キー」を見落とさない。
+
+```python
+def _check_archive_duplicate_keys(archive_df: pd.DataFrame) -> str | None:
+    """Step A: archive 全件で重複キー検知。TARGET_ROWS を問わず常に実施。
+
+    Returns
+    -------
+    None if no duplicates, "skipped_conditioning_mismatch" if duplicates found.
+    """
+    all_keys = list(zip(
+        archive_df["run_id"],
+        archive_df["lane_id"],
+        archive_df["generation"],
+        archive_df["individual_name"],
+    ))
+    if len(all_keys) != len(set(all_keys)):
+        logger.warning(
+            "fsp_duplicate_keys_in_archive",
+            total=len(all_keys),
+            unique=len(set(all_keys)),
+        )
+        return "skipped_conditioning_mismatch"
+    return None
+
+
+def _check_key_integrity(
+    target_df: pd.DataFrame,
+    fsp_results: dict[tuple, dict],
+) -> str | None:
+    """Step B: TARGET_ROWS と fsp_results のキー集合一致チェック。
+
+    前提: Step A (全件重複チェック) が通過済みであること。
+
+    Returns
+    -------
+    None if OK, "skipped_conditioning_mismatch" if any mismatch detected.
+    """
+    target_keys = set(zip(
+        target_df["run_id"],
+        target_df["lane_id"],
+        target_df["generation"],
+        target_df["individual_name"],
+    ))
+    fsp_keys = set(fsp_results.keys())
+    if target_keys != fsp_keys:
+        logger.warning(
+            "fsp_key_mismatch",
+            missing=len(fsp_keys - target_keys),
+            extra=len(target_keys - fsp_keys),
+        )
+        return "skipped_conditioning_mismatch"
+    return None
+```
+
+### Parquet atomic write (D4d) — fsync による durability 確保 (Round 1 [Critical] 対応)
+
+```python
+import os
+
+def _atomic_write_parquet(df: pd.DataFrame, target_path: Path, schema: pa.Schema) -> None:
+    """tmp -> fsync(file) -> fsync(dir) -> atomic rename で Parquet を耐クラッシュ書き出し。
+
+    POSIX の atomic rename + fsync(dir) でシステムクラッシュ時も元 Parquet を汚染しない。
+    """
+    tmp_path = target_path.with_suffix(".fsp_tmp.parquet")
+    try:
+        table = pa.Table.from_pandas(df, schema=schema)
+        pq.write_table(table, tmp_path)
+        # ファイルの durability を保証 (fsync)
+        with open(tmp_path, "rb") as f:
+            os.fsync(f.fileno())
+        # atomic rename (POSIX 保証)
+        tmp_path.rename(target_path)
+        # 親ディレクトリのエントリを永続化 (rename の durability)
+        parent_fd = os.open(str(target_path.parent), os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+```
+
+### 冪等性と TARGET_ROWS の分離 (Round 1/2/3 [Critical] 対応)
+
+キー整合チェックは **2段構成** で実施する:
+
+```python
+# Step A: archive 全件で重複キーを先行チェック (TARGET_ROWS に依らず常時)
+dup_mismatch = _check_archive_duplicate_keys(archive_df)
+
+# 再計算対象を分離 (冪等性: fsp_runtime_mode が null の行のみ)
+if not force_recalculate:
+    target_df = archive_df[archive_df["fsp_runtime_mode"].isna()].copy()
+else:
+    target_df = archive_df.copy()
+
+# Step A mismatch または Step B mismatch の場合: target_df null 行へ書き戻してから return
+# (早期 return ではなく、書き戻してから return する単一フロー — Round 5 [Critical] 対応)
+if dup_mismatch:
+    # target_df の全 null 行に skipped_conditioning_mismatch を書き込んで保存
+    mode = "skipped_conditioning_mismatch"
+    archive_df.loc[target_df.index, "fsp_runtime_mode"] = mode
+    archive_df.loc[target_df.index, "fsp_sampling_mode"] = fsp_cfg.sampling_mode
+    _atomic_write_parquet(archive_df, archive_path, schema=GENOMES_SCHEMA)
+    return mode
+
+# TARGET_ROWS が空なら計算不要 (全個体が既に処理済み)
+if target_df.empty:
+    logger.info(
+        "fsp_updater.no_op",
+        reason="all_rows_already_processed",
+        rows_total=len(archive_df),
+        rows_processed=0,
+    )
+    return "active"  # no-op active: rows_processed=0 をログで区別
+
+# fsp_results は target_df のキーのみを対象に生成すること (スコープ規約)
+# → _compute_fsp_for_targets(target_df, ...) が返す dict のキー集合 == target_df のキー集合
+fsp_results = _compute_fsp_for_targets(target_df, dxy_series)
+
+# Step B: TARGET_ROWS と fsp_results のキー集合一致チェック
+key_mismatch = _check_key_integrity(target_df, fsp_results)
+if key_mismatch:
+    # Step B mismatch も書き戻してから return (冪等性を保証)
+    mode = "skipped_conditioning_mismatch"
+    archive_df.loc[target_df.index, "fsp_runtime_mode"] = mode
+    archive_df.loc[target_df.index, "fsp_sampling_mode"] = fsp_cfg.sampling_mode
+    _atomic_write_parquet(archive_df, archive_path, schema=GENOMES_SCHEMA)
+    return mode
+```
+
+冪等性仕様の明文化:
+1. Step A の全件重複チェックは常時実施 (既処理行を含む重複を検知)
+2. mismatch (Step A / Step B いずれも) は **書き戻しして return** の単一フロー (`return mode` 前に必ず atomic write)
+3. `target_df.empty` → `"active"` を即返却、`rows_processed=0` をログで「no-op」として識別可能
+4. `fsp_results` のキー集合 = `target_df` の複合キー集合 (超過・不足ともに `skipped_conditioning_mismatch`)
+5. 既に `active` / `skipped_*` が書き込まれた行は `target_df` から除外され再計算されない
+6. `--force-recalculate` 時は全行が `target_df` に入り、全件 fsp_results を生成してフルキー照合
+
+書き戻しにより:
+- mismatch 発生後に再実行しても `fsp_runtime_mode` が null でなくなり「再計算対象」から外れる (冪等)
+- H1 分母に mismatch 行が含まれ、`evaluate_key_integrity_failure_rate()` で可観測になる
+
+### 主要関数シグネチャ
+
+```python
+def run_fsp_updater(
+    archive_path: Path,
+    fred_data_dir: Path,
+    fsp_cfg: FspConfig,
+    run_id: str,
+    is_multi_pair: bool = False,
+    force_recalculate: bool = False,
+) -> str:
+    """FSP を計算して archive Parquet を in-place 更新する。
+
+    Returns
+    -------
+    fsp_runtime_mode: str — "active" or "skipped_*"
+    """
+```
+
+## 6. 計算アルゴリズム詳細
+
+### 6-1. DXY daily series 読み込み
+
+```python
+def _load_dxy_series(fred_data_dir: Path, factor_asof_lag: int) -> pd.Series:
+    """data/raw/fred/DXY.csv から日次系列を読み込み、lag を適用して返す。
+
+    factor_asof_lag=1 の場合:
+      factor_return_t = (DXY_{t-1_close} - DXY_{t-2_close}) / DXY_{t-2_close}
+    → strategy_return_t (UTC day t) と突合 → look-ahead bias なし
+    """
+    dxy = pd.read_csv(fred_data_dir / "DXY.csv", index_col=0, parse_dates=True)["close"]
+    dxy_return = dxy.pct_change().shift(factor_asof_lag)  # lag で look-ahead 回避
+    return dxy_return.dropna()
+```
+
+### 6-2. daily PnL 集計 (conditioning set: all_bars_all_individuals)
+
+```python
+def _aggregate_daily_pnl(
+    trades_df: pd.DataFrame,
+    date_range: pd.DatetimeIndex,  # UTC daily grid (全 bar)
+) -> pd.Series:
+    """UTC 日次境界で trades の pnl を集計。ゼロポジション日は 0.0 で補完。
+
+    conditioning_set = "all_bars_all_individuals" 遵守:
+    - 全 bar grid 上で評価 (ポジション無し日も含む)
+    """
+    trades_df["date_utc"] = pd.to_datetime(trades_df["close_time"]).dt.normalize()
+    daily = trades_df.groupby("date_utc")["pnl"].sum()
+    return daily.reindex(date_range, fill_value=0.0)
+```
+
+### 6-3. rolling Spearman + OLS R²
+
+注: `pandas.Rolling.corr(method="spearman")` は存在しない。正確な窓内 Spearman は窓ごとに `scipy.stats.spearmanr` を呼ぶ必要があるが、Phase 1 diagnostic では近似として「窓内 rank-Pearson」を採用する (Round 2 [Critical] 対応)。
+
+**rolling Spearman 実装方針 (Phase 1 近似):**
+- 全期間でなく、各窓内で rank を計算してから Pearson を取る（窓内 rank-Pearson）
+- pandas の `apply` + `scipy.stats.spearmanr` による正確実装と比べ計算効率が高い
+- Phase 1 diagnostic 目的では近似精度で十分
+- 列名 `fsp_rolling_corr_60d` のコメントに「窓内 rank-Pearson 近似」と明記
+
+```python
+def _compute_fsp_stats(
+    daily_pnl: pd.Series,
+    dxy_return: pd.Series,
+    window_days: int = 60,
+) -> dict:
+    """rolling 60d Spearman (窓内 rank-Pearson 近似) + 全期間 OLS R²。
+
+    rolling Spearman 実装 (Phase 1 近似):
+    - 窓ごとに `pnl.rank()` / `factor.rank()` を取り、Pearson rolling を計算
+    - pandas の Rolling API は `method="spearman"` を持たないため window 内 rank 変換で近似
+    - 正確な Spearman が必要な場合は `scipy.stats.spearmanr` を窓ごとに呼ぶが、
+      Phase 1 diagnostic では近似精度で十分（コメントで明示）
+    - 全期間 rank ではなく `rolling(window).apply(lambda x: x.argsort().argsort())` 相当
+
+    因子欠損日の処理: `aligned.dropna()` で除外。除外された日は OLS/rolling 計算から消えるが、
+    FRED 日足は欠損が少なく影響軽微。詳細設計レベルでの明文化方針:
+    「因子が欠損した日は OLS/rolling から除外し、fsp_idio_ratio の母集団から外れる」
+    (この除外は conditioning set 違反ではなく factor unavailable に相当)
+
+    idio_ratio レンジ: 1 - R² は R² < 0 の場合 1 を超える可能性あり。
+    Phase 1 はそのまま unclipped で記録し、R² < 0 をアーカイブに残す (Round 1 [Warning] 対応: 未拘束と明記)。
+
+    Returns dict with:
+      fsp_rolling_corr_60d: list[float]  # 窓内 rank-Pearson 近似 Spearman
+      fsp_explained_variance: float (unclipped R², R² < 0 は可)
+      fsp_idio_ratio: float (= 1 - R², unclipped)
+    """
+    aligned = pd.concat([daily_pnl, dxy_return], axis=1).dropna()
+    aligned.columns = ["pnl", "factor"]
+
+    if len(aligned) < 2:
+        return {"fsp_rolling_corr_60d": [], "fsp_explained_variance": None, "fsp_idio_ratio": None}
+
+    # rolling Spearman — 窓内 rank-Pearson 近似
+    # 各窓内で rank を取る実装: rolling apply で rank 変換後に Pearson を計算
+    def rolling_spearman(series_a: pd.Series, series_b: pd.Series, window: int) -> pd.Series:
+        """窓ごとに rank して Pearson 相関を取る (Spearman 近似)。"""
+        result = pd.Series(index=series_a.index, dtype=float)
+        for end in range(window - 1, len(series_a)):
+            start = end - window + 1
+            a_win = series_a.iloc[start:end + 1]
+            b_win = series_b.iloc[start:end + 1]
+            result.iloc[end] = a_win.rank().corr(b_win.rank())
+        return result
+
+    rolling_corr = rolling_spearman(aligned["pnl"], aligned["factor"], window_days)
+
+    # OLS R² (全期間、unclipped)
+    from sklearn.linear_model import LinearRegression
+    X = aligned[["factor"]].values
+    y = aligned["pnl"].values
+    lr = LinearRegression().fit(X, y)
+    r2 = lr.score(X, y)
+
+    return {
+        "fsp_rolling_corr_60d": rolling_corr.dropna().tolist(),
+        "fsp_explained_variance": float(r2),
+        "fsp_idio_ratio": float(1.0 - r2),
+    }
+```
+
+## 7. H1 評価クエリ (Round 1/3 [Critical/Warning] 対応)
+
+eligible の定義: `single_instrument=True AND enabled=True AND bars >= window_days AND factor_data_available`
+
+これを runtime_mode で表現すると「`skipped_multi_pair_run` / `skipped_disabled` / `skipped_no_factor_data` / `skipped_window_too_short` をすべて除外した行」となる。
+
+```python
+# H1 における non-eligible runtime_mode (除外対象)
+H1_NON_ELIGIBLE_MODES = frozenset({
+    "skipped_multi_pair_run",     # multi-pair RUN
+    "skipped_disabled",           # enabled=False
+    "skipped_no_factor_data",     # factor data 不在 → factor_data_available=False
+    "skipped_window_too_short",   # bars < window_days
+})
+
+def evaluate_h1(archive_df: pd.DataFrame) -> float:
+    """H1 基盤検証: eligible rows のうち active 比率を返す。
+
+    eligible = fsp_runtime_mode が null でなく、かつ non-eligible modes に含まれない行
+    (= single instrument + enabled + data OK + bars OK のうち active/mismatch のもの)
+
+    注: `skipped_conditioning_mismatch` は H1 分母に含まれる。
+    これは「計測しようとして整合性エラーが発生した」ケースであり、
+    active にならなかった原因を H1 で捕捉するため除外しない。
+    キー整合性失敗率は `evaluate_key_integrity_failure_rate()` で別出しする。
+    """
+    eligible = archive_df[
+        archive_df["fsp_runtime_mode"].notna()
+        & (~archive_df["fsp_runtime_mode"].isin(H1_NON_ELIGIBLE_MODES))
+    ]
+    if len(eligible) == 0:
+        return 0.0
+    return (eligible["fsp_runtime_mode"] == "active").mean()
+
+
+def evaluate_key_integrity_failure_rate(archive_df: pd.DataFrame) -> float:
+    """H1 補助指標: conditioning_mismatch 行の比率 (全有効行に対する)。
+
+    H1 の dispatch健全性 vs 整合性障害を因果解釈で混線させないための補助指標。
+    (Round 3 [Warning] 対応: C3 collider bias 注意への対処)
+    """
+    eligible = archive_df[
+        archive_df["fsp_runtime_mode"].notna()
+        & (~archive_df["fsp_runtime_mode"].isin(H1_NON_ELIGIBLE_MODES))
+    ]
+    if len(eligible) == 0:
+        return 0.0
+    return (eligible["fsp_runtime_mode"] == "skipped_conditioning_mismatch").mean()
+```
+
+## 8. schema 互換テスト設計 (D3 / old+new+mixed)
+
+### 旧 Parquet 読み込み時の FSP 列補完責務 (Round 2 [Warning] 対応)
+
+旧 archive（FSP 列なし）を読み込む際の補完責務は **reader 側 (fsp_updater.py の archive 読込処理)** が担う。
+具体的には `pq.read_table()` 後に FSP 6 列が存在しない場合、`None` で補完してから DataFrame に変換する:
+
+```python
+def _read_archive_with_fsp_compat(archive_path: Path) -> pd.DataFrame:
+    """旧/新 両方の archive Parquet を読み込み、FSP 列を None 補完する。
+
+    旧 archive (FSP 列なし) の場合は 6 列を None で補完。
+    新 archive (FSP 列あり) はそのまま読む。
+    補完責務は本関数にのみ集約し、呼び出し元は FSP 列の存在を前提にできる。
+    """
+    FSP_NULLABLE_COLS = [
+        "fsp_runtime_mode", "fsp_sampling_mode", "fsp_factor_set",
+        "fsp_rolling_corr_60d", "fsp_explained_variance", "fsp_idio_ratio",
+    ]
+    table = pq.read_table(archive_path)
+    df = table.to_pandas()
+    for col in FSP_NULLABLE_COLS:
+        if col not in df.columns:
+            df[col] = None
+    return df
+```
+
+```python
+# tests/alpha_factory/test_archive_schema.py
+
+def test_old_archive_only():
+    """旧 archive (FSP 列なし) を読んでも KeyError を起こさない。
+    _read_archive_with_fsp_compat() が FSP 6 列を None で補完することを確認。
+    """
+    # old_schema = GENOMES_SCHEMA minus FSP 6 columns でテスト Parquet を生成
+    # _read_archive_with_fsp_compat() を呼び、FSP 列が None であることをアサート
+
+def test_new_archive_only():
+    """新 archive (FSP 列あり) が正常に読み書きできる。"""
+
+def test_mixed_old_new_archive():
+    """old + new archive を concat したとき、old 行の FSP 列が null のままである。
+    _read_archive_with_fsp_compat() で両方を読んで pd.concat する。
+    """
+```
+
+## 9. unit test 設計 (DoD D7: dispatch matrix 6 パス)
+
+### D7 テスト境界の明確化 (Round 2 [Warning] 対応)
+
+dispatch matrix 6 パスは **2つの関数** にまたがって実装される:
+
+| runtime_mode | 判定関数 | 備考 |
+|---|---|---|
+| `skipped_multi_pair_run` | `_decide_runtime_mode()` | 最初に判定 |
+| `skipped_disabled` | `_decide_runtime_mode()` | enabled=False |
+| `skipped_no_factor_data` | `_decide_runtime_mode()` | factor data 不在 |
+| `skipped_window_too_short` | `_decide_runtime_mode()` | bars < window |
+| `skipped_conditioning_mismatch` | `_check_key_integrity()` | キー整合チェックで発生 |
+| `active` | `_decide_runtime_mode()` → `_check_key_integrity()` がNone | 両方通過 |
+
+テストはこの境界で分割する:
+
+```python
+# tests/alpha_factory/test_fsp_updater.py
+
+# --- _decide_runtime_mode() の 5 パス ---
+@pytest.mark.parametrize("case,expected_mode", [
+    ("multi_pair",       "skipped_multi_pair_run"),
+    ("disabled",         "skipped_disabled"),
+    ("no_factor_data",   "skipped_no_factor_data"),
+    ("window_too_short", "skipped_window_too_short"),
+    ("active_path",      "active"),  # _decide_runtime_mode 返値 = "active" (キー整合チェック前)
+])
+def test_decide_runtime_mode(case, expected_mode, ...):
+    """_decide_runtime_mode() の 5 パス。"""
+
+# --- _check_key_integrity() による conditioning_mismatch ---
+def test_key_integrity_check_mismatch():
+    """件数一致でもキー不一致なら skipped_conditioning_mismatch を返す。"""
+
+def test_check_archive_duplicate_keys_detects_cross_boundary():
+    """既処理行+未処理行にまたがる重複キーを _check_archive_duplicate_keys() が検知する。
+    (Round 3 [Critical]: TARGET_ROWS 分離後も全件重複チェックが機能することを確認)
+    """
+
+def test_key_integrity_check_duplicate():
+    """archive に重複キーがあれば _check_archive_duplicate_keys() が先に検知する。"""
+
+# --- 統合テスト (run_fsp_updater 全6パス) ---
+@pytest.mark.parametrize("case,expected_mode", [
+    ("multi_pair",                 "skipped_multi_pair_run"),
+    ("disabled",                   "skipped_disabled"),
+    ("no_factor_data",             "skipped_no_factor_data"),
+    ("window_too_short",           "skipped_window_too_short"),
+    ("conditioning_mismatch",      "skipped_conditioning_mismatch"),
+    ("active_normal",              "active"),
+])
+def test_dispatch_matrix_integration(case, expected_mode, ...):
+    """run_fsp_updater() で 6 パスすべてを端から端まで確認。"""
+
+def test_target_rows_empty_returns_active():
+    """全行が既処理の場合 target_df.empty → active を返し rows_processed=0 をログ出力。"""
+
+def test_atomic_write_failure_does_not_corrupt():
+    """部分書き込み failure 時に元 Parquet が汚染されない。"""
+
+def test_idempotent_rerun():
+    """既に active な行を再実行しても値が変わらない (冪等性)。"""
+
+def test_h2_factor_heavy_baseline():
+    """DXY と完全相関する人工 PnL 系列は fsp_idio_ratio < 0.2 と判定される。"""
+```
+
+## 10. ログ出力設計 (D6)
+
+`fsp_runtime_mode` の全 6 値それぞれで structlog 出力:
+
+```python
+logger.info("fsp_updater.completed", mode="active", rows_processed=N, ...)
+logger.info("fsp_updater.skipped", mode="skipped_no_factor_data", reason="DXY file not found")
+logger.info("fsp_updater.skipped", mode="skipped_disabled", ...)
+logger.info("fsp_updater.skipped", mode="skipped_multi_pair_run", ...)
+logger.info("fsp_updater.skipped", mode="skipped_window_too_short", bars=N, window=60)
+logger.warning("fsp_updater.skipped", mode="skipped_conditioning_mismatch", missing=N, extra=M)
+```
+
+## 11. post-RUN integration point
+
+GA RUN を実行するスクリプト (`scripts/run_alpha_factory.py` 等) の末尾に以下を追加:
+
+```python
+# 4段接続: load_config() → AlphaFactoryConfig.fsp → run_fsp_updater(fsp_cfg=cfg.fsp)
+# (Round 4 [Warning] 対応: 設定伝搬漏れを防ぐため cfg.fsp を明示渡し)
+cfg = load_config(config_path)  # AlphaFactoryConfig を返す
+# FSP updater は常時呼び出す (enabled=False でも skipped_disabled を記録)
+# enabled 判定は updater 内 _decide_runtime_mode() に一本化
+from src.alpha_factory.fsp_updater import run_fsp_updater
+mode = run_fsp_updater(
+    archive_path=archive_path,
+    fred_data_dir=Path("data/raw/fred"),
+    fsp_cfg=cfg.fsp,           # AlphaFactoryConfig.fsp から FspConfig を取得
+    run_id=run_id,
+    is_multi_pair=(len(instruments) > 1),
+)
+logger.info("fsp_post_run", mode=mode)
+```
+
+注: `if fsp_cfg.enabled:` ガードは **設けない**。`enabled=False` の場合は updater が `skipped_disabled` を archive に記録し、H1 集計母集団で正しく扱われる。`enabled` 判定は `_decide_runtime_mode()` のみが行う。
+
+4段接続の完全性確認:
+- D1: `config/alpha_factory/default.yaml` → `factor_shadow.*` 定義
+- D2: `load_config()` → `config.get("factor_shadow", {})` → `FspConfig(**kw)` 変換
+- D3: `AlphaFactoryConfig.fsp: FspConfig` フィールドに格納
+- (統合点): `run_fsp_updater(..., fsp_cfg=cfg.fsp, ...)` で明示渡し
+
+GA worker 内 (`collect_stage_*`) は FSP 列を変更しない。
+
+## 12. 前提 / スコープ外
+
+### 前提 (実装時に確認必須)
+- `data/raw/fred/DXY.csv` が `data/raw/fred/` に存在し、`close` 列を持つ
+- archive Parquet は 1 RUN 1 ファイル (`run_{run_id}.parquet`)
+- `(run_id, lane_id, generation, individual_name)` が archive 内で一意
+
+### スコープ外 (Phase 1)
+- `fsp_partial_corr` 列 (Phase 1 不要)
+- 多因子 (VIX, 金利差)
+- 選抜介入 (fitness への FSP 寄与)
+- run_report への FSP サマリー出力 (別 TODO)
+
+## 13. DoD チェックリスト (実装時に確認)
+
+| # | チェック項目 | 確認方法 |
+|---|------------|---------|
+| D1 | `config/alpha_factory/default.yaml` に `factor_shadow.*` 定義 | grep |
+| D2 | `src/alpha_factory/config.py` の `FspConfig` クラスに全パラメータ読み込み | grep |
+| D3 | `AlphaFactoryConfig.fsp` に `FspConfig` が接続されている | grep / unit test |
+| D4a | `GENOMES_SCHEMA` に FSP 新規列 (6 列) が定義されている | grep |
+| D4b | `_create_row_template` で FSP 新規列の初期値が `None` で設定されている | grep |
+| D4c | `fsp_updater.py` が archive Parquet を読み込み FSP 計算値で書き戻ししている | unit test |
+| D4d | 書き戻し後の Parquet に FSP 列が含まれる | unit test |
+| D5 | FSP updater 起動前に複合キー結合チェック (assert 不使用、graceful degradation) | unit test |
+| D5b | `factor_shadow.conditioning_set` config キーが `FspConfig` に読み込まれている | grep |
+| D6 | `fsp_runtime_mode` の全 6 値にログ出力がある | grep |
+| D7 | dispatch matrix 6 パス全てが unit test で網羅されている | pytest coverage |
+| D8 | schema 互換テスト 3 ケース (old/new/mixed) が pass する | pytest |
