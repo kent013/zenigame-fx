@@ -17,6 +17,9 @@ def _count_primary_and_any(
         "insufficient_folds",
         "all_folds_unavailable",
         "stage_b_window_underfilled",
+        # cycle 5 fix
+        "median_oos_sharpe<min",
+        "positive_fold_ratio<min",
     ),
 ) -> tuple[dict[str, int], dict[str, int], int, int]:
     """generate_run_report.py の Stage B reason 集計ロジックを再現したテスト helper.
@@ -87,16 +90,44 @@ def test_stage_b_reason_any_can_exceed_failures() -> None:
 
 
 def test_stage_b_reason_other_excludes_known_codes() -> None:
+    """known_codes に含まれない reason のみ other に集計."""
     rows = [
-        {"stage_a_pass": True, "stage_b_pass": False, "stage_b_reason_codes": "median_oos_sharpe<min"},
-        {"stage_a_pass": True, "stage_b_pass": False, "stage_b_reason_codes": "no_folds"},
+        {
+            "stage_a_pass": True,
+            "stage_b_pass": False,
+            "stage_b_reason_codes": "completely_unknown_reason",
+        },
+        {
+            "stage_a_pass": True,
+            "stage_b_pass": False,
+            "stage_b_reason_codes": "no_folds",
+        },
     ]
     primary, any_, _, _ = _count_primary_and_any(rows)
-    # "median_oos_sharpe<min" は known_codes に含まれない → other
     assert primary["other"] == 1
     assert primary["no_folds"] == 1
     assert any_["other"] == 1
     assert any_["no_folds"] == 1
+
+
+def test_stage_b_reason_known_codes_includes_median_and_positive_fold() -> None:
+    """cycle 5 fix: stage_gate.py の reason をすべて known_codes でカバー."""
+    rows = [
+        {
+            "stage_a_pass": True,
+            "stage_b_pass": False,
+            "stage_b_reason_codes": "median_oos_sharpe<min",
+        },
+        {
+            "stage_a_pass": True,
+            "stage_b_pass": False,
+            "stage_b_reason_codes": "positive_fold_ratio<min",
+        },
+    ]
+    primary, any_, _, _ = _count_primary_and_any(rows)
+    assert primary["median_oos_sharpe<min"] == 1
+    assert primary["positive_fold_ratio<min"] == 1
+    assert primary["other"] == 0
 
 
 def test_stage_b_reason_unknown_for_legacy_archive_rows() -> None:
