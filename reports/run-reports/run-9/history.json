@@ -1,0 +1,50 @@
+[
+  {
+    "generation": 0,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 1,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 2,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 3,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 4,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 5,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  }
+]

@@ -1,0 +1,57 @@
+{
+  "name": "g0_i1",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "P7",
+          "weight": 0.8969387446799001,
+          "params": {
+            "spx_n": 13,
+            "vix_threshold": 17.132112410564332,
+            "vix_scale": 14.430004555350902,
+            "vix_staleness_days": 6.531890516028003,
+            "spx_staleness_bars": 190
+          }
+        },
+        {
+          "name": "P9",
+          "weight": 1.1428802914976917,
+          "params": {
+            "mom_n": 32,
+            "scale": 0.06816251382429792,
+            "staleness_bars": 378
+          }
+        },
+        {
+          "name": "F11",
+          "weight": 1.3420133259483835,
+          "params": {
+            "n": 29
+          }
+        },
+        {
+          "name": "P5",
+          "weight": 0.642300945265836,
+          "params": {
+            "z_n": 168,
+            "scale": 3.363340079160155
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.361950496735661
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.3241668476881804,
+    "exit_threshold": 0.2826631128932459,
+    "max_pos": 2,
+    "time_stop_min": 131
+  },
+  "risk": {
+    "stop_atr": 2.071194505184061,
+    "take_atr": 3.9041085810859713
+  }
+}
