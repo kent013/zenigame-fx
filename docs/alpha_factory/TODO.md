@@ -12,6 +12,8 @@ zenigame-fx Alpha Factory の改善タスク一覧。
 | T035 | stats-completeness-gate-stage-b: Stage B 統計可観測性ハード契約と reason_codes 集計 | statistics | [r:ro] stats completeness gate | Critical | incremental | [設計](devnotes/20260425-0937-stats-completeness-gate-stage-b/) | 2026-04-25 16:17 |
 | T036 | factor-shadow-plane (FSP) Phase 1: single-instrument 用 daily diagnostic shadow layer | cross-pair | [r:ra] FSP single-instr daily | Critical | incremental | [設計](devnotes/20260425-0956-factor-shadow-plane-single-instr/) | 2026-04-25 16:17 |
 | T037 | signal-active-clause-metric: clause 発火カウンタの runtime 計測と archive 反映 | primitives | [r:sq] active-clause metric | Critical | incremental | [設計](devnotes/20260425-0958-signal-active-clause-metric/) | 2026-04-25 16:17 |
+| T039 | economic-event-as-of-strict: M4/P10 未来 schedule 漏洩防止 | primitives | [r:sq] as_of strict 厳密化 | Medium | incremental | [設計](devnotes/20260426-0023-economic-event-as-of-strict/) | 2026-04-26 00:27 |
+| T040 | calibrate-gate-drift-monitor: 直近 N Run の threshold/decision 横断観察 | stage-gate | [r:ro] threshold drift monitor | Low | incremental | [設計](devnotes/20260426-0024-calibrate-gate-drift-monitor/) | 2026-04-26 00:33 |
 
 ## Conditional
 
