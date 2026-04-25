@@ -34,6 +34,7 @@
 | T028 | broker snapshot caching | infrastructure | High | 2026-04-25 02:50 | - |
 | T029 | strategy signal cache flatten | ga-architecture | High | 2026-04-25 03:47 | - |
 | T030 | bars mid ohlc cache | primitives | High | 2026-04-25 04:41 | - |
+| T038 | Sharpe 計算根本修正 Phase 1A: bar-level annualized → trade_sharpe_raw + sample-size guard | stage-gate | Critical | 2026-04-25 18:56 | todo/T038 |
 
 ## Obsoleted
 
