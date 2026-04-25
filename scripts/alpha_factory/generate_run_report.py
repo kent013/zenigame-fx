@@ -427,6 +427,83 @@ def main(argv: list[str] | None = None) -> int:
         ds_st = _basic_stats([r.get("dsr") for r in archive_rows])
         lines.append(f"- fold_sign_ratio: {_fmt_stats(fs)}")
         lines.append(f"- dsr: {_fmt_stats(ds_st)}")
+        # T035: n_fold_effective / positive_fold_ratio_effective 分布
+        sa_rows = [r for r in archive_rows if r.get("stage_a_pass")]
+        fe = _basic_stats([r.get("n_fold_effective") for r in sa_rows])
+        prfe = _basic_stats(
+            [r.get("positive_fold_ratio_effective") for r in sa_rows]
+        )
+        lines.append(f"- n_fold_effective (Stage A pass): {_fmt_stats(fe)}")
+        lines.append(
+            f"- positive_fold_ratio_effective (Stage A pass): {_fmt_stats(prfe)}"
+        )
+    lines.append("")
+
+    # T035: Stage B failure reason 集計 (primary_reason + any_reason incidence)
+    lines.append("## Stage B failure reason 集計")
+    lines.append("")
+    if archive_rows is None:
+        lines.append("- archive Parquet なし、計算スキップ")
+    else:
+        sa_rows = [r for r in archive_rows if r.get("stage_a_pass")]
+        n_evaluated = len(sa_rows)
+        n_pass = sum(1 for r in sa_rows if r.get("stage_b_pass"))
+        known_codes = (
+            "no_folds",
+            "insufficient_folds",
+            "all_folds_unavailable",
+            "stage_b_window_underfilled",
+        )
+        # Primary reason: ;-split の先頭のみで集計、合計 = failures
+        primary_counts: dict[str, int] = {c: 0 for c in known_codes}
+        primary_counts["other"] = 0
+        primary_counts["unknown_reason"] = 0
+        # Any reason incidence: 全 reason をカウント (合計 >= failures)
+        any_counts: dict[str, int] = {c: 0 for c in known_codes}
+        any_counts["other"] = 0
+        for r in sa_rows:
+            if r.get("stage_b_pass"):
+                continue
+            rc_raw = r.get("stage_b_reason_codes")
+            if rc_raw is None or rc_raw == "":
+                primary_counts["unknown_reason"] += 1
+                continue
+            rc_list = [c.strip() for c in str(rc_raw).split(";") if c.strip()]
+            if not rc_list:
+                primary_counts["unknown_reason"] += 1
+                continue
+            primary = rc_list[0]
+            if primary in primary_counts:
+                primary_counts[primary] += 1
+            else:
+                primary_counts["other"] += 1
+            for c in rc_list:
+                if c in any_counts:
+                    any_counts[c] += 1
+                else:
+                    any_counts["other"] += 1
+        total_failures = n_evaluated - n_pass
+        primary_sum = sum(primary_counts.values())
+        lines.append(
+            f"- Stage A pass = {n_evaluated}, Stage B pass = {n_pass}, "
+            f"failures = {total_failures} (primary_sum = {primary_sum})"
+        )
+        lines.append("")
+        lines.append("### Primary reason (先頭 reason、合計 = failures)")
+        lines.append("")
+        lines.append(
+            "| reason | count |"
+        )
+        lines.append("|--------|------:|")
+        for c in (*known_codes, "unknown_reason", "other"):
+            lines.append(f"| `{c}` | {primary_counts[c]} |")
+        lines.append("")
+        lines.append("### Any reason incidence (全 reason、合計 >= failures)")
+        lines.append("")
+        lines.append("| reason | count |")
+        lines.append("|--------|------:|")
+        for c in (*known_codes, "other"):
+            lines.append(f"| `{c}` | {any_counts[c]} |")
     lines.append("")
 
     # cross-pair shadow 集計

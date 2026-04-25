@@ -9,7 +9,9 @@
 ゲノム archive を Parquet 形式で `.cache/alpha_factory/runs/genomes_{run_id}.parquet`
 に出力。横断分析（複数 Run 比較）・系譜追跡（parent_a / parent_b）を可能にする。
 
-## スキーマ (28 カラム、`GENOMES_SCHEMA`)
+## スキーマ (33 カラム、`GENOMES_SCHEMA`)
+
+> 履歴: 28 カラム (T015 当初) → 30 カラム (T-sharpe Phase 1A: `trade_sharpe_raw`, `sharpe_calc_version`) → 33 カラム (T035: `n_fold_effective`, `positive_fold_ratio_effective`, `stage_b_reason_codes`)。
 
 主キー: **複合キー (lane_id, generation, individual_name)**
 （multi-lane で同名個体が衝突しないため lane_id を必須に含める）

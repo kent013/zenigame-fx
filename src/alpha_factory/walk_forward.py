@@ -16,7 +16,28 @@ from datetime import date
 
 from src.domain.price import PriceBar
 
-__all__ = ["make_wf_folds"]
+__all__ = ["make_wf_folds", "n_unique_dates", "wf_min_unique_dates"]
+
+
+def wf_min_unique_dates(
+    train_days: int, embargo_days: int, test_days: int
+) -> int:
+    """``make_wf_folds`` の sufficiency 最小観測日数 (1 fold ぶん).
+
+    ``make_wf_folds`` は ``train_days + embargo_days + test_days > n_unique_dates``
+    のとき空 list を返す。本関数はその閾値を上位レイヤから参照するための
+    SSOT 共有 helper (T035)。``make_wf_folds`` 内部の ``fold_len`` 計算も
+    本関数を使うため二重化を避ける。
+    """
+    return int(train_days) + int(embargo_days) + int(test_days)
+
+
+def n_unique_dates(bars: list[PriceBar]) -> int:
+    """``bars`` の bar_time から UTC date を抽出した unique 日数を返す (T035)."""
+    seen: set[date] = set()
+    for b in bars:
+        seen.add(b.bar_time.date())
+    return len(seen)
 
 
 def make_wf_folds(
@@ -83,7 +104,7 @@ def make_wf_folds(
             sorted_dates.append(d)
 
     n_days = len(sorted_dates)
-    fold_len = train_days + embargo_days + test_days
+    fold_len = wf_min_unique_dates(train_days, embargo_days, test_days)
     if fold_len > n_days:
         return []
 

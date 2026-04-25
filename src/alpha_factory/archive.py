@@ -5,7 +5,7 @@ GA Run の個体評価結果を 1 行 = 1 個体 (lane × generation × individu
 （parent_a / parent_b）に使う。
 
 主な公開 API:
-    - :data:`GENOMES_SCHEMA` — Parquet schema (28 カラム)
+    - :data:`GENOMES_SCHEMA` — Parquet schema (33 カラム; T-sharpe Phase 1A で +2、T035 で +3)
     - :class:`GenomeArchive` — 1 Run 分の buffering + flush
 
 仕様:
@@ -84,6 +84,10 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
         # T-sharpe Phase 1A: trade-level Sharpe (v2) と calc version
         pa.field("trade_sharpe_raw", pa.float64(), nullable=True),
         pa.field("sharpe_calc_version", pa.string(), nullable=True),
+        # T035: Stage B 観察可能性 (n_fold_effective / positive_fold_ratio_effective / reason_codes)
+        pa.field("n_fold_effective", pa.int64(), nullable=True),
+        pa.field("positive_fold_ratio_effective", pa.float64(), nullable=True),
+        pa.field("stage_b_reason_codes", pa.string(), nullable=True),
     ]
 )
 
@@ -142,6 +146,10 @@ def _create_row_template() -> dict[str, Any]:
         # T-sharpe Phase 1A
         "trade_sharpe_raw": None,
         "sharpe_calc_version": "v2_trade_level",
+        # T035: Stage B 観察可能性
+        "n_fold_effective": None,
+        "positive_fold_ratio_effective": None,
+        "stage_b_reason_codes": None,
     }
 
 
@@ -401,6 +409,14 @@ class GenomeArchive:
             row["fold_sign_ratio"] = float(fold_sign_ratio(oos))
 
         row["dsr"] = _opt_float(payload, "dsr")
+        # T035: Stage B 観察可能性メトリクス
+        row["n_fold_effective"] = _opt_int(payload, "n_fold_effective")
+        row["positive_fold_ratio_effective"] = _opt_float(
+            payload, "positive_fold_ratio_effective"
+        )
+        # T035: reason_codes 永続化 (空タプルなら None、複数は ";" 区切り)
+        rc = stage_result.reason_codes
+        row["stage_b_reason_codes"] = ";".join(rc) if rc else None
         # T-sharpe Phase 1A: stage_b は is_full_sharpe を trade_sharpe_raw に書く。
         # is_full_sharpe は stage_gate.py で trade_sharpe_raw (v2) を入れる
         is_sharpe = _opt_float(payload, "is_full_sharpe")

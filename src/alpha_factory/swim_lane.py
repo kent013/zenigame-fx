@@ -54,6 +54,10 @@ from src.alpha_factory.stage_gate import (
     evaluate_stage_b,
     evaluate_stage_c,
 )
+from src.alpha_factory.walk_forward import (
+    n_unique_dates,
+    wf_min_unique_dates,
+)
 from src.backtest.engine import BacktestConfig
 from src.broker.mock import InstrumentMeta
 from src.domain.price import PriceBar
@@ -458,6 +462,13 @@ class LaneManager:
         stage_b_pass = 0
         stage_c_pass = 0
         graduation_count = 0
+        # T035: Stage B 入力窓充足契約 (lane 単位で 1 回のみ計算)
+        lane_n_unique_dates = n_unique_dates(lane.bars_18m)
+        wf_min_dates = wf_min_unique_dates(
+            self._stage_gate_config.wf_train_days,
+            self._stage_gate_config.wf_embargo_days,
+            self._stage_gate_config.wf_test_days,
+        )
         for genome in lane.population:
             # Stage A
             a_result = evaluate_stage_a(
@@ -483,15 +494,44 @@ class LaneManager:
             if not a_result.passed:
                 continue
             stage_a_pass += 1
-            # Stage B
-            b_result = evaluate_stage_b(
-                genome,
-                lane.bars_18m,
-                lane.meta,
-                bt_cfg,
-                self._primitive_evaluator,
-                self._stage_gate_config,
-            )
+            # Stage B (T035: 観測日数充足検査 → underfilled なら skip-path)
+            if lane_n_unique_dates < wf_min_dates:
+                b_result = StageResult(
+                    stage="B",
+                    passed=False,
+                    metrics={
+                        "stage": "B",
+                        "genome_name": genome.name,
+                        "n_bars": len(lane.bars_18m),
+                        "wall_time_seconds": 0.0,
+                        "payload": {
+                            "n_unique_dates": lane_n_unique_dates,
+                            "wf_min_unique_dates": wf_min_dates,
+                            "n_fold": 0,
+                            "n_fold_unavailable": 0,
+                            "n_fold_effective": 0,
+                            "oos_sharpes": (),
+                            "median_oos_sharpe": None,
+                            "positive_fold_ratio": None,
+                            "positive_fold_ratio_effective": None,
+                            "dsr": None,
+                            # 未評価を明示するため None
+                            "is_full_sharpe": None,
+                            "is_full_total_pnl": None,
+                            "is_full_trade_count": None,
+                        },
+                    },
+                    reason_codes=("stage_b_window_underfilled",),
+                )
+            else:
+                b_result = evaluate_stage_b(
+                    genome,
+                    lane.bars_18m,
+                    lane.meta,
+                    bt_cfg,
+                    self._primitive_evaluator,
+                    self._stage_gate_config,
+                )
             self._archive.collect_stage_b(
                 genome,
                 lane.lane_id,

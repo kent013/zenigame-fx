@@ -193,6 +193,7 @@ def _make_lane_manager(
     archive: Any | None = None,
     factory: Callable[[str], BacktestConfig] | None = None,
     deferred_promotion: bool = False,
+    stage_gate_config: StageGateConfig | None = None,
 ) -> LaneManager:
     if tier1 is None:
         tier1 = {"tier1_EUR_JPY": _make_tier1_lane("EUR_JPY")}
@@ -202,10 +203,20 @@ def _make_lane_manager(
         archive = MagicMock(spec=GenomeArchive)
     if factory is None:
         factory = _stub_bt_factory_intraday()
+    if stage_gate_config is None:
+        # T035: 既存 fixture は bars_18m=8 unique dates で十分な観測日数を持たない
+        # ため、デフォルトの wf_train_days=120/test=20/embargo=1 (sum=141) では
+        # skip-path 発動。既存テストの期待を維持するため小さい wf 値を与える。
+        stage_gate_config = StageGateConfig(
+            wf_train_days=2,
+            wf_test_days=1,
+            wf_step_days=1,
+            wf_embargo_days=0,
+        )
     return LaneManager(
         tier1=tier1,
         graduation=graduation,
-        stage_gate_config=StageGateConfig(),
+        stage_gate_config=stage_gate_config,
         cross_pair_config=CrossPairConfig(),
         primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
         archive=archive,
@@ -894,3 +905,57 @@ def test_run_generation_skips_cp_evaluator_when_pair_data_missing(
     # pair_bars 未注入なら cp_evaluator=None → counts["c_with_cp"] 増えない
     assert counts["c_with_cp"] == 0
     assert counts["c"] == 2
+
+
+# T035: Stage B skip-path =====================================================
+
+
+def test_stage_b_skipped_when_unique_dates_below_minimum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """bars_18m の unique dates < wf_min_unique_dates → evaluate_stage_b 不発火、
+    archive に reason_codes=('stage_b_window_underfilled',) で記録される."""
+    counts = _patch_stage_funcs(
+        monkeypatch,
+        a_result=_stage_a_result(passed=True),
+        b_result=_stage_b_result(passed=False),
+    )
+    archive = MagicMock(spec=GenomeArchive)
+    # default _make_lane_manager が小さい wf cfg を渡すので、それを大きい cfg で
+    # 上書きして underfilled を再現する (bars_18m=8 unique dates < 141)
+    big_cfg = StageGateConfig()  # wf_train=120 + embargo=1 + test=20 = 141
+    mgr = _make_lane_manager(archive=archive, stage_gate_config=big_cfg)
+    mgr.run_generation("tier1_EUR_JPY")
+    # Stage A は通常通り 2 回呼ばれる
+    assert counts["a"] == 2
+    # Stage B は skip-path で 0 回呼ばれる
+    assert counts["b"] == 0
+    # archive.collect_stage_b は 2 回呼ばれる (stage A pass 個体すべてで underfilled 記録)
+    assert archive.collect_stage_b.call_count == 2
+    # 渡された stage_result が underfilled
+    for call in archive.collect_stage_b.call_args_list:
+        sr = call.kwargs.get("stage_result") or call.args[3]
+        assert sr.reason_codes == ("stage_b_window_underfilled",)
+        assert sr.passed is False
+        payload = sr.metrics["payload"]
+        assert payload["n_unique_dates"] == 8
+        assert payload["wf_min_unique_dates"] == 141
+        assert payload["n_fold"] == 0
+
+
+def test_stage_b_evaluated_when_unique_dates_meet_minimum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """bars_18m unique dates >= wf_min_unique_dates → 通常 evaluate_stage_b 発火."""
+    counts = _patch_stage_funcs(
+        monkeypatch,
+        a_result=_stage_a_result(passed=True),
+        b_result=_stage_b_result(passed=False),
+    )
+    archive = MagicMock(spec=GenomeArchive)
+    # default fixture は小さい wf (2+0+1=3) で bars_18m=8 だから skip-path 不発動
+    mgr = _make_lane_manager(archive=archive)
+    mgr.run_generation("tier1_EUR_JPY")
+    assert counts["a"] == 2
+    # Stage B は通常通り評価される
+    assert counts["b"] == 2
