@@ -453,6 +453,10 @@ def main(argv: list[str] | None = None) -> int:
             "insufficient_folds",
             "all_folds_unavailable",
             "stage_b_window_underfilled",
+            # T035 fix (cycle 5): 旧実装で漏れていた stage_gate.py の reason
+            # を known_codes に追加。これらが Stage B 全滅 reason に隠蔽されていた。
+            "median_oos_sharpe<min",
+            "positive_fold_ratio<min",
         )
         # Primary reason: ;-split の先頭のみで集計、合計 = failures
         primary_counts: dict[str, int] = {c: 0 for c in known_codes}
