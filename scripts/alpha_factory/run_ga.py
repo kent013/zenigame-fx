@@ -34,7 +34,7 @@ import json
 import math
 import random
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -51,6 +51,7 @@ from src.alpha_factory.config import (
     AlphaFactoryConfig,
     BacktestSectionConfig,
     DatasetConfig,
+    GAFeasibilityConfig,
     StageWindowsConfig,
     load_config,
 )
@@ -99,23 +100,76 @@ class LaneBarsBundle:
 
 @dataclass(frozen=True)
 class IndividualCacheEntry:
-    """GA selection 用の cache entry (archive 由来)."""
+    """GA selection 用の cache entry (archive 由来).
+
+    T031 RPC Phase 1: ``feasible`` / ``violation_magnitude`` を追加し、
+    ``selection_score`` を 6 要素化する (旧 4 要素は ``_legacy_selection_score``)。
+    """
 
     generation: int
     fitness_pen: float
     stage_a_pass: bool
     stage_b_pass: bool
     stage_c_pass: bool
+    feasible: bool = True
+    violation_magnitude: float = 0.0
 
     @property
-    def selection_score(self) -> tuple[int, int, int, float]:
-        """Lexicographic tuple: (C_pass, B_pass, A_pass, fitness_pen)."""
+    def selection_score(self) -> tuple[int, float, int, int, int, float]:
+        """Lexicographic 6-tuple:
+        ``(feasible_int, -violation, C_pass, B_pass, A_pass, fitness_pen)``.
+
+        非有限値 (NaN/inf) は順序比較を破壊するため finite guard で正規化:
+        - violation: 非有限なら ``+inf`` 扱い (= ``-inf`` を二要素目に置く → 確実に最下位)
+        - fitness_pen: 既存と同じく非有限は ``-inf`` として比較最下位扱い
+        """
+        v = self.violation_magnitude
+        v_norm = math.inf if not math.isfinite(v) else float(v)
+        fp = self.fitness_pen
+        fp_norm = -math.inf if not math.isfinite(fp) else float(fp)
+        return (
+            int(self.feasible),
+            -v_norm,
+            int(self.stage_c_pass),
+            int(self.stage_b_pass),
+            int(self.stage_a_pass),
+            fp_norm,
+        )
+
+    @property
+    def _legacy_selection_score(self) -> tuple[int, int, int, float]:
+        """旧 4 要素 selection_score (fallback / v1 互換用)."""
+        fp = self.fitness_pen if math.isfinite(self.fitness_pen) else -math.inf
         return (
             int(self.stage_c_pass),
             int(self.stage_b_pass),
             int(self.stage_a_pass),
-            float(self.fitness_pen),
+            fp,
         )
+
+
+def _selection_key(
+    entry: IndividualCacheEntry,
+    fallback_active: bool,
+) -> tuple[Any, ...]:
+    """selection 用 lexicographic key.
+
+    ``fallback_active=True`` (cache 全体が infeasible) の場合は旧 4 要素に
+    フォールバックする。
+    """
+    if fallback_active:
+        return entry._legacy_selection_score
+    return entry.selection_score
+
+
+def _is_all_infeasible(
+    entries: Iterable[IndividualCacheEntry],
+    feasibility_cfg: GAFeasibilityConfig,
+) -> bool:
+    """cache 全体スコープで全個体 infeasible なら True (fallback 発動条件)."""
+    if not feasibility_cfg.enable_fallback_when_all_infeasible:
+        return False
+    return not any(e.feasible for e in entries)
 
 
 def _safe_finite(x: float) -> tuple[float, bool]:
@@ -365,9 +419,12 @@ def _tournament(
     cache: dict[str, IndividualCacheEntry],
     rng: random.Random,
     k: int,
+    feasibility_cfg: GAFeasibilityConfig,
 ) -> Genome:
+    """``feasibility_cfg`` を見て fallback (cache 全体 infeasible) 判定後に max."""
     sample = rng.sample(pop, k=min(k, len(pop)))
-    return max(sample, key=lambda g: cache[g.name].selection_score)
+    fallback = _is_all_infeasible(cache.values(), feasibility_cfg)
+    return max(sample, key=lambda g: _selection_key(cache[g.name], fallback))
 
 
 def _breed_next_gen(
@@ -378,10 +435,16 @@ def _breed_next_gen(
     rng: random.Random,
     gen: int,
 ) -> tuple[list[Genome], dict[str, tuple[str | None, str | None]]]:
-    """次世代 genomes を生成。elite → crossover/mutate で埋める。"""
+    """次世代 genomes を生成。elite → crossover/mutate で埋める。
+
+    elite 選抜 / tournament いずれも cache 全体スコープで一度だけ fallback 判定し、
+    同一規則で sort / max するため、elite と tournament の規則不整合を回避する。
+    """
+    feasibility_cfg = ga_cfg.feasibility
+    fallback = _is_all_infeasible(cache.values(), feasibility_cfg)
     sorted_pop = sorted(
         prev_pop,
-        key=lambda g: cache[g.name].selection_score,
+        key=lambda g: _selection_key(cache[g.name], fallback),
         reverse=True,
     )
     elites = sorted_pop[: ga_cfg.elite_count]
@@ -393,8 +456,12 @@ def _breed_next_gen(
         next_genomes.append(renamed)
         provenance[new_name] = (e.name, None)
     while len(next_genomes) < ga_cfg.population_size:
-        p1 = _tournament(prev_pop, cache, rng, ga_cfg.tournament_size)
-        p2 = _tournament(prev_pop, cache, rng, ga_cfg.tournament_size)
+        p1 = _tournament(
+            prev_pop, cache, rng, ga_cfg.tournament_size, feasibility_cfg
+        )
+        p2 = _tournament(
+            prev_pop, cache, rng, ga_cfg.tournament_size, feasibility_cfg
+        )
         if rng.random() < ga_cfg.crossover_rate:
             c1, c2 = crossover(p1, p2, rng, max_depth=ga_cfg.max_depth)
         else:
@@ -440,8 +507,15 @@ def _update_cache(
     archive: GenomeArchive,
     lane_id: str,
     generation: int,
+    feasibility_cfg: GAFeasibilityConfig,
 ) -> None:
-    """archive の row から fitness_pen / stage pass を取り出し cache 更新."""
+    """archive の row から fitness_pen / stage pass / feasibility を取り出し cache 更新.
+
+    T031: ``feasibility_cfg.apply_from_generation <= generation`` で feasibility を
+    実評価。archive 不在 (評価失敗) は明確に infeasible として violation を最大化。
+    """
+    apply = generation >= feasibility_cfg.apply_from_generation
+    entry_min = feasibility_cfg.entry_count_min
     for g in population:
         row = archive.get_row_snapshot(lane_id, generation, g.name)
         if row is None:
@@ -451,6 +525,8 @@ def _update_cache(
                 stage_a_pass=False,
                 stage_b_pass=False,
                 stage_c_pass=False,
+                feasible=(not apply),
+                violation_magnitude=float(entry_min) if apply else 0.0,
             )
             continue
         fp_raw = row.get("fitness_pen")
@@ -458,21 +534,39 @@ def _update_cache(
             fp = float(fp_raw) if fp_raw is not None else -math.inf
         except (TypeError, ValueError):
             fp = -math.inf
+        tc_raw = row.get("trade_count")
+        try:
+            trade_count = int(tc_raw) if tc_raw is not None else 0
+        except (TypeError, ValueError):
+            trade_count = 0
+        if apply:
+            feasible = trade_count >= entry_min
+            violation = max(0.0, float(entry_min - trade_count))
+        else:
+            feasible = True
+            violation = 0.0
         cache[g.name] = IndividualCacheEntry(
             generation=generation,
             fitness_pen=fp,
             stage_a_pass=bool(row.get("stage_a_pass", False)),
             stage_b_pass=bool(row.get("stage_b_pass", False)),
             stage_c_pass=bool(row.get("stage_c_pass", False)),
+            feasible=feasible,
+            violation_magnitude=violation,
         )
 
 
 def _select_best(
     cache: Mapping[str, IndividualCacheEntry],
+    feasibility_cfg: GAFeasibilityConfig,
 ) -> tuple[str, IndividualCacheEntry]:
     if not cache:
         raise RuntimeError("no individuals evaluated")
-    return max(cache.items(), key=lambda kv: kv[1].selection_score)
+    fallback = _is_all_infeasible(cache.values(), feasibility_cfg)
+    return max(
+        cache.items(),
+        key=lambda kv: _selection_key(kv[1], fallback),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +706,7 @@ def _write_reports(
                 "graduation_count": pg["graduation_count"],
                 "best_fitness_pen": finite_val,
                 "best_fitness_pen_finite": bool(finite_flag),
+                "feasible_count": int(pg.get("feasible_count", 0)),
             }
         )
 
@@ -668,12 +763,19 @@ def _write_reports(
             "stage_a_pass": bool(best_entry.stage_a_pass),
             "stage_b_pass": bool(best_entry.stage_b_pass),
             "stage_c_pass": bool(best_entry.stage_c_pass),
+            "feasible": bool(best_entry.feasible),
+            "violation_magnitude": float(
+                _safe_finite(best_entry.violation_magnitude)[0]
+            ),
             "selection_score": [
+                int(best_entry.feasible),
+                -float(_safe_finite(best_entry.violation_magnitude)[0]),
                 int(best_entry.stage_c_pass),
                 int(best_entry.stage_b_pass),
                 int(best_entry.stage_a_pass),
                 float(best_fitness_val),
             ],
+            "selection_score_schema": "v2_feasibility",
             "metrics": best_metrics,
         },
         "live_criteria": live_check,
@@ -833,11 +935,23 @@ def main(argv: list[str] | None = None) -> int:
         tier1_lane.population = population
         tier1_lane.provenance = provenance
         summary_out = lane_manager.run_generation(lane_id)
-        _update_cache(cache, population, archive, lane_id, current_generation)
+        _update_cache(
+            cache,
+            population,
+            archive,
+            lane_id,
+            current_generation,
+            cfg.ga.feasibility,
+        )
 
         best_fp = max(
             (cache[g.name].fitness_pen for g in population),
             default=-math.inf,
+        )
+        feasible_count = sum(
+            1
+            for g in population
+            if g.name in cache and cache[g.name].feasible
         )
         per_generation.append(
             {
@@ -848,13 +962,14 @@ def main(argv: list[str] | None = None) -> int:
                 "stage_c_pass": int(summary_out["stage_c_pass"]),
                 "graduation_count": int(summary_out["graduation_count"]),
                 "best_fitness_pen": best_fp,
+                "feasible_count": feasible_count,
             }
         )
         prev_population = population
 
     archive_path = archive.flush()
 
-    best_name, best_entry = _select_best(cache)
+    best_name, best_entry = _select_best(cache, cfg.ga.feasibility)
     best_row = archive.get_row_snapshot(
         lane_id, best_entry.generation, best_name
     )

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 from collections import Counter
 from pathlib import Path
@@ -23,6 +24,19 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_REPORTS_DIR = REPO_ROOT / "reports" / "run-reports"
 
 logger = logging.getLogger(__name__)
+
+
+def _as_int_safe(v: Any) -> int:
+    """``trade_count`` 等を安全に int 化 (NaN / None / 文字列パース失敗で 0)."""
+    if v is None:
+        return 0
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(f):
+        return 0
+    return int(f)
 
 
 def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
@@ -445,13 +459,53 @@ def main(argv: list[str] | None = None) -> int:
         )
     lines.append("")
 
+    # T031 Feasibility 集計 (selection_score_schema = v2_feasibility 時に出力)
+    best = summary.get("best") or {}
+    schema = best.get("selection_score_schema", "v1_legacy")
+    lines.append("## Feasibility 集計")
+    lines.append("")
+    if archive_rows is None:
+        lines.append("- archive Parquet なし、計算スキップ")
+    else:
+        no_trade_count = sum(
+            1 for r in archive_rows
+            if _as_int_safe(r.get("trade_count")) == 0
+        )
+        total_rows = max(1, len(archive_rows))
+        no_trade_ratio = no_trade_count / total_rows
+        best_trade_count = _as_int_safe(
+            (best.get("metrics") or {}).get("trade_count")
+        )
+        best_feasible = bool(best.get("feasible", True))
+        lines.append(
+            f"- selection_score schema: `{schema}`"
+        )
+        lines.append(
+            f"- trade_count=0 個体比率: {no_trade_ratio:.1%} "
+            f"({no_trade_count}/{total_rows})"
+        )
+        lines.append(f"- best 個体 trade_count: {best_trade_count}")
+        lines.append(
+            f"- best 個体 feasibility: "
+            f"{'✅' if best_feasible else '❌'}"
+        )
+    lines.append("")
+
     # archive Top-5 個体一覧 (Best とは別物)
     lines.append("## Archive Top-5 個体一覧")
     lines.append("")
-    lines.append(
-        "> Best とは別物です。`fitness_pen` 単独降順。"
-        "Best は (stage_c_pass, stage_b_pass, stage_a_pass, fitness_pen) の辞書式。"
-    )
+    if schema == "v2_feasibility":
+        note = (
+            "Best は "
+            "(feasible, -violation, stage_c_pass, stage_b_pass, stage_a_pass, fitness_pen) "
+            "の辞書式 (v2_feasibility)。"
+        )
+    else:
+        note = (
+            "Best は (stage_c_pass, stage_b_pass, stage_a_pass, fitness_pen) "
+            "の辞書式 (v1_legacy)。"
+        )
+    lines.append(f"> Best とは別物です。`fitness_pen` 単独降順。{note}")
     lines.append("")
     if archive_rows is None:
         lines.append("- archive Parquet なし、計算スキップ")

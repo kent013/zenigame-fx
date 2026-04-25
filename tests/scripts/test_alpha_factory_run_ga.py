@@ -391,8 +391,17 @@ def test_smoke_run_holdout_ok(
     # best.fitness は Decimal 互換 (有限値)
     Decimal(summary["best"]["fitness"])
     assert isinstance(summary["best"]["fitness_finite"], bool)
-    # selection_score の 4 要素
-    assert len(summary["best"]["selection_score"]) == 4
+    # T031: selection_score schema = v2_feasibility (6 要素)
+    assert summary["best"]["selection_score_schema"] == "v2_feasibility"
+    assert len(summary["best"]["selection_score"]) == 6
+    # 1 要素目は feasible_int (0 or 1)
+    assert summary["best"]["selection_score"][0] in (0, 1)
+    # best.feasible / violation_magnitude キーが存在
+    assert isinstance(summary["best"]["feasible"], bool)
+    assert isinstance(summary["best"]["violation_magnitude"], float)
+    # per_generation に feasible_count
+    for pg in summary["per_generation"]:
+        assert isinstance(pg["feasible_count"], int)
     # cross_pair_runtime_mode は単一 instrument なので skipped
     assert summary["cross_pair_runtime_mode"] == "skipped_single_instrument"
     # archive parquet が生成されている

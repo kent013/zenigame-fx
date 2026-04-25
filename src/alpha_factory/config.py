@@ -17,7 +17,7 @@ SSOT:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -35,6 +35,7 @@ __all__ = [
     "CrossPairConfig",
     "DatasetConfig",
     "GAConfig",
+    "GAFeasibilityConfig",
     "StageGateConfig",
     "StageWindowsConfig",
     "load_config",
@@ -99,6 +100,27 @@ class BacktestSectionConfig:
 
 
 @dataclass(frozen=True)
+class GAFeasibilityConfig:
+    """GA selection 用 feasibility 制約 (T031 Phase 1: trade_count=0 淘汰のみ)."""
+
+    entry_count_min: int = 1
+    apply_from_generation: int = 0
+    enable_fallback_when_all_infeasible: bool = True
+    entry_count_min_hard_cap: int = 10000
+
+    def __post_init__(self) -> None:
+        if self.entry_count_min < 0:
+            raise ValueError("ga.feasibility.entry_count_min must be >= 0")
+        if self.entry_count_min > self.entry_count_min_hard_cap:
+            raise ValueError(
+                f"ga.feasibility.entry_count_min ({self.entry_count_min}) "
+                f"exceeds hard cap ({self.entry_count_min_hard_cap})"
+            )
+        if self.apply_from_generation < 0:
+            raise ValueError("ga.feasibility.apply_from_generation must be >= 0")
+
+
+@dataclass(frozen=True)
 class GAConfig:
     """GA hyper-parameters. Stage A の fitness_pen (sharpe - α·size_norm) を
     内部選択の基底指標とする (R2: fitness_metric != sharpe は warning 出して
@@ -117,6 +139,7 @@ class GAConfig:
     complexity_alpha: float = 0.03
     complexity_size_ref: float = 10.0
     n_edit_max: int = 3
+    feasibility: GAFeasibilityConfig = field(default_factory=GAFeasibilityConfig)
 
     def __post_init__(self) -> None:
         if self.population_size < 1:
@@ -141,6 +164,12 @@ class GAConfig:
             raise ValueError("ga.n_edit_max must be >= 0")
         if self.complexity_size_ref <= 0.0:
             raise ValueError("ga.complexity_size_ref must be > 0")
+        if self.feasibility.apply_from_generation > self.generations:
+            raise ValueError(
+                f"ga.feasibility.apply_from_generation "
+                f"({self.feasibility.apply_from_generation}) must be "
+                f"<= ga.generations ({self.generations})"
+            )
 
 
 @dataclass(frozen=True)
@@ -240,6 +269,35 @@ def _build_backtest(raw: Mapping[str, Any]) -> BacktestSectionConfig:
     )
 
 
+def _strict_bool(value: Any, default: bool) -> bool:
+    """文字列 'false'/'no'/'0' を True 扱いする ``bool(...)`` の罠を回避."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "yes", "1", "on"):
+            return True
+        if v in ("false", "no", "0", "off"):
+            return False
+        raise ValueError(f"invalid bool string: {value!r}")
+    if isinstance(value, (int, float)):
+        return bool(value)
+    raise ValueError(f"unsupported bool type: {type(value).__name__}")
+
+
+def _build_feasibility(raw: Mapping[str, Any] | None) -> GAFeasibilityConfig:
+    feas_raw: Mapping[str, Any] = raw or {}
+    return GAFeasibilityConfig(
+        entry_count_min=int(feas_raw.get("entry_count_min", 1)),
+        apply_from_generation=int(feas_raw.get("apply_from_generation", 0)),
+        enable_fallback_when_all_infeasible=_strict_bool(
+            feas_raw.get("enable_fallback_when_all_infeasible"), default=True
+        ),
+    )
+
+
 def _build_ga(raw: Mapping[str, Any]) -> GAConfig:
     return GAConfig(
         population_size=int(raw.get("population_size", 40)),
@@ -255,6 +313,7 @@ def _build_ga(raw: Mapping[str, Any]) -> GAConfig:
         complexity_alpha=float(raw.get("complexity_alpha", 0.03)),
         complexity_size_ref=float(raw.get("complexity_size_ref", 10.0)),
         n_edit_max=int(raw.get("n_edit_max", 3)),
+        feasibility=_build_feasibility(raw.get("feasibility")),
     )
 
 
