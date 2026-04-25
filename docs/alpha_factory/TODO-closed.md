@@ -35,6 +35,7 @@
 | T029 | strategy signal cache flatten | ga-architecture | High | 2026-04-25 03:47 | - |
 | T030 | bars mid ohlc cache | primitives | High | 2026-04-25 04:41 | - |
 | T038 | Sharpe 計算根本修正 Phase 1A: bar-level annualized → trade_sharpe_raw + sample-size guard | stage-gate | Critical | 2026-04-25 18:56 | todo/T038 |
+| T031 | regime-participation-constraint Phase 1: trade_count=0 を selection_score feasibility 制約で淘汰 | cross-pair | Critical | 2026-04-25 23:56 | - |
 
 ## Obsoleted
 

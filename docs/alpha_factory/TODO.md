@@ -6,7 +6,6 @@ zenigame-fx Alpha Factory の改善タスク一覧。
 
 | ID | タイトル | テーマ | 概要 | 優先度 | 実装モード | 設計 | 追加日時 |
 |----|---------|-------|------|-------|----------|------|---------|
-| T031 | regime-participation-constraint Phase 1: trade_count=0 を selection_score feasibility 制約で淘汰 | cross-pair | [r:ra] regime participation | Critical | incremental | [設計](devnotes/20260425-0937-regime-participation-constraint/) | 2026-04-25 09:56 |
 | T032 | signal-eval-consistency-fix | primitives | [r:sq] eval-consistency-fix | Critical | incremental | [設計](devnotes/20260425-0939-signal-eval-consistency-fix/) | 2026-04-25 09:58 |
 | T033 | cost-pnl-ledger-eventsource: PnL/コスト sidecar 出力で Stage A Provenance 分布を可視化 | general | [r:ce] cost-pnl ledger | Critical | incremental | [設計](devnotes/20260425-0937-cost-pnl-ledger-eventsource/) | 2026-04-25 16:17 |
 | T034 | risk-no-trade-fitness-guard: no-trade 時の fitness sentinel 一貫化と統合経路テスト整備 | stage-gate | [r:rm] no-trade fitness guard | Critical | incremental | [設計](devnotes/20260425-0937-risk-no-trade-fitness-guard/) | 2026-04-25 16:17 |

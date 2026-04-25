@@ -30,7 +30,7 @@ ga:
   # 30 は Andrew W. Lo (2002) "The Statistics of Sharpe Ratios" の経験則。
   # Phase 1B replay で N=20/30/50 の感度分析を実施し再校正する。
   trade_count_min_for_sharpe: 30
-  seed: null  # null = 毎 Run ランダム
+  seed:       # null = 毎 Run ランダム
 
 # 使命達成判定 — 全てを満たす個体が出現すれば使命達成
 live_criteria:
@@ -50,7 +50,7 @@ stage_gate:
     window_days: 60
     target_pass_rate: 0.15      # 探索圧の代理指標 (calibrate-gate T027 で使用)
     alpha: 0.03
-    threshold: 0.0              # T027 calibrate-gate により Run 終了後に動的更新
+    threshold: 0.0977           # T027 calibrate-gate により Run 終了後に動的更新
     # T027 calibrate-gate 設定 (deterministic 制御則)
     # - 概念設計: docs/alpha_factory/concepts/calibrate-gate.md
     # - SSOT: 本セクション、loader: scripts/alpha_factory/calibrate_gate.py
