@@ -1,0 +1,37 @@
+{
+  "name": "g60_i5",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F4",
+          "weight": 0.879005129879564,
+          "params": {
+            "n": 24,
+            "scale": 15.572216526465883
+          }
+        },
+        {
+          "name": "P2",
+          "weight": 1.1870902114990833,
+          "params": {
+            "atr_n": 11
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.7359519319715916
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.5964503734536758,
+    "exit_threshold": 0.23927819702070124,
+    "max_pos": 2,
+    "time_stop_min": 87
+  },
+  "risk": {
+    "stop_atr": 3.172413854463567,
+    "take_atr": 2.395028572807132
+  }
+}
