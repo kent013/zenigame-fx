@@ -1,0 +1,98 @@
+# 概念設計: bars-mid-ohlc-cache
+
+## 前提表（Verified）
+
+| # | 前提 | 状態 | 根拠 |
+|---|---|---|---|
+| P1 | `_bars_to_mid_ohlc` が 3 モジュールに重複定義 | **Verified** | `grep` で `src/alpha_factory/primitives/{directional_generic,modulator_generic,pair_specific}.py` に同名関数 |
+| P2 | 3 コピーともに実装が等価（bid/ask 平均で mid OHLC 配列化） | **Verified** | 全 3 モジュールの実装を読み比較 |
+| P3 | 呼び出し箇所は primitive の `_compute_all` 関数内、`ctx.bars` を引数 | **Verified** | `grep "_bars_to_mid_ohlc"` で呼び出し列挙 |
+| P4 | Cycle 2 の `DslStrategy.prepare()` で同一 backtest 内の複数 primitive が同じ `ctx.bars` (= list passed to run_backtest) を共有 | **Verified** | `src/dsl/strategy.py` の `evaluator.evaluate_all_bars(bars, sig)` は bars を primitive の ctx に渡すのみ。bars は run_backtest の bars_list 変数 |
+| P5 | Stage A/B/C の bars はそれぞれ 1 個の list object として lane に保持される | **Verified** | `src/alpha_factory/swim_lane.py` Tier1Lane: `bars_60d / bars_18m / bars_holdout` が 1 個ずつ |
+| P6 | プロファイル baseline: `profile_20260425_035019` (3.826s, T029 post)、`_bars_to_mid_ohlc` 27 calls / 0.296s tottime | **Verified** | profile data |
+| P7 | `PriceBar` / `Ohlc` は frozen dataclass だが、`bars: list[PriceBar]` list コンテナ自体は mutable | **Verified** | `src/domain/price.py:8-16` |
+| P8 | 現行 run_ga は 1 process 内で単一 Tier1Lane を保持し、backtest は sequential 実行（thread 並列なし）。並列化は **process-level (GA worker)** のみ | **Verified** | `scripts/alpha_factory/run_ga.py:750-788` + swim_lane.py の `_run_tier1_generation` は sequential `for genome in lane.population` |
+| P9 | `_bars_cache.py` は pure helper で、`primitives.__init__` / `_registry` / 各 primitive module からは依存されない | **To implement** | 新規モジュールの依存境界として明文化 |
+
+## 背景
+
+T028 (snapshot cache) + T029 (prepared signals flatten) 完了後の残存最大 hotspot。`_bars_to_mid_ohlc` が 27 calls で 0.296s (7.7% of profile) を占める。同一 bars list が複数 primitive / 複数 genome で重複変換されている。
+
+## 改善アイデア
+
+### 戦略: id() + len() ベース LRU cache + DRY 統合
+
+**A. `src/alpha_factory/primitives/_bars_cache.py`（新規）**
+- 依存: `numpy`, `collections`（標準 `OrderedDict`）のみ。`src.domain.price.PriceBar` は型参照のみ。`primitives.__init__` / `_registry` / 各 primitive module への依存は**禁止**（P9、Review R1 Warning 対応で import 境界明文化）
+- module-level `_CACHE: OrderedDict[tuple[int, int], tuple[ndarray x 4]]`
+  - key = `(id(bars), len(bars))`（Review R1 Critical 対応: bars list が途中 append された場合に len 変化で miss）
+- `_REFS: OrderedDict[tuple[int, int], list[PriceBar]]`（同 key で強参照保持、id 再利用ガード）
+- `MAX_ENTRIES = 8`（Review R1 Warning 対応: 現行 topology は Stage A/B/C の 3 本 + margin。単一 process 単一 lane 前提）
+- invariant: `_CACHE` と `_REFS` は**必ず同じ key 集合を lockstep で保持**。`insert / move_to_end / eviction` は 2 dict を同順序で同時更新
+- `bars_to_mid_ohlc(bars) -> (o, h, l, c)`:
+  - `key = (id(bars), len(bars))`
+  - cache hit + `_REFS[key] is bars` なら `move_to_end(key)` + return（id 再利用ガード）
+  - miss なら compute + `_CACHE[key] = result` + `_REFS[key] = bars` + eviction if `len(_CACHE) > MAX_ENTRIES`
+- thread safety: **backtest path は thread-parallel 不可を契約として明記**（P8 Verified、GA 並列は process-level のみ）。process 内 thread 並列が導入される場合は別 TODO で lock 追加
+
+**B. 3 モジュールの重複削除**
+- `directional_generic._bars_to_mid_ohlc` / `modulator_generic._bars_to_mid_ohlc` / `pair_specific._bars_to_mid_ohlc` を削除
+- 各モジュール先頭で `from src.alpha_factory.primitives._bars_cache import bars_to_mid_ohlc` を import
+
+**C. `modulator_generic.py:251-252` の `bid_c / ask_c` 配列構築**
+- 2 行だけの別 bars→float 変換もあるが、本 TODO スコープ外（別 primitive の専用配列、小規模）
+
+## 期待効果（Review R1 Warning 対応: hypothesis レンジに格下げ）
+
+### Selection invariance（最優先、確信度: 高）
+- 100%（返却配列は既存 3 モジュールと bit-identical、cache hit は同一 ndarray object を返す）
+
+### パフォーマンス仮説（n=1 の profile からの外挿、確信度: 中）
+
+| 指標 | 仮説レンジ |
+|---|---|
+| `_bars_to_mid_ohlc` 合計 tottime 削減 | 60-85% (profile で 27 → 3-8 calls。具体値は実測に依存) |
+| profile 全体削減 | 4-7% (0.15-0.26s) |
+| 本番推定削減 | **参考値**: 50-95 秒/RUN。C7 準拠で n<3 のため decided に寄せない |
+
+### メモリ見積もり
+- 1 entry ≈ `32 × len(bars)` bytes (float64 × 4 array)
+- profile の 14351 bars ≈ 1.8 MB/entry × MAX_ENTRIES 8 = **< 15 MB** / process
+- 本番 86k bars × 8 entries ≈ 22 MB / process → 6 worker でも 132 MB、24GB 制約内で安全
+
+## 実装方針
+
+1. `src/alpha_factory/primitives/_bars_cache.py` 新規作成（cached function + LRU）
+2. `directional_generic.py` / `modulator_generic.py` / `pair_specific.py` の `_bars_to_mid_ohlc` を削除、import に置き換え
+3. 新規テスト `tests/alpha_factory/primitives/test_bars_cache.py`（cache hit / miss / LRU / id 再利用ガード / 内容一致）
+
+## 制約・前提
+
+- **Selection invariance**: 返却配列は既存 3 モジュールと bit-identical
+- **thread safety**: GA は process-level 並列のため single-threaded 前提を継承（cache は process-local）
+- **id 再利用**: `_REFS` で bars list への強参照を保持し、LRU 内にある限り object が生存 → id 再利用不可
+- **bars 非再代入契約**: 同一 bars list object 内の要素置換（list[i] = new_bar、len 不変）は検知できない。運用上は primitive/engine は bars を read-only で扱い、要素置換は行わない（設計契約、現行コードで違反なし）
+
+## スコープ外
+
+- `modulator_generic.py:251-252` の bid_c/ask_c 構築（別 primitive 専用、小規模）
+- `_indicators.py` の他 helper の cache 化
+- Decimal → float 変換の numpy 化（別 TODO）
+
+## 成功基準
+
+### 最優先（必達）
+1. **Selection invariance**: 全 genome で fitness_pen / Stage pass counts / trade counts が baseline (profile_20260425_035019) と bit-identical
+2. 既存全 test 合格（920+）+ 新規 cache test 全合格
+
+### 副次（hypothesis、未達でも revert 対象ではない）
+3. `_bars_to_mid_ohlc` 合計 tottime **60% 以上**削減
+4. profile 全体時間 4% 以上短縮
+
+### INCONCLUSIVE ルール (C8)
+- Selection invariance OK + 副次 target 未達 + n<3 → INCONCLUSIVE（複数 seed/pair で再測）
+- Selection invariance 壊れ → 無条件 FAIL
+
+### 実装開始条件チェックリスト
+- [ ] P9 実装（`_bars_cache.py` が `numpy / collections / src.domain.price` のみ依存、他 primitive module を import しない）
+- [ ] 3 モジュールの重複 `_bars_to_mid_ohlc` 削除後、`from src.alpha_factory.primitives._bars_cache import bars_to_mid_ohlc` への置換を grep で完全検証

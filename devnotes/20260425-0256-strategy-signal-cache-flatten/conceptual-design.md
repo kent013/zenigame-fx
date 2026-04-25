@@ -1,0 +1,341 @@
+# 概念設計: strategy-signal-cache-flatten
+
+## 前提表（Verified / To verify）— C4 準拠
+
+| # | 前提 | 状態 | 根拠 |
+|---|---|---|---|
+| P1 | Cycle 1 (T028) で MockBroker snapshot cache が main merge 済み | **Verified** | `git log main` に commit `0095910` / `acca008` |
+| P2 | T028 merge 後の baseline は `profile_20260425_025427` (5.181s) | **Verified** | `.cache/alpha_factory/runs/profile/profile_20260425_025427.prof` |
+| P3 | `_signal_cache_key` が per-bar per-sig 732k calls / 0.184s tottime | **Verified** | profile data |
+| P4 | `_lookup_signal` が 732k calls / 0.357s tottime | **Verified** | profile data |
+| P5 | Cycle 1 の `self._precomputed` は `dict[(name, params_tuple), ndarray]` | **Verified** | `src/dsl/strategy.py:94` |
+| P6 | `compute_composite` は `values_per_clause: list[dict[str, float]]` を受け取る | **Verified** | `src/dsl/composite.py:74` |
+| P7 | **Genome / ClauseConfig / SignalConfig / PositionConfig / RiskConfig は全て `@dataclass(frozen=True)`** | **Verified** | `src/dsl/genome.py:25,46,55,69,77` 全 5 クラス frozen |
+| P8 | live feed (paper_trading) は `prepare()` を呼ばない | **Verified** | `src/paper_trading/orchestrator.py:83` は `on_bar` のみ呼ぶ |
+| P9 | **`DslStrategy` インスタンスは backtest ごとに新規作成される（prepared state が他 backtest に持ち越されない）** | **Verified** | `src/alpha_factory/stage_gate.py` lines 276/386/406/515/580 + `src/ga/fitness.py:58` で `strategy = DslStrategy(...)` を毎回 local 変数で作る |
+| P10 | **backtest 実行中に genome / clause / signal が mutation されない**（frozen tuple で clause/signal の tuple 順序が構造的に不変） | **Verified** | P7 により `Genome.clauses: tuple[ClauseConfig, ...]` が frozen、`ClauseConfig.directional/local_gate: tuple[SignalConfig, ...]` も frozen。tuple は immutable |
+| P11 | **同一 clause 内で signal.name が重複しないことを prepare() で明示 assert する**（fail-fast） | **To implement** | 現状は暗黙前提。Round 1 Critical 対応で prepare() に assert 追加 |
+
+### Design-first 証跡（C1）
+
+- **docs 参照済み**: `docs/alpha_factory/clause-architecture.md` で Clause composite の仕組みを確認、DSL evaluator / primitive の契約変更は伴わない
+- **devnotes 参照済み**: `devnotes/20260425-0158-broker-snapshot-caching/` (T028)、本 TODO とは別 target
+- **git log 参照**: `strategy.py:_signal_cache_key` は commit `e49c80a` (Cycle 1 perf fix) で追加された
+- **並行経路探索**: `grep -rn "_signal_cache_key\|_lookup_signal" src/ tests/` で利用箇所が `src/dsl/strategy.py` と `tests/backtest/test_engine_prepare.py` のみ、外部 consumer なし
+
+### DslStrategy state machine（Round 1 Suggestion 対応）
+
+```
+[unprepared] --prepare(bars)--> [prepared] --on_bar × N--> (discarded)
+[unprepared] --on_bar × N--> (discarded)  # live feed 経路、prepared にならない
+```
+
+- `unprepared`: `self._prepared is None`。`on_bar` は従来 path（evaluator.evaluate per bar）
+- `prepared`: `self._prepared is PreparedSignals(...)`。`on_bar` は fast path（flat list lookup）
+- **単一フラグ `self._prepared`** で state を表現（Round 1 Critical #2 対応で 2 重管理を排除）
+- **lifecycle 不変条件**: DslStrategy インスタンスは backtest ごとに新規作成され、prepare() 呼び出し後の on_bar 系列を 1 回消費して discard（P9 Verified）
+
+## 背景・課題
+
+### Cycle 1 の経緯
+Cycle 1 で MockBroker `_snapshot_at` を per-bar cache 化 (T028) し、baseline 5.303s → 4.573s (-13.8%)、`_snapshot_at` cumtime -60.0% を達成。
+
+### 新 hotspot
+T028 merge 後の baseline profile (`profile_20260425_025427`, 5.181s) で、**`DslStrategy._signal_cache_key` + `_lookup_signal` の合計で profile の 10.4%** を占めることが判明。
+
+### 根本原因
+Cycle 1 の prepare() / on_bar で **bar ごとに `sorted(sig.params.items())` を再計算**している:
+
+```python
+# 現状
+def _signal_cache_key(sig):
+    return (sig.name, tuple(sorted(sig.params.items())))  # <- bar 毎に sorted
+
+def _lookup_signal(self, sig, idx):
+    key = _signal_cache_key(sig)          # <- 732k 回
+    arr = self._precomputed[key]          # <- dict lookup
+    ...
+```
+
+`SignalConfig.params` は backtest 中に変わらない（P10 Verified）ため、prepare() で 1 回計算すれば十分。
+
+### プロファイル証拠（Facts）
+
+| 関数 | ncalls | tottime | cumtime | 全体比率 |
+|---|---|---|---|---|
+| `strategy._signal_cache_key` | 731952 | 0.184s | 0.316s | 3.5% (tottime) |
+| `strategy._lookup_signal` | 731901 | 0.357s | 0.733s | 6.9% (tottime) |
+| 合計 | — | 0.541s | — | **10.4%** |
+
+### 本番外挿（参考値、n=1）
+
+C7/C8 準拠で **参考値扱い**:
+- `_signal_cache_key` + `_lookup_signal` 合計: 0.541s × 348 ≈ 188 秒/RUN
+- 期待削減（仮説）: 80-95% of `_signal_cache_key` + 30-50% of `_lookup_signal` ≈ **100-150 秒/RUN**
+- **注意（Round 1 Warning 対応）**: `_lookup_signal` の 0.357s には `float(arr[idx])` / `math.isfinite` 等も含まれており、inline 化後もこれらは残る。保守的評価が必要
+
+## 改善アイデア
+
+### 単一 PreparedSignals 構造への統合（Round 1 Critical #2 対応）
+
+```python
+from typing import NamedTuple
+
+class PreparedSignals(NamedTuple):
+    """prepare() で構築される precompute state。
+    
+    単一オブジェクトにまとめることで `_precomputed` と `_precomputed_clauses`
+    の 2 重管理による stale risk を排除する (Round 1 Critical #2 対応)。
+    """
+    # (name, params_key) → ndarray: duplicate signal 共有用の lookup cache
+    arrays: dict[tuple[str, tuple[tuple[str, float | int], ...]], np.ndarray]
+    # clause_idx → (directional_list, gate_list)
+    # 各 list は (sig.name, arr) の tuple を clause.directional / local_gate の
+    # index 順に保持
+    clauses: tuple[tuple[
+        tuple[tuple[str, np.ndarray], ...],  # directional
+        tuple[tuple[str, np.ndarray], ...],  # local_gate
+    ], ...]
+```
+
+### prepare() 実装
+
+```python
+def prepare(self, bars):
+    # 常に prepared state を初期化（再 prepare による stale 防止、Round 1 Warning 対応）
+    self._prepared = None
+    self._bar_count = 0
+
+    if not hasattr(self._evaluator, "evaluate_all_bars"):
+        return  # unprepared のまま（live feed 互換、P8 Verified）
+    
+    arrays: dict[...] = {}
+    clause_list = []
+    
+    for clause in self._genome.clauses:
+        # Round 1 Critical #3 対応: signal.name 一意性を fail-fast
+        names_in_clause: set[str] = set()
+        
+        dir_entries = []
+        for sig in clause.directional:
+            _assert_unique_name(sig.name, names_in_clause, clause)
+            key = (sig.name, tuple(sorted(sig.params.items())))
+            if key not in arrays:
+                arrays[key] = self._evaluator.evaluate_all_bars(bars, sig)
+            dir_entries.append((sig.name, arrays[key]))
+        
+        gate_entries = []
+        for sig in clause.local_gate:
+            _assert_unique_name(sig.name, names_in_clause, clause)
+            key = (sig.name, tuple(sorted(sig.params.items())))
+            if key not in arrays:
+                arrays[key] = self._evaluator.evaluate_all_bars(bars, sig)
+            gate_entries.append((sig.name, arrays[key]))
+        
+        clause_list.append((tuple(dir_entries), tuple(gate_entries)))
+    
+    self._prepared = PreparedSignals(
+        arrays=arrays,
+        clauses=tuple(clause_list),
+    )
+
+
+def _assert_unique_name(name, seen, clause):
+    """同一 clause 内で signal.name の重複を fail-fast で検出。
+    
+    重複すると `values_per_clause[i][name]` の後勝ち上書きで silent bug に
+    なるため、prepare() 時に明示拒否する (Round 1 Critical #3 対応)。
+    """
+    if name in seen:
+        raise ValueError(
+            f"duplicate signal.name {name!r} in clause (weight={clause.weight}); "
+            "signal names must be unique within a clause"
+        )
+    seen.add(name)
+```
+
+### on_bar() 実装
+
+```python
+def on_bar(self, bar, snapshot):
+    prepared = self._prepared  # 単一 snapshot read
+    
+    if prepared is not None:
+        # fast path: prepared state が valid
+        idx = self._bar_count
+        self._bar_count += 1
+        if idx < self._warmup:
+            return []
+        
+        values_per_clause = []
+        for dir_entries, gate_entries in prepared.clauses:
+            vals = {}
+            for name, arr in dir_entries:
+                v = arr[idx] if 0 <= idx < len(arr) else 0.0
+                vals[name] = 0.0 if not math.isfinite(v) else float(v)
+            for name, arr in gate_entries:
+                v = arr[idx] if 0 <= idx < len(arr) else 0.0
+                vals[name] = 0.0 if not math.isfinite(v) else float(v)
+            values_per_clause.append(vals)
+    else:
+        # unprepared path: 従来通り（live feed 互換）
+        self._bars.append(bar)
+        if len(self._bars) < self._warmup:
+            return []
+        idx = len(self._bars) - 1
+        values_per_clause = []
+        for clause in self._genome.clauses:
+            vals = {}
+            for sig in clause.directional:
+                vals[sig.name] = self._evaluator.evaluate(self._bars, idx, sig)
+            for sig in clause.local_gate:
+                vals[sig.name] = self._evaluator.evaluate(self._bars, idx, sig)
+            values_per_clause.append(vals)
+    
+    composite = compute_composite(self._genome.clauses, values_per_clause)
+    ...
+```
+
+### `_signal_cache_key` / `_lookup_signal` の扱い
+
+- `_signal_cache_key`: prepare() 内 local helper に格下げ（module-level 関数は削除 or `_build_cache_key` に改名して prepare() のみから使う）
+- `_lookup_signal`: method としては削除（on_bar 内 inline 化）
+
+### genome 不変性のコード強制（Round 1 Critical #1 対応）
+
+P7 + P10 で Genome / Clause / Signal は frozen tuple。構造的に mutation 不可能。
+
+**追加安全策**: `_prepared.clauses` の長さは `len(self._genome.clauses)` と一致すべき。on_bar() の fast path で長さ不一致を検知したら AssertionError（fail-fast）。ただし frozen が守られる限り起きない。
+
+```python
+# on_bar の prepared path 冒頭
+assert len(prepared.clauses) == len(self._genome.clauses), (
+    "prepared state inconsistent with genome clauses (genome was mutated "
+    "after prepare()?); forbidden by DslStrategy lifecycle contract"
+)
+```
+
+## 期待効果（Round 1 Warning 対応で仮説レンジに格下げ）
+
+### パフォーマンス仮説（保守化）
+
+| 指標 | 仮説レンジ | 根拠 | 確信度 |
+|---|---|---|---|
+| `_signal_cache_key` tottime 削減 | **95-100%** | prepare() 内のみ呼び出し、732k → O(clause × sig) calls | **高** |
+| `_lookup_signal` tottime 削減 | **20-40%** | method dispatch overhead 排除のみ、`float(arr[idx])` / `isfinite` は残存 | **中** |
+| 合計 tottime 削減 | **0.26-0.33s** | 0.184 × 97.5% + 0.357 × 30% ≈ 0.287s | 中 |
+| profile 全体時間削減 | **5-7%** | 5.181s × 0.06 ≈ 0.31s | 中 |
+| 本番推定削減 | **参考値 90-115 秒/RUN** | profile delta × 348× scale、**n=1 なので INCONCLUSIVE** | **低** |
+| Selection invariance | **100%** | 同じ arr を同じ idx で参照、値は bit-identical | **高** |
+
+### 検証計画
+
+1. **selection invariance**: 同一 seed / config / window で GA RUN、baseline (`profile_20260425_025427`) と `best_genome.fitness_pen` / Stage A/B/C pass counts が bit-identical
+2. **test_engine_prepare.py 既存 3 test**: 合格維持
+3. **新規 test** (詳細設計で展開):
+   - `test_prepared_state_uses_single_slot`: `self._prepared` 1 フィールドで state を表現
+   - `test_prepare_rejects_duplicate_signal_names_in_clause`: name 重複 clause で `ValueError`
+   - `test_prepared_clauses_immutable_after_prepare`: `prepared.clauses` が tuple で書き換え不可
+   - `test_on_bar_prepared_and_unprepared_equivalent`: prepared / unprepared path が同じ vals を生成（bit-identical）
+4. **live feed 互換**: paper_trading orchestrator test が不変で合格
+
+### live_criteria への寄与
+間接的（壁時計時間短縮 → 探索量増加）。**Selection invariance を最優先、performance は副次**。
+
+## 実装方針（概要）
+
+### 変更コンポーネント
+
+1. `src/dsl/strategy.py`
+   - module-level: `PreparedSignals` NamedTuple 追加
+   - module-level: `_signal_cache_key` は残すが prepare() 内からのみ使う（または統合して削除）
+   - `DslStrategy.__init__`: `self._prepared: PreparedSignals | None = None` 追加、`self._precomputed` / `self._precomputed_clauses` の 2 重管理は削除
+   - `DslStrategy.prepare(bars)`: 冒頭で state 初期化 → flat list 構築 → 単一 slot 代入
+   - `DslStrategy.on_bar(bar, snapshot)`: `prepared = self._prepared` の single read で分岐
+   - `DslStrategy._lookup_signal`: 削除
+   - `DslStrategy._bars` / `_bar_count`: 従来通り
+
+2. `tests/backtest/test_engine_prepare.py`（既存 3 test）
+   - `test_prepare_produces_identical_trades_to_per_bar_path`: 合格維持
+   - `test_prepare_noop_when_evaluator_lacks_evaluate_all_bars`: 合格維持（`self._prepared is None` を検証するよう若干修正）
+   - `test_prepare_reuses_cache_across_duplicate_signals`: arrays dict 共有を検証（引き続き有効）
+
+3. `tests/dsl/test_dsl_strategy_flat_cache.py`（新規）
+   - 上記 §検証計画 の新規 test 4 件
+
+### スコープ外
+
+- `compute_composite` の最適化（Cycle 3 以降）
+- `_bars_to_mid_ohlc` の primitive 間共有（別 TODO）
+- Decimal → float 変換（精度リスク、対象外）
+- live feed の変更
+
+## 制約・前提
+
+### FX 絶対制約（不変）
+- イントラデイ / long-short / swap・spread: broker + engine 側で担保、本変更は影響なし
+
+### Selection invariance（最優先成功基準）
+- `arrays[key]` = Cycle 1 の `self._precomputed[key]` と同じ ndarray を生成
+- on_bar の prepared path は「同じ arr の `arr[idx]`」を参照 → bit-identical
+
+### live feed 互換
+- `prepare()` 未呼出 / `evaluate_all_bars` を持たない evaluator では `self._prepared is None` → 従来 path
+- paper_trading / LiveBarFeed は影響なし（P8 Verified）
+
+### lifecycle 不変条件（Round 1 Critical #4 対応）
+- DslStrategy インスタンスは backtest ごとに新規（P9 Verified）
+- prepare() → on_bar × N → discard が 1 サイクル
+- 再利用しない前提。再 prepare() しても state を必ず再初期化する実装で 2 重呼び出しにも対応
+
+### メモリ制約
+- `PreparedSignals.arrays` は Cycle 1 と同じサイズ（ndarray reference）
+- `PreparedSignals.clauses` の追加: clause 数 × 2 × sig 数 × tuple(ref) ≈ 数 KB/broker
+- 24GB × 6 worker で余裕、事実上ゼロ負担
+
+### Look-ahead bias
+- ndarray 参照は変わらない、idx も変わらない → 該当なし
+
+## 成功基準
+
+### 実装開始条件チェックリスト（C4）
+
+- [x] P1-P10 Verified（上記前提表）
+- [ ] P11 実装（prepare() での name uniqueness assert）
+- [ ] `self._precomputed` の既存 consumer を grep で再確認（`tests/backtest/test_engine_prepare.py` のみ、他なし）
+- [ ] `compute_composite` の signature 再確認（list[dict[str, float]]）
+
+### 合否判定基準
+
+1. **[最優先] Selection invariance**: baseline (T028 post merge, `profile_20260425_025427`) と同一 seed/config/window で bit-identical
+2. `tests/broker/` / `tests/backtest/` / `tests/alpha_factory/` / `tests/dsl/` 全合格（908+ pass + 新規 test 4 件）
+3. 新規 test 全合格
+4. `_signal_cache_key` tottime が **95% 以上削減**（高確信）
+5. Profile 全体時間が **5% 以上短縮**（保守化した target）
+6. live feed 互換（paper_trading test 不変）
+
+### INCONCLUSIVE 判定ルール（C8、Round 1 Warning 対応）
+
+- Selection invariance OK + n<3 で performance target 未達 → **INCONCLUSIVE**
+- Selection invariance 壊れ → **無条件 FAIL**
+- Selection invariance OK + target 達成 → **PASS**（performance は n=1 なので参考値扱い、本番効果は Cycle 3 以降で多 seed/pair 検証）
+
+## 参考文献
+
+- Knuth, D. E. (1974). _Structured Programming with go to Statements_ — measured optimization
+- Cache-oblivious algorithm の一般論（Frigo et al., 1999）
+
+## Round 1 Codex レビュー対応マップ
+
+| Round 1 指摘 | 分類 | 対応 |
+|---|---|---|
+| Critical 1: flat list index 対応が genome 不変性に依存 | Critical | P7, P10 Verified で frozen tuple を明示。on_bar 冒頭に `assert len(prepared.clauses) == len(self._genome.clauses)` を入れて fail-fast |
+| Critical 2: `_precomputed` + `_precomputed_clauses` の 2 重管理 | Critical | **単一 `PreparedSignals` NamedTuple** に統合。`self._prepared` 1 フィールドのみ |
+| Critical 3: signal.name uniqueness が Verified でない | Critical | prepare() 先頭に `_assert_unique_name` を fail-fast で実装（P11 To implement） |
+| Critical 4: prepared state が live/paper で誤使用されるリスク | Critical | P8, P9 Verified で lifecycle 不変条件を明文化。DslStrategy state machine 図を設計に追加 |
+| Warning: `_lookup_signal` 削減が過大評価 | Warning | 削減仮説を 60-80% → **20-40%** に保守化。`float(arr[idx])` / `isfinite` は残存することを明記 |
+| Warning: 本番外挿 n=1 | Warning | 参考値扱いに降格、**INCONCLUSIVE 判定ルール**を成功基準に追加 |
+| Warning: duplicate name 後勝ち | Warning | prepare() で fail-fast（Critical 3 と統合対応） |
+| Warning: lifecycle 記述不足 | Warning | state machine セクション（`unprepared → prepared → discard`）を追加 |
+| Warning: stale state reset 漏れ | Warning | prepare() 先頭で `self._prepared = None` / `self._bar_count = 0` を必ず実行 |
+| Suggestion: スコープは性能改善のみ | Suggestion | 使命への寄与を間接的・参考値として明記、成功基準から explicit に切り分け |

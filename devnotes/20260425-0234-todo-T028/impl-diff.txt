@@ -1,0 +1,689 @@
+diff --git a/src/broker/mock.py b/src/broker/mock.py
+index 0b6f497..3e30eda 100644
+--- a/src/broker/mock.py
++++ b/src/broker/mock.py
+@@ -124,6 +124,12 @@ class MockBroker:
+         self._last_close_spread_bps: Decimal | None = None
+         # T009: holding cost 累計（position_id → 累積 cost）
+         self._holding_cost_by_position: dict[int, Decimal] = {}
++        # T028: per-bar snapshot cache。単一 tuple slot (bar, snapshot) で atomic
++        # に更新し None で invalidate する。3 calls/bar → 1 call/bar に削減
++        # (O(N²)→O(N) 最適化)。cache hit は `bar is cache[0]` identity 判定で
++        # object reference を保持することで id() 再利用問題を回避
++        # (T028 conceptual-design Round 3 Critical 対応)。
++        self._snapshot_cache: tuple[PriceBar, PortfolioSnapshot] | None = None
+ 
+     # ---- public API -------------------------------------------------------
+ 
+@@ -131,6 +137,7 @@ class MockBroker:
+         if amount <= 0:
+             raise ValueError("amount must be positive")
+         self._cash += amount
++        self._invalidate_snapshot_cache()
+ 
+     def submit(self, signal: OrderSignal, leverage: int) -> None:
+         # open 系の場合は leverage を事前バリデーション（ここで弾く方がデバッグしやすい）
+@@ -258,6 +265,7 @@ class MockBroker:
+             )
+         if total_cost > 0:
+             self._cash -= total_cost
++            self._invalidate_snapshot_cache()
+         return total_cost
+ 
+     def force_close_if_margin_call(self, bar: PriceBar) -> list[Trade]:
+@@ -313,6 +321,7 @@ class MockBroker:
+         self._positions[pos.id] = pos
+         # Mark: MVP ではキャッシュから margin を即座に減らさず、snapshot で拘束額を計算する。
+         # （国内 FX の「拘束証拠金」モデルを採用。cash は常に「入金額 - 実現損益」。）
++        self._invalidate_snapshot_cache()
+         return pos
+ 
+     def _close_one(self, position_id: int, bar: PriceBar, exit_kind: str, reason: ExitReason) -> Trade | None:
+@@ -340,6 +349,7 @@ class MockBroker:
+             exit_reason=reason,
+         )
+         self._trades.append(trade)
++        self._invalidate_snapshot_cache()
+         return trade
+ 
+     def _close_all_internal(self, bar: PriceBar, exit_kind: str, reason: ExitReason) -> list[Trade]:
+@@ -369,16 +379,38 @@ class MockBroker:
+         return self._realized_pnl(pos, exit_price)
+ 
+     def _snapshot_at(self, bar: PriceBar) -> PortfolioSnapshot:
++        # T028: cache hit 経路 — object reference 同一性判定 (`is`) で
++        # 同一 bar の 2 回目以降の呼び出しは cached PortfolioSnapshot を
++        # 即 return する。演算順序を一切変えないため bit-identical が
++        # 構造的に保証される。
++        cache = self._snapshot_cache
++        if cache is not None and cache[0] is bar:
++            return cache[1]
++        # cache miss: 既存ロジックで compute (ロジック本体は不変)
+         unrealized = sum((self._unrealized_pnl(p, bar) for p in self._positions.values()), Decimal(0))
+         equity = self._cash + unrealized
+         margin_used = sum((p.entry_margin for p in self._positions.values()), Decimal(0))
+         margin_level: Decimal | None = None
+         if margin_used > 0:
+             margin_level = equity / margin_used * Decimal(100)
+-        return PortfolioSnapshot(
++        snapshot = PortfolioSnapshot(
+             cash=self._cash,
+             equity=equity,
+             margin_used=margin_used,
+             margin_level_pct=margin_level,
+             positions=tuple(self._positions.values()),
+         )
++        # T028: cache 書き込み — 1 回の tuple 代入で atomic に更新する。
++        # 例外時はここに到達しないため中間状態が残らない。
++        self._snapshot_cache = (bar, snapshot)
++        return snapshot
++
++    def _invalidate_snapshot_cache(self) -> None:
++        """次回 ``_snapshot_at`` 呼び出しで cache miss を強制する。
++
++        cash / positions の変化時に呼ぶ。bar 進行による invalidate は
++        ``cache[0] is bar`` の identity 比較で自動検出されるため不要。
++
++        単一スロットに ``None`` 代入で invalidate 完了（atomic）。
++        """
++        self._snapshot_cache = None
+diff --git a/src/broker/orders.py b/src/broker/orders.py
+index d55e8e4..3a0ed84 100644
+--- a/src/broker/orders.py
++++ b/src/broker/orders.py
+@@ -17,7 +17,7 @@ class OrderSignal:
+     position_id: int | None = None
+ 
+ 
+-@dataclass
++@dataclass(frozen=True)
+ class Position:
+     id: int
+     instrument: str
+diff --git a/tests/alpha_factory/test_stage_gate_selection_invariance.py b/tests/alpha_factory/test_stage_gate_selection_invariance.py
+new file mode 100644
+index 0000000..4336335
+--- /dev/null
++++ b/tests/alpha_factory/test_stage_gate_selection_invariance.py
+@@ -0,0 +1,233 @@
++"""T028 selection outcome invariance テスト。
++
++broker-snapshot-caching (T028) 導入前後で Stage A 通過判定が bit-identical で
++あることを直接検証する。実際の DslStrategy + ConstantPrimitiveEvaluator +
++run_backtest + evaluate_stage_a を通して PortfolioSnapshot の数値が GA
++selection に影響しないことを保証する。
++
++cache 有効化 (デフォルト) と cache 無効化 (monkeypatch で
++MockBroker._snapshot_at を cache を一切書かない版に差し替え) の 2 経路で
++StageResult.passed / fitness_pen / sharpe_raw / trade_count が完全一致
++することを assert する。
++"""
++
++from __future__ import annotations
++
++from datetime import UTC, datetime, timedelta
++from decimal import Decimal
++from typing import Any, cast
++
++import pytest
++
++from src.alpha_factory.stage_gate import (
++    StageGateConfig,
++    StageResult,
++    evaluate_stage_a,
++)
++from src.backtest.engine import BacktestConfig
++from src.broker.mock import MockBroker
++from src.broker.orders import PortfolioSnapshot
++from src.domain.price import Ohlc, PriceBar
++from src.dsl.genome import (
++    ClauseConfig,
++    Genome,
++    PositionConfig,
++    RiskConfig,
++    SignalConfig,
++)
++from tests._helpers import usd_jpy_meta
++
++
++def _make_oscillating_bars(n_days: int, bars_per_day: int = 4) -> list[PriceBar]:
++    """value が 1 bar ごとに up/down する bars (取引によって PnL が出やすい)。"""
++    bars: list[PriceBar] = []
++    base = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
++    n = 0
++    for d in range(n_days):
++        for h in range(bars_per_day):
++            t = base + timedelta(days=d, hours=h * (24 // max(bars_per_day, 1)))
++            offset = (n % 4) - 2
++            base_price = Decimal("154.00") + Decimal(offset) * Decimal("0.05")
++            bid_close = base_price
++            ask_close = base_price + Decimal("0.01")
++            bars.append(
++                PriceBar(
++                    pair_name="USD_JPY",
++                    bar_time=t,
++                    bid=Ohlc(bid_close, bid_close, bid_close, bid_close),
++                    ask=Ohlc(ask_close, ask_close, ask_close, ask_close),
++                    volume=10,
++                    complete=True,
++                )
++            )
++            n += 1
++    return bars
++
++
++class _AlternatingEvaluator:
++    """bar idx ごとに 1.0 / 0.0 を交互に返す evaluator (entry → exit パターン)。"""
++
++    def evaluate(
++        self, bars: list[PriceBar], idx: int, signal: SignalConfig
++    ) -> float:
++        cycle = idx % 4
++        if cycle == 0:
++            return 1.0
++        if cycle == 1:
++            return 0.1
++        return 0.0
++
++
++def _one_clause_genome(name: str = "g") -> Genome:
++    return Genome(
++        name=name,
++        units=10000,
++        clauses=(
++            ClauseConfig(
++                directional=(SignalConfig(name="D1", weight=1.0),),
++                local_gate=(),
++                weight=1.0,
++            ),
++        ),
++        position=PositionConfig(
++            entry_threshold=0.5, exit_threshold=0.2, max_pos=1, time_stop_min=0
++        ),
++        risk=RiskConfig(stop_atr=2.0, take_atr=3.0),
++    )
++
++
++def _backtest_config() -> BacktestConfig:
++    return BacktestConfig(
++        instrument="USD_JPY",
++        start=datetime(2026, 1, 1, tzinfo=UTC),
++        end=datetime(2027, 1, 1, tzinfo=UTC),
++        initial_cash=Decimal("1000000"),
++        leverage=10,
++        max_spread_bps=Decimal("100"),
++        holding_cost_per_day_bps=Decimal("0"),
++        session_close_utc_hours=frozenset({23}),
++    )
++
++
++def _payload(result: StageResult) -> dict[str, Any]:
++    env = cast(dict[str, Any], dict(result.metrics))
++    return cast(dict[str, Any], env["payload"])
++
++
++def _snapshot_at_no_cache(
++    self: MockBroker, bar: PriceBar
++) -> PortfolioSnapshot:
++    """Cache を使わない _snapshot_at の置き換え実装。
++
++    cache 書き込み / 読み取り経路を完全に skip し、毎回ゼロから compute する。
++    cache 有無で bit-identical を検証するための test 用フック。既存の compute
++    ロジックと完全に同一の演算順序を維持する。
++    """
++    unrealized = sum(
++        (self._unrealized_pnl(p, bar) for p in self._positions.values()),
++        Decimal(0),
++    )
++    equity = self._cash + unrealized
++    margin_used = sum(
++        (p.entry_margin for p in self._positions.values()), Decimal(0),
++    )
++    margin_level: Decimal | None = None
++    if margin_used > 0:
++        margin_level = equity / margin_used * Decimal(100)
++    return PortfolioSnapshot(
++        cash=self._cash,
++        equity=equity,
++        margin_used=margin_used,
++        margin_level_pct=margin_level,
++        positions=tuple(self._positions.values()),
++    )
++
++
++@pytest.fixture
++def no_cache_broker(monkeypatch: pytest.MonkeyPatch) -> None:
++    """MockBroker._snapshot_at を cache を使わない版に差し替える。"""
++    monkeypatch.setattr(MockBroker, "_snapshot_at", _snapshot_at_no_cache)
++
++
++def test_stage_a_outcome_bit_identical_with_and_without_cache(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """Stage A 評価が cache 有効 / 無効で完全一致することを検証する。
++
++    - passed / reason_codes が一致
++    - payload の fitness_raw / fitness_pen / sharpe_raw / trade_count / threshold
++      が bit-identical
++    """
++    bars = _make_oscillating_bars(5, bars_per_day=4)
++    ev = _AlternatingEvaluator()
++    cfg = _backtest_config()
++    stage_cfg = StageGateConfig()
++
++    # 1) cache enabled (default MockBroker implementation)
++    res_with_cache = evaluate_stage_a(
++        _one_clause_genome("g_cache_on"),
++        bars,
++        usd_jpy_meta(),
++        cfg,
++        ev,
++        stage_cfg,
++    )
++
++    # 2) cache disabled: monkeypatch _snapshot_at to never cache
++    monkeypatch.setattr(MockBroker, "_snapshot_at", _snapshot_at_no_cache)
++    res_without_cache = evaluate_stage_a(
++        _one_clause_genome("g_cache_off"),
++        bars,
++        usd_jpy_meta(),
++        cfg,
++        ev,
++        stage_cfg,
++    )
++
++    # passed / reason が一致
++    assert res_with_cache.passed == res_without_cache.passed
++    assert res_with_cache.reason_codes == res_without_cache.reason_codes
++
++    # payload の数値が完全一致 (bit-identical)
++    p_on = _payload(res_with_cache)
++    p_off = _payload(res_without_cache)
++    for key in ("fitness_raw", "fitness_pen", "sharpe_raw", "trade_count", "threshold", "size_norm", "alpha_a"):
++        assert p_on[key] == p_off[key], (
++            f"payload[{key!r}] mismatch: cache_on={p_on[key]!r} "
++            f"cache_off={p_off[key]!r}"
++        )
++
++
++def test_stage_a_trade_count_bit_identical_with_and_without_cache(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """trade_count が cache 有無で一致することの独立 assert。"""
++    bars = _make_oscillating_bars(7, bars_per_day=4)
++    ev = _AlternatingEvaluator()
++    cfg = _backtest_config()
++    stage_cfg = StageGateConfig()
++
++    res_with_cache = evaluate_stage_a(
++        _one_clause_genome("g_tc_on"),
++        bars,
++        usd_jpy_meta(),
++        cfg,
++        ev,
++        stage_cfg,
++    )
++
++    monkeypatch.setattr(MockBroker, "_snapshot_at", _snapshot_at_no_cache)
++    res_without_cache = evaluate_stage_a(
++        _one_clause_genome("g_tc_off"),
++        bars,
++        usd_jpy_meta(),
++        cfg,
++        ev,
++        stage_cfg,
++    )
++
++    p_on = _payload(res_with_cache)
++    p_off = _payload(res_without_cache)
++    assert p_on["trade_count"] == p_off["trade_count"]
++    # sharpe_raw も一致 (trade_count が同じなら sharpe も bit-identical のはず)
++    assert p_on["sharpe_raw"] == p_off["sharpe_raw"]
+diff --git a/tests/broker/test_mock_snapshot_cache.py b/tests/broker/test_mock_snapshot_cache.py
+new file mode 100644
+index 0000000..0be16c1
+--- /dev/null
++++ b/tests/broker/test_mock_snapshot_cache.py
+@@ -0,0 +1,242 @@
++"""MockBroker snapshot cache の invariance / invalidation テスト。
++
++T028 (devnotes/20260425-0158-broker-snapshot-caching) で導入した per-bar
++snapshot cache が以下を満たすことを検証する:
++  - 同一 bar で複数回呼ぶと cache hit（同一オブジェクトを返す）
++  - 新しい bar / position 変化 / cash 変化で cache miss（再計算される）
++  - duplicate timestamp + 別 object でも cache miss（object identity 判定）
++  - cache 有無で PortfolioSnapshot の数値が bit-identical
++"""
++
++from __future__ import annotations
++
++from datetime import UTC, datetime
++from decimal import Decimal
++
++import pytest
++
++from src.broker.mock import InstrumentMeta, MockBroker
++from src.broker.orders import OrderKind, OrderSignal
++from src.domain.price import Ohlc, PriceBar
++
++
++def _meta() -> InstrumentMeta:
++    return InstrumentMeta(
++        oanda_name="USD_JPY",
++        base_currency="USD",
++        quote_currency="JPY",
++        margin_rate=Decimal("0.04"),
++        pip_size=Decimal("0.01"),
++        display_precision=3,
++    )
++
++
++def _bar(hour: int = 0, minute: int = 0, bid_close: str = "154.00") -> PriceBar:
++    bt = datetime(2026, 4, 1, hour, minute, 0, tzinfo=UTC)
++    b = Decimal(bid_close)
++    a = b + Decimal("0.01")
++    return PriceBar(
++        pair_name="USD_JPY",
++        bar_time=bt,
++        bid=Ohlc(b, b, b, b),
++        ask=Ohlc(a, a, a, a),
++        volume=1,
++        complete=True,
++    )
++
++
++def _broker_with_position(side: OrderKind = "open_long") -> tuple[MockBroker, PriceBar]:
++    broker = MockBroker(instrument_meta=_meta())
++    broker.deposit(Decimal("1000000"))
++    bar = _bar()
++    broker.submit(OrderSignal(kind=side, units=10000), leverage=10)
++    broker.fill_pending(bar)
++    broker.mark_to_market(bar)
++    return broker, bar
++
++
++# long/short 両方向で cache invariance を検証
++@pytest.mark.parametrize("side", ["open_long", "open_short"])
++def test_snapshot_cache_hit_returns_identical_object(side: OrderKind) -> None:
++    broker, bar = _broker_with_position(side=side)
++    s1 = broker._snapshot_at(bar)
++    s2 = broker._snapshot_at(bar)
++    assert s1 is s2, "same bar should return cached object (is comparison)"
++
++
++@pytest.mark.parametrize("side", ["open_long", "open_short"])
++def test_snapshot_cache_values_symmetric_for_long_short(side: OrderKind) -> None:
++    """long/short 両方向で cache hit / miss の値一貫性を確認。"""
++    broker, bar = _broker_with_position(side=side)
++    s1 = broker._snapshot_at(bar)
++    broker._invalidate_snapshot_cache()
++    s2 = broker._snapshot_at(bar)
++    assert s1.cash == s2.cash
++    assert s1.equity == s2.equity
++    assert s1.margin_used == s2.margin_used
++    assert s1.margin_level_pct == s2.margin_level_pct
++
++
++def test_snapshot_cache_miss_on_new_bar() -> None:
++    broker, bar = _broker_with_position()
++    s1 = broker._snapshot_at(bar)
++    next_bar = _bar(minute=1, bid_close="154.05")
++    broker.mark_to_market(next_bar)
++    s2 = broker._snapshot_at(next_bar)
++    assert s1 is not s2
++
++
++def test_snapshot_invalidates_on_position_open() -> None:
++    broker = MockBroker(instrument_meta=_meta())
++    broker.deposit(Decimal("1000000"))
++    bar = _bar()
++    broker.mark_to_market(bar)
++    s_before = broker._snapshot_at(bar)
++    # position を open
++    broker.submit(OrderSignal(kind="open_long", units=10000), leverage=10)
++    broker.fill_pending(bar)
++    s_after = broker._snapshot_at(bar)
++    assert s_before is not s_after
++    assert s_before.margin_used == Decimal(0)
++    assert s_after.margin_used > Decimal(0)
++
++
++def test_snapshot_invalidates_on_position_close() -> None:
++    broker, bar = _broker_with_position()
++    s_before = broker._snapshot_at(bar)
++    # close all positions
++    broker.close_all(bar, reason="signal")
++    s_after = broker._snapshot_at(bar)
++    assert s_before is not s_after
++    assert s_after.margin_used == Decimal(0)
++
++
++def test_snapshot_invalidates_on_holding_cost() -> None:
++    broker, bar = _broker_with_position()
++    s_before = broker._snapshot_at(bar)
++    cost = broker.apply_bar_holding_cost(
++        bar, per_day_bps=Decimal("10"), bar_minutes=1,
++    )
++    assert cost > 0
++    s_after = broker._snapshot_at(bar)
++    assert s_before is not s_after
++    assert s_after.cash < s_before.cash
++
++
++def test_snapshot_invalidates_on_deposit() -> None:
++    broker = MockBroker(instrument_meta=_meta())
++    broker.deposit(Decimal("1000000"))
++    bar = _bar()
++    broker.mark_to_market(bar)
++    s_before = broker._snapshot_at(bar)
++    broker.deposit(Decimal("500000"))
++    s_after = broker._snapshot_at(bar)
++    assert s_before is not s_after
++    assert s_after.cash == s_before.cash + Decimal("500000")
++
++
++def test_snapshot_invalidates_on_chained_close() -> None:
++    """T028 Round 1 Critical 対応: force_close_if_margin_call などで
++    _close_all_internal → _close_one × N を実行した直後の snapshot が、
++    毎回再計算された結果と一致すること。
++    """
++    broker = MockBroker(instrument_meta=_meta())
++    broker.deposit(Decimal("1000000"))
++    bar = _bar()
++    broker.submit(OrderSignal(kind="open_long", units=10000), leverage=10)
++    broker.submit(OrderSignal(kind="open_long", units=10000), leverage=10)
++    broker.fill_pending(bar)
++    broker.mark_to_market(bar)
++    s_before = broker._snapshot_at(bar)
++    assert s_before.margin_used > Decimal(0)
++    # chain close: 全 position を同 bar で close
++    broker.close_all(bar, reason="eod")
++    s_after = broker._snapshot_at(bar)
++    assert s_before is not s_after
++    assert s_after.margin_used == Decimal(0)
++    assert len(s_after.positions) == 0
++
++
++def test_snapshot_duplicate_timestamp_different_prices() -> None:
++    """T028 Round 2 Critical 対応: 同一 bar_time を持つ異なる PriceBar オブジェクトを
++    連続で渡した際に cache miss が発生して異なる snapshot を返すこと。
++    bar_time のみで判定していると stale snapshot を返してしまう反証ケース。
++    """
++    broker, bar_a = _broker_with_position()
++    # 同じ bar_time だが別 object (bid_close が異なる)
++    bar_b = _bar(bid_close="154.50")
++    assert bar_a.bar_time == bar_b.bar_time
++    assert bar_a is not bar_b
++    s_a = broker._snapshot_at(bar_a)
++    s_b = broker._snapshot_at(bar_b)
++    assert s_a is not s_b, "different bar objects should always miss cache"
++    # 価格が違うので unrealized PnL も変わる → equity が異なる
++    assert s_a.equity != s_b.equity
++
++
++def test_snapshot_object_reference_identity() -> None:
++    """T028 Round 3 Critical 対応: object reference cache が id 再利用問題を
++    回避することを模擬検証する。同一 bar_time + 同一内容だが別 object の
++    PriceBar で cache miss を確認。
++    """
++    broker, bar_a = _broker_with_position()
++    # 内容完全同一だが別 object
++    bar_clone = PriceBar(
++        pair_name=bar_a.pair_name,
++        bar_time=bar_a.bar_time,
++        bid=bar_a.bid,
++        ask=bar_a.ask,
++        volume=bar_a.volume,
++        complete=bar_a.complete,
++    )
++    assert bar_a is not bar_clone
++    assert bar_a == bar_clone  # frozen dataclass equality
++    s_a = broker._snapshot_at(bar_a)
++    s_clone = broker._snapshot_at(bar_clone)
++    assert s_a is not s_clone  # reference 判定なので miss
++    # ただし内容は同一なので値は一致
++    assert s_a.cash == s_clone.cash
++    assert s_a.equity == s_clone.equity
++    assert s_a.margin_used == s_clone.margin_used
++
++
++def test_snapshot_values_bit_identical_cache_vs_no_cache() -> None:
++    """cache 有効 / 無効で equity / margin_used / margin_level_pct / positions
++    が完全一致することを 100 bar 分 record して確認。selection invariance の
++    原子的保証。
++    """
++    broker = MockBroker(instrument_meta=_meta())
++    broker.deposit(Decimal("1000000"))
++    broker.submit(OrderSignal(kind="open_long", units=10000), leverage=10)
++
++    bars = [
++        _bar(hour=h, minute=m, bid_close=f"{154 + (h * 60 + m) * 0.001:.3f}")
++        for h in range(5) for m in range(20)
++    ]
++
++    values_with_cache: list[tuple[Decimal, Decimal, Decimal, Decimal | None]] = []
++    for bar in bars:
++        broker.fill_pending(bar)
++        broker.mark_to_market(bar)
++        s = broker.snapshot()
++        values_with_cache.append(
++            (s.cash, s.equity, s.margin_used, s.margin_level_pct)
++        )
++
++    # もう一度 broker を作り直して cache 無効化 (手動で invalidate を連打して
++    # 常に miss を強制) で同じ bars を流す
++    broker2 = MockBroker(instrument_meta=_meta())
++    broker2.deposit(Decimal("1000000"))
++    broker2.submit(OrderSignal(kind="open_long", units=10000), leverage=10)
++    values_without_cache: list[tuple[Decimal, Decimal, Decimal, Decimal | None]] = []
++    for bar in bars:
++        broker2.fill_pending(bar)
++        broker2.mark_to_market(bar)
++        broker2._invalidate_snapshot_cache()  # 毎回強制 miss
++        s = broker2.snapshot()
++        values_without_cache.append(
++            (s.cash, s.equity, s.margin_used, s.margin_level_pct)
++        )
++
++    assert values_with_cache == values_without_cache, \
++        "snapshot values must be bit-identical with/without cache"
+diff --git a/tests/broker/test_mock_snapshot_invariance.py b/tests/broker/test_mock_snapshot_invariance.py
+new file mode 100644
+index 0000000..ccd824f
+--- /dev/null
++++ b/tests/broker/test_mock_snapshot_invariance.py
+@@ -0,0 +1,94 @@
++"""MockBroker snapshot の immutability invariance テスト。
++
++T028 施策 0 で Position を @dataclass(frozen=True) 化したことを受け、以下を検証:
++  - Position field 書き換えが FrozenInstanceError を投げる
++  - snapshot.positions の値が broker._positions.values() と等価 (==)
++  - Position を mutate しようとすると即座に例外で失敗する
++"""
++
++from __future__ import annotations
++
++from dataclasses import FrozenInstanceError
++from datetime import UTC, datetime
++from decimal import Decimal
++
++import pytest
++
++from src.broker.mock import InstrumentMeta, MockBroker
++from src.broker.orders import OrderSignal, Position
++from src.domain.price import Ohlc, PriceBar
++
++
++def _meta() -> InstrumentMeta:
++    return InstrumentMeta(
++        oanda_name="USD_JPY",
++        base_currency="USD",
++        quote_currency="JPY",
++        margin_rate=Decimal("0.04"),
++        pip_size=Decimal("0.01"),
++        display_precision=3,
++    )
++
++
++def _bar() -> PriceBar:
++    bt = datetime(2026, 4, 1, 0, 0, 0, tzinfo=UTC)
++    b = Decimal("154.00")
++    a = b + Decimal("0.01")
++    return PriceBar(
++        pair_name="USD_JPY", bar_time=bt,
++        bid=Ohlc(b, b, b, b), ask=Ohlc(a, a, a, a),
++        volume=1, complete=True,
++    )
++
++
++def test_position_is_frozen() -> None:
++    """Position が @dataclass(frozen=True) で field 書き換えが禁止されていること。"""
++    pos = Position(
++        id=1, instrument="USD_JPY", side="long", units=10000,
++        entry_price=Decimal("154.00"),
++        entry_time=datetime(2026, 4, 1, tzinfo=UTC),
++        entry_margin=Decimal("5000"), leverage=10,
++    )
++    with pytest.raises(FrozenInstanceError):
++        pos.entry_price = Decimal("155.00")  # type: ignore[misc]
++    with pytest.raises(FrozenInstanceError):
++        pos.units = 20000  # type: ignore[misc]
++    with pytest.raises(FrozenInstanceError):
++        pos.entry_margin = Decimal("1000")  # type: ignore[misc]
++
++
++def test_position_value_equality() -> None:
++    """frozen dataclass としての value equality が機能すること。"""
++    pos_a = Position(
++        id=1, instrument="USD_JPY", side="long", units=10000,
++        entry_price=Decimal("154.00"),
++        entry_time=datetime(2026, 4, 1, tzinfo=UTC),
++        entry_margin=Decimal("5000"), leverage=10,
++    )
++    pos_b = Position(
++        id=1, instrument="USD_JPY", side="long", units=10000,
++        entry_price=Decimal("154.00"),
++        entry_time=datetime(2026, 4, 1, tzinfo=UTC),
++        entry_margin=Decimal("5000"), leverage=10,
++    )
++    # 別 object だが値が同一 → equality True
++    assert pos_a is not pos_b
++    assert pos_a == pos_b
++
++
++def test_snapshot_positions_equal_broker_positions() -> None:
++    """snapshot.positions の内容が broker._positions.values() と == で等価。
++
++    identity ではなく equality で比較（将来の防御コピー化にも耐える）。
++    """
++    broker = MockBroker(instrument_meta=_meta())
++    broker.deposit(Decimal("1000000"))
++    bar = _bar()
++    broker.submit(OrderSignal(kind="open_long", units=10000), leverage=10)
++    broker.fill_pending(bar)
++    broker.mark_to_market(bar)
++    snap = broker.snapshot()
++    broker_positions = list(broker._positions.values())
++    assert list(snap.positions) == broker_positions, (
++        "snapshot.positions value must equal broker._positions.values()"
++    )
