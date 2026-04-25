@@ -164,9 +164,10 @@ def _make_archive() -> GenomeArchive:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_has_30_columns() -> None:
-    # T-sharpe Phase 1A: trade_sharpe_raw + sharpe_calc_version の 2 列を追加 (28→30)
-    assert len(GENOMES_SCHEMA.names) == 30
+def test_schema_has_33_columns() -> None:
+    # T-sharpe Phase 1A: trade_sharpe_raw + sharpe_calc_version (28→30)
+    # T035: n_fold_effective + positive_fold_ratio_effective + stage_b_reason_codes (30→33)
+    assert len(GENOMES_SCHEMA.names) == 33
     expected = {
         "run_id", "run_number", "generation", "individual_name",
         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
@@ -177,6 +178,9 @@ def test_schema_has_30_columns() -> None:
         "dsr", "ii_lite_pass", "graduated",
         # T-sharpe Phase 1A
         "trade_sharpe_raw", "sharpe_calc_version",
+        # T035: Stage B 観察可能性
+        "n_fold_effective", "positive_fold_ratio_effective",
+        "stage_b_reason_codes",
     }
     assert set(GENOMES_SCHEMA.names) == expected
 
@@ -195,6 +199,9 @@ def test_template_default_values() -> None:
         "dsr", "ii_lite_pass",
         # T-sharpe Phase 1A: trade_sharpe_raw も nullable -> None
         "trade_sharpe_raw",
+        # T035
+        "n_fold_effective", "positive_fold_ratio_effective",
+        "stage_b_reason_codes",
     ):
         assert t[k] is None, f"{k} should default to None"
     # non-null bool -> False
@@ -680,6 +687,9 @@ def test_schema_nullable_attributes() -> None:
         "dsr", "ii_lite_pass",
         # T-sharpe Phase 1A
         "trade_sharpe_raw", "sharpe_calc_version",
+        # T035
+        "n_fold_effective", "positive_fold_ratio_effective",
+        "stage_b_reason_codes",
     }
     for f in GENOMES_SCHEMA:
         if f.name in nullable_cols:
@@ -787,3 +797,82 @@ def test_get_legacy_bar_sharpe_returns_value_when_version_missing() -> None:
     """旧 archive (sharpe_calc_version 列なし) は v1 とみなして読める."""
     row = {"sharpe": 18.0}
     assert GenomeArchive.get_legacy_bar_sharpe(row) == pytest.approx(18.0)
+
+
+# T035 ========================================================================
+
+
+def test_collect_stage_b_writes_reason_codes_string() -> None:
+    """stage_b_reason_codes が ';' 区切り文字列として archive 行に書かれる."""
+    from src.alpha_factory.archive import GenomeArchive
+    from src.alpha_factory.stage_gate import StageResult
+
+    arc = GenomeArchive(run_id="test_run", run_number=1)
+    g = _stub_genome("g0_i0")
+    sr = StageResult(
+        stage="B",
+        passed=False,
+        metrics={
+            "stage": "B",
+            "genome_name": "g0_i0",
+            "n_bars": 100,
+            "wall_time_seconds": 0.1,
+            "payload": {
+                "n_fold": 2,
+                "n_fold_unavailable": 1,
+                "n_fold_effective": 1,
+                "oos_sharpes": (0.5, 0.0),
+                "median_oos_sharpe": 0.25,
+                "positive_fold_ratio": 0.5,
+                "positive_fold_ratio_effective": 1.0,
+                "dsr": None,
+                "is_full_sharpe": None,
+                "is_full_total_pnl": None,
+                "is_full_trade_count": None,
+            },
+        },
+        reason_codes=("median_oos_sharpe<min", "all_folds_unavailable"),
+    )
+    arc.collect_stage_b(g, lane_id="lane1", generation=0, stage_result=sr, instrument="EUR_JPY")
+    rows = list(arc._rows.values())
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["stage_b_reason_codes"] == "median_oos_sharpe<min;all_folds_unavailable"
+    assert row["n_fold_effective"] == 1
+    assert row["positive_fold_ratio_effective"] == 1.0
+
+
+def test_collect_stage_b_writes_none_reason_codes_when_passed() -> None:
+    """passed=True で reason_codes が空タプル → archive で None."""
+    from src.alpha_factory.archive import GenomeArchive
+    from src.alpha_factory.stage_gate import StageResult
+
+    arc = GenomeArchive(run_id="test_run", run_number=1)
+    g = _stub_genome("g0_i0")
+    sr = StageResult(
+        stage="B",
+        passed=True,
+        metrics={
+            "stage": "B",
+            "genome_name": "g0_i0",
+            "n_bars": 100,
+            "wall_time_seconds": 0.1,
+            "payload": {
+                "n_fold": 3,
+                "n_fold_unavailable": 0,
+                "n_fold_effective": 3,
+                "oos_sharpes": (0.5, 0.6, 0.4),
+                "median_oos_sharpe": 0.5,
+                "positive_fold_ratio": 1.0,
+                "positive_fold_ratio_effective": 1.0,
+                "dsr": None,
+                "is_full_sharpe": 0.5,
+                "is_full_total_pnl": 1000.0,
+                "is_full_trade_count": 50,
+            },
+        },
+        reason_codes=(),
+    )
+    arc.collect_stage_b(g, lane_id="lane1", generation=0, stage_result=sr, instrument="EUR_JPY")
+    rows = list(arc._rows.values())
+    assert rows[0]["stage_b_reason_codes"] is None

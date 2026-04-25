@@ -539,9 +539,11 @@ class TestStageB:
         for key in (
             "n_fold",
             "n_fold_unavailable",
+            "n_fold_effective",
             "oos_sharpes",
             "median_oos_sharpe",
             "positive_fold_ratio",
+            "positive_fold_ratio_effective",
             "dsr",
             "is_full_sharpe",
             "is_full_total_pnl",
@@ -1077,3 +1079,88 @@ class TestStageGateSmoke:
         assert ra.stage == "A"
         assert rb.stage == "B"
         assert rc.stage == "C"
+
+
+# T035: Stage B 観察可能性 ====================================================
+
+
+class TestT035StageBObservability:
+    """n_fold_effective / positive_fold_ratio_effective メトリクス追加."""
+
+    def test_stage_b_metrics_payload_contains_n_fold_effective(self) -> None:
+        bars = _make_continuous_bars(20, bars_per_day=4)
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        stage_cfg = StageGateConfig(
+            wf_train_days=3,
+            wf_test_days=2,
+            wf_step_days=2,
+            wf_embargo_days=0,
+        )
+        res = evaluate_stage_b(
+            _one_clause_genome("g_t035"),
+            bars,
+            usd_jpy_meta(),
+            _backtest_config(),
+            ev,
+            stage_cfg,
+        )
+        env = _envelope(res)
+        payload = cast(dict[str, Any], env["payload"])
+        assert "n_fold_effective" in payload
+        assert isinstance(payload["n_fold_effective"], int)
+
+    def test_stage_b_n_fold_effective_equals_total_minus_unavailable(
+        self,
+    ) -> None:
+        bars = _make_continuous_bars(20, bars_per_day=4)
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        stage_cfg = StageGateConfig(
+            wf_train_days=3,
+            wf_test_days=2,
+            wf_step_days=2,
+            wf_embargo_days=0,
+        )
+        res = evaluate_stage_b(
+            _one_clause_genome("g_t035"),
+            bars,
+            usd_jpy_meta(),
+            _backtest_config(),
+            ev,
+            stage_cfg,
+        )
+        payload = cast(dict[str, Any], _envelope(res)["payload"])
+        assert (
+            payload["n_fold_effective"]
+            == payload["n_fold"] - payload["n_fold_unavailable"]
+        )
+
+    def test_stage_b_positive_fold_ratio_effective_uses_only_available_folds(
+        self,
+    ) -> None:
+        """全 fold unavailable のとき positive_fold_ratio_effective=None。
+
+        ConstantPrimitiveEvaluator(0.0) は全 fold で no-trade → unavailable。
+        effective サンプル 0 → positive_fold_ratio_effective が None になる。
+        """
+        bars = _make_continuous_bars(20, bars_per_day=4)
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        stage_cfg = StageGateConfig(
+            wf_train_days=3,
+            wf_test_days=2,
+            wf_step_days=2,
+            wf_embargo_days=0,
+        )
+        res = evaluate_stage_b(
+            _one_clause_genome("g_t035"),
+            bars,
+            usd_jpy_meta(),
+            _backtest_config(),
+            ev,
+            stage_cfg,
+        )
+        payload = cast(dict[str, Any], _envelope(res)["payload"])
+        # 全 fold unavailable → effective sample 0 → None
+        if payload["n_fold_effective"] == 0:
+            assert payload["positive_fold_ratio_effective"] is None
+        else:
+            assert isinstance(payload["positive_fold_ratio_effective"], float)

@@ -249,3 +249,27 @@ bounded quantile tracking with hysteresis (dead-band) + delta clamp。
   - cross-pair-evaluation-shadow (Stage C `CrossPairEvaluator` 実装)
   - cross-pair の hard gate 化 (Phase 4)
   - calibrate-gate v2: per-lane / LLM 判断 / distribution shift detector (別 TODO)
+
+## T035: Stage B 観察可能性ハード契約 (Metric Completeness Gate)
+
+`evaluate_stage_b` の payload に以下メトリクスを追加 (monitor only、`passed` 判定への影響なし):
+
+- `n_fold_effective`: `n_fold - n_fold_unavailable` (実評価できた fold 数)
+- `positive_fold_ratio_effective`: 有効 fold のみで再計算した positive ratio
+- `n_unique_dates` / `wf_min_unique_dates`: skip-path 時 (LaneManager) に観測日数充足の根拠を残す
+
+### Reason Code 語彙 (Stage B)
+
+| reason_code | 発火条件 |
+|-------------|---------|
+| `no_folds` | `make_wf_folds` が空 list (本来 LaneManager skip-path で先回り防止) |
+| `insufficient_folds` | `n_fold == 1` |
+| `median_oos_sharpe<min` | median_oos_sharpe < `stage_b_median_oos_sharpe_min` |
+| `positive_fold_ratio<min` | positive_ratio < `stage_b_positive_fold_min` |
+| `all_folds_unavailable` | 全 fold で no-trade による sharpe=None |
+| `stage_b_window_underfilled` | LaneManager が Stage B 評価前に observed_dates < (train+embargo+test) を検出し skip-path 適用 |
+
+### archive 列追加 (T035)
+- `n_fold_effective` (int64, nullable)
+- `positive_fold_ratio_effective` (float64, nullable)
+- `stage_b_reason_codes` (string, nullable; ";" 区切りで複数 reason 永続化)

@@ -260,11 +260,11 @@ zenigame-fx Alpha Factory の全ドキュメントから参照される横断用
 
 ### Genome Archive
 
-`<a id="genome-archive"></a>` Genome Archive — `src/alpha_factory/archive.py::GenomeArchive`（T015）。1 Run 分の GA 個体評価結果（28 カラム）を buffering し、`flush()` で `.cache/alpha_factory/runs/genomes_{run_id}.parquet` に書き出す永続化基盤。主キーは複合キー `(lane_id, generation, individual_name)`。`collect_stage_a/b/c` で Stage 別に partial fill、`mark_graduated(lane_id, generation, individual_name)` で Tier 1 → Graduation lane 卒業 flag。
+`<a id="genome-archive"></a>` Genome Archive — `src/alpha_factory/archive.py::GenomeArchive`（T015）。1 Run 分の GA 個体評価結果（33 カラム; T015 当初 28 → T-sharpe Phase 1A で +2 → T035 で +3）を buffering し、`flush()` で `.cache/alpha_factory/runs/genomes_{run_id}.parquet` に書き出す永続化基盤。主キーは複合キー `(lane_id, generation, individual_name)`。`collect_stage_a/b/c` で Stage 別に partial fill、`mark_graduated(lane_id, generation, individual_name)` で Tier 1 → Graduation lane 卒業 flag。
 
 ### GENOMES_SCHEMA
 
-`<a id="genomes-schema"></a>` GENOMES_SCHEMA — `src/alpha_factory/archive.py` の `pyarrow.Schema`（T015）。28 カラム flat schema で、ネスト構造は `genome_json` (str) に集約。run_id / run_number / generation / individual_name / instrument / lane_id / parent_a / parent_b / genome_json / fitness_raw / fitness_pen / stage_a_pass / stage_b_pass / stage_c_pass / trade_count / total_pnl / sharpe / sortino / calmar / max_drawdown_pct / active_clause / n_nodes / bootstrap_ci_lower / bootstrap_ci_upper / fold_sign_ratio / dsr / ii_lite_pass / graduated。列意味論 SSOT: [concepts/genome-archive-schema.md](concepts/genome-archive-schema.md)。
+`<a id="genomes-schema"></a>` GENOMES_SCHEMA — `src/alpha_factory/archive.py` の `pyarrow.Schema`（T015）。33 カラム flat schema (T015 当初 28 + T-sharpe Phase 1A `trade_sharpe_raw` `sharpe_calc_version` + T035 `n_fold_effective` `positive_fold_ratio_effective` `stage_b_reason_codes`) で、ネスト構造は `genome_json` (str) に集約。run_id / run_number / generation / individual_name / instrument / lane_id / parent_a / parent_b / genome_json / fitness_raw / fitness_pen / stage_a_pass / stage_b_pass / stage_c_pass / trade_count / total_pnl / sharpe / sortino / calmar / max_drawdown_pct / active_clause / n_nodes / bootstrap_ci_lower / bootstrap_ci_upper / fold_sign_ratio / dsr / ii_lite_pass / graduated / trade_sharpe_raw / sharpe_calc_version / n_fold_effective / positive_fold_ratio_effective / stage_b_reason_codes。列意味論 SSOT: [concepts/genome-archive-schema.md](concepts/genome-archive-schema.md)。
 
 ### Monotonic Enrich
 

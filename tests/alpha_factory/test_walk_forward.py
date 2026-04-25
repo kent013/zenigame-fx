@@ -7,7 +7,11 @@ from decimal import Decimal
 
 import pytest
 
-from src.alpha_factory.walk_forward import make_wf_folds
+from src.alpha_factory.walk_forward import (
+    make_wf_folds,
+    n_unique_dates,
+    wf_min_unique_dates,
+)
 from src.domain.price import Ohlc, PriceBar
 
 
@@ -213,3 +217,29 @@ def test_make_wf_folds_step_progression() -> None:
         train_starts.append(min(b.bar_time.date() for b in train_bars))
     diffs = [(train_starts[i + 1] - train_starts[i]).days for i in range(len(train_starts) - 1)]
     assert all(d == 5 for d in diffs)
+
+
+# T035 helpers ===============================================================
+
+
+def test_wf_min_unique_dates_returns_train_plus_embargo_plus_test() -> None:
+    assert wf_min_unique_dates(120, 1, 20) == 141
+    assert wf_min_unique_dates(0, 0, 0) == 0
+    assert wf_min_unique_dates(50, 5, 10) == 65
+
+
+def test_n_unique_dates_counts_distinct_utc_dates() -> None:
+    bars = _continuous_bars(10, bars_per_day=24)
+    assert n_unique_dates(bars) == 10
+    bars_empty: list[PriceBar] = []
+    assert n_unique_dates(bars_empty) == 0
+
+
+def test_make_wf_folds_uses_wf_min_unique_dates_internally() -> None:
+    """train+embargo+test > n_unique_dates なら空 list (helper SSOT 一致)."""
+    bars = _continuous_bars(50, bars_per_day=1)
+    # 30+1+25 = 56 > 50 → 空
+    assert make_wf_folds(bars, train_days=30, embargo_days=1, test_days=25, step_days=5) == []
+    # 30+1+10 = 41 <= 50 → 1 fold 以上
+    folds = make_wf_folds(bars, train_days=30, embargo_days=1, test_days=10, step_days=5)
+    assert len(folds) >= 1

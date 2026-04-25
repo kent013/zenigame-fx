@@ -389,6 +389,8 @@ def evaluate_stage_b(
     n_fold = len(folds)
     n_fold_unavailable = 0
     oos_sharpes_imputed: list[float] = []
+    # T035: fold ごとの unavailable フラグを保持し effective 集計に使う
+    fold_was_unavailable: list[bool] = []
 
     # 18 ヶ月全体 IS monitor
     is_full_sharpe: float | None = None
@@ -449,21 +451,38 @@ def evaluate_stage_b(
         if fold_sharpe is None:
             n_fold_unavailable += 1
             oos_sharpes_imputed.append(0.0)
+            fold_was_unavailable.append(True)
         else:
             oos_sharpes_imputed.append(fold_sharpe)
+            fold_was_unavailable.append(False)
 
     # 集計と判定
+    n_fold_effective = n_fold - n_fold_unavailable
     median_oos: float | None = None
     positive_ratio: float | None = None
+    positive_ratio_effective: float | None = None
+    # effective fold (unavailable=False のもの) のみを抜き出した OOS Sharpe 列
+    effective_oos: list[float] = [
+        s for i, s in enumerate(oos_sharpes_imputed)
+        if not fold_was_unavailable[i]
+    ]
     if n_fold == 0:
         reasons.append("no_folds")
     elif n_fold == 1:
         reasons.append("insufficient_folds")
         median_oos = float(oos_sharpes_imputed[0])
         positive_ratio = 1.0 if oos_sharpes_imputed[0] > 0 else 0.0
+        if effective_oos:
+            positive_ratio_effective = (
+                sum(1 for s in effective_oos if s > 0) / len(effective_oos)
+            )
     else:
         median_oos = float(_stats.median(oos_sharpes_imputed))
         positive_ratio = sum(1 for s in oos_sharpes_imputed if s > 0) / n_fold
+        if effective_oos:
+            positive_ratio_effective = (
+                sum(1 for s in effective_oos if s > 0) / len(effective_oos)
+            )
         if median_oos < stage_config.stage_b_median_oos_sharpe_min:
             reasons.append("median_oos_sharpe<min")
         if positive_ratio < stage_config.stage_b_positive_fold_min:
@@ -484,9 +503,11 @@ def evaluate_stage_b(
         "payload": {
             "n_fold": n_fold,
             "n_fold_unavailable": n_fold_unavailable,
+            "n_fold_effective": n_fold_effective,
             "oos_sharpes": tuple(oos_sharpes_imputed),
             "median_oos_sharpe": median_oos,
             "positive_fold_ratio": positive_ratio,
+            "positive_fold_ratio_effective": positive_ratio_effective,
             "dsr": None,  # Phase 4 で hard 化
             "is_full_sharpe": is_full_sharpe,
             "is_full_total_pnl": is_full_total_pnl,
