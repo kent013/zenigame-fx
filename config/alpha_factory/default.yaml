@@ -54,10 +54,15 @@ ga:
     enable_fallback_when_all_infeasible: true   # 全個体 infeasible で旧 4 要素にフォールバック
 
 # 使命達成判定 — 全てを満たす個体が出現すれば使命達成
+# T042 Phase 0: sharpe_min は **annualized Sharpe** スケール (S_annual ≈ S_trade ×
+# sqrt(λ_day × 252) で換算後の値で比較する)。GA fitness や payload に出る
+# trade_sharpe_raw とはスケールが異なる。
+# 詳細: docs/alpha_factory/sharpe-rescale.md
+# 学術引用: Andrew W. Lo (2002), "The Statistics of Sharpe Ratios".
 live_criteria:
-  sharpe_min: 1.0
-  total_pnl_min: 50000  # 50k JPY over dataset window
-  max_drawdown_max: 0.2  # 20%
+  sharpe_min: 1.0           # annualized Sharpe (T042 換算後比較)
+  total_pnl_min: 50000      # 50k JPY over dataset window
+  max_drawdown_max: 0.2     # 20%
   trade_count_min: 50
   trade_count_max: 5000
 
@@ -99,7 +104,14 @@ stage_gate:
     wf_test_days: 10
     wf_step_days: 10
     wf_embargo_days: 1
-    median_oos_sharpe_min: 0.20
+    # T042 Phase 0: trade-level スケール (per-fold trade_sharpe_raw との比較)。
+    # Stage B は per-fold WF OOS の中央値を判定するため annualized でなく
+    # trade-level 値を使う (Stage A threshold と同じスケール)。
+    # 旧 0.20 は v1 bar-level 想定の legacy 値で、Run 14-16 replay
+    # (reports/sharpe-rescale/) では trade-level median 0.05〜0.19。
+    # 0.05 で 50%程度 fold が pass する想定で出発、calibrate-gate では
+    # 制御していないため Phase 1 の per-fold 分布測定に基づき再校正予定。
+    median_oos_sharpe_min: 0.05  # trade-level (T042 再校正)
     positive_fold_min: 0.60
     dsr_min: 0.0                # monitor_only (Phase 4 で hard 化)
   stage_c:

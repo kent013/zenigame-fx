@@ -21,9 +21,11 @@ from typing import Any, ClassVar, cast
 import pytest
 
 from src.alpha_factory.stage_gate import (
+    TRADING_DAYS_PER_YEAR,
     CrossPairResult,
     StageGateConfig,
     StageResult,
+    _annualize_trade_sharpe,
     _compute_mission_score,
     evaluate_stage_a,
     evaluate_stage_b,
@@ -1309,3 +1311,106 @@ class TestT043MissionScore:
         # base が trade を出さない場合は None になる (defensive)
         ms = payload["mission_score"]
         assert ms is None or (isinstance(ms, float) and 0.1 <= ms <= 1.0)
+
+
+# T042: trade-level → annualized Sharpe 換算 ===================================
+
+
+class TestT042AnnualizeTradeSharpe:
+    """live_criteria.sharpe_min (annualized) と GA fitness (trade-level) の
+    スケール乖離を解消する換算ヘルパ。"""
+
+    def test_basic_formula(self) -> None:
+        """S_annual = S_trade × sqrt(λ_day × 252)、λ_day = trade_count / window."""
+        s = _annualize_trade_sharpe(0.2, trade_count=60, window_days=60)
+        assert s is not None
+        assert s == pytest.approx(0.2 * (TRADING_DAYS_PER_YEAR ** 0.5), abs=1e-9)
+
+    def test_returns_none_when_sharpe_is_none(self) -> None:
+        assert _annualize_trade_sharpe(None, 60, 60) is None
+
+    def test_returns_none_when_trade_count_zero(self) -> None:
+        assert _annualize_trade_sharpe(0.5, 0, 60) is None
+
+    def test_returns_none_when_window_zero(self) -> None:
+        assert _annualize_trade_sharpe(0.5, 60, 0) is None
+
+    def test_returns_none_when_sharpe_nan(self) -> None:
+        assert _annualize_trade_sharpe(float("nan"), 60, 60) is None
+
+    def test_returns_none_when_sharpe_inf(self) -> None:
+        assert _annualize_trade_sharpe(float("inf"), 60, 60) is None
+
+
+class TestT042StageGateConfigDefaults:
+    """StageGateConfig() のデフォルト値が T042 後の trade-level スケールに揃っていること。
+
+    Codex Round-1 [Critical] への対応: yaml ローダ非経由で StageGateConfig() を
+    直接生成するパス (テスト・手動実行) でも新スケールが適用されるように、
+    dataclass デフォルトと yaml の両方を 0.05 に揃える。
+    """
+
+    def test_default_stage_b_median_oos_sharpe_min_is_trade_level_005(self) -> None:
+        cfg = StageGateConfig()
+        assert cfg.stage_b_median_oos_sharpe_min == pytest.approx(0.05, abs=1e-9)
+
+
+class TestT042StageCLiveCriteriaAnnualized:
+    """Stage C の live_criteria.sharpe 判定が annualized で行われること。"""
+
+    def test_payload_exposes_trade_sharpe_annualized(self) -> None:
+        bars = _make_continuous_bars(3, bars_per_day=4)
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        cfg = _backtest_config(max_spread_bps=Decimal("10"))
+        res = evaluate_stage_c(
+            _one_clause_genome(),
+            bars,
+            usd_jpy_meta(),
+            cfg,
+            ev,
+            StageGateConfig(),
+        )
+        payload = cast(dict[str, Any], _envelope(res)["payload"])
+        # base が trade を出さない場合 None、出した場合 float
+        assert "trade_sharpe_annualized" in payload
+        a = payload["trade_sharpe_annualized"]
+        assert a is None or isinstance(a, float)
+
+    def test_lc_sharpe_passes_when_annualized_above_threshold(self) -> None:
+        """trade-level Sharpe を annualized 換算した値で sharpe_min と比較する。
+
+        相応に高い oscillating 価格 + alternating evaluator で trade を出させ、
+        annualized Sharpe が sharpe_min を超える設定で lc_pass['sharpe']=True
+        になることを確認する。
+
+        live_criteria を緩めて sharpe_min=0.5 (annualized) にし、他軸も緩める。
+        """
+        bars = _make_oscillating_bars(5, bars_per_day=4)
+        ev = _AlternatingEvaluator()
+        relaxed_lc = {
+            "sharpe_min": 0.5,  # annualized 0.5 (緩い)
+            "total_pnl_min": -1e9,
+            "max_drawdown_max": 1.0,
+            "trade_count_min": 0,
+            "trade_count_max": 1_000_000,
+        }
+        stage_cfg = StageGateConfig(
+            live_criteria=relaxed_lc,
+            spread_stress_min_total_pnl=-1e9,
+            spread_stress_min_sharpe=-1e9,
+            trade_count_min_for_sharpe=2,
+        )
+        res = evaluate_stage_c(
+            _one_clause_genome(),
+            bars,
+            usd_jpy_meta(),
+            _backtest_config(),
+            ev,
+            stage_cfg,
+        )
+        payload = cast(dict[str, Any], _envelope(res)["payload"])
+        # trade を出していれば annualized が計算され lc.sharpe_pass が True か False か明確
+        if payload["trade_sharpe_annualized"] is not None:
+            ann = float(payload["trade_sharpe_annualized"])
+            expected = ann >= 0.5
+            assert payload["live_criteria_pass"]["sharpe"] is expected

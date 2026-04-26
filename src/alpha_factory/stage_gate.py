@@ -21,6 +21,7 @@ Alpha Factory の Genome 評価パイプラインの中核。3 つの Stage を 
 
 from __future__ import annotations
 
+import math
 import statistics as _stats
 import time as _time
 from collections.abc import Mapping
@@ -80,7 +81,11 @@ class StageGateConfig:
     wf_test_days: int = 20
     wf_step_days: int = 20
     wf_embargo_days: int = 1
-    stage_b_median_oos_sharpe_min: float = 0.20
+    # T042 Phase 0: trade-level スケール (per-fold trade_sharpe_raw との比較)。
+    # 旧 0.20 は v1 bar-level 想定の legacy 値。Run 14-16 archive replay
+    # (reports/sharpe-rescale/) で trade-level 分布が 0.05〜0.19 中央域だったため
+    # 0.05 へ再校正した。詳細: docs/alpha_factory/sharpe-rescale.md
+    stage_b_median_oos_sharpe_min: float = 0.05
     stage_b_positive_fold_min: float = 0.60
     stage_b_dsr_min: float = 0.0  # monitor only (Phase 4 で hard 化)
 
@@ -527,6 +532,43 @@ def evaluate_stage_b(
 # ---------------------------------------------------------------------------
 
 
+# T042: trade-level Sharpe → annualized Sharpe 換算 (Phase 0 minimum)。
+# - Stage C の live_criteria.sharpe_min (= 1.0 annualized) と GA fitness が
+#   trade-level Sharpe (v2) で乖離していた問題を解消する。
+# - 換算式: S_annual ≈ S_trade × sqrt(λ_day × 252) / sqrt(adj_corr)
+#   Phase 0 では adj_corr=1 (no autocorrelation correction)、λ_day=trade_count/window。
+# - 学術引用: Andrew W. Lo (2002), "The Statistics of Sharpe Ratios",
+#   Financial Analysts Journal 58(4), 36-52.
+# - 詳細: docs/alpha_factory/sharpe-rescale.md
+TRADING_DAYS_PER_YEAR: Final[int] = 252
+
+
+def _annualize_trade_sharpe(
+    trade_sharpe_raw: float | None,
+    trade_count: int,
+    window_days: int,
+) -> float | None:
+    """trade-level Sharpe を annualized Sharpe に換算する。
+
+    入力が None / 非有限 / trade_count<=0 / window_days<=0 のいずれかなら
+    None を返す (caller 側で「換算不能 = lc.sharpe 判定不能 = 失格」扱いを期待)。
+
+    Args:
+        trade_sharpe_raw: trade-level Sharpe ratio (μ_trade / σ_trade)。
+        trade_count: 観測 window 内の trade 数。
+        window_days: 観測 window 日数。
+
+    Returns:
+        年率換算 Sharpe、または None。
+    """
+    if trade_sharpe_raw is None or trade_count <= 0 or window_days <= 0:
+        return None
+    if not math.isfinite(trade_sharpe_raw):
+        return None
+    lambda_day = trade_count / window_days
+    return trade_sharpe_raw * math.sqrt(lambda_day * TRADING_DAYS_PER_YEAR)
+
+
 # T043: mission_score (live_criteria 4 軸 soft 合算)
 # - 詳細設計: devnotes/20260426-1030-phase0-mission-score/detailed-design.md
 # - 各軸 i: score_i = clip((metric - lower) / (target - lower), 0, 1)
@@ -665,8 +707,10 @@ def evaluate_stage_c(
             trade_count_min_for_sharpe=stage_config.trade_count_min_for_sharpe,
         )
         # T-sharpe Phase 1A: trade_sharpe_raw (v2) を使用
-        # NOTE: live_criteria.sharpe_min=1.0 は v1 bar-level Sharpe スケール前提。
-        # Phase 1B replay で v2 trade-level スケールに再校正する。
+        # T042 Phase 0 完了: live_criteria.sharpe_min=1.0 は **annualized** Sharpe
+        # スケールで意味を保ち、trade-level base_sharpe は下流で _annualize_trade_sharpe
+        # により stage_c.holdout_days を window として年率換算してから lc 判定する
+        # (詳細: docs/alpha_factory/sharpe-rescale.md、Lo 2002 引用)。
         base_sharpe = (
             float(bt.trade_sharpe_raw) if bt.trade_sharpe_raw is not None else None
         )
@@ -686,9 +730,18 @@ def evaluate_stage_c(
         base_failed = True
         reasons.append("system_failure")
 
+    # T042: trade-level base_sharpe を annualized 換算してから live_criteria 判定。
+    # holdout_days = stage_c.stage_c_holdout_days (config) を window として用いる。
+    base_sharpe_annualized = _annualize_trade_sharpe(
+        base_sharpe, base_trade_count, stage_config.stage_c_holdout_days
+    )
+
     # live_criteria 判定 (base が成功した場合のみ意味を持つ)
     lc_pass: dict[str, bool] = {
-        "sharpe": base_sharpe is not None and base_sharpe >= float(lc["sharpe_min"]),
+        "sharpe": (
+            base_sharpe_annualized is not None
+            and base_sharpe_annualized >= float(lc["sharpe_min"])
+        ),
         "total_pnl": base_total_pnl >= float(lc["total_pnl_min"]),
         "max_drawdown": base_max_dd_frac <= float(lc["max_drawdown_max"]),
         "trade_count_min": base_trade_count >= int(lc["trade_count_min"]),
@@ -821,9 +874,10 @@ def evaluate_stage_c(
     passed = len(reasons) == 0
     elapsed = _time.perf_counter() - start
 
-    # T043: mission_score (4 軸 soft 合算スコア、observation only / GA fitness 不変)
+    # T043 + T042: mission_score (4 軸 soft 合算)。sharpe 軸は live_criteria.sharpe_min
+    # と同じ annualized スケールで評価する (T042 で base_sharpe_annualized を導入)。
     mission_score = _compute_mission_score(
-        sharpe=base_sharpe,
+        sharpe=base_sharpe_annualized,
         total_pnl=base_total_pnl,
         max_drawdown_frac=base_max_dd_frac,
         trade_count=base_trade_count,
@@ -839,6 +893,9 @@ def evaluate_stage_c(
             # T-sharpe Phase 1A: payload "sharpe" → "trade_sharpe_raw" にリネーム
             # base_sharpe には trade_sharpe_raw (v2) が入っている
             "trade_sharpe_raw": base_sharpe,
+            # T042: 年率換算 Sharpe を別 key で露出 (live_criteria 比較用、報告用)。
+            # base 評価の trade を出せず換算不能なら None。
+            "trade_sharpe_annualized": base_sharpe_annualized,
             "total_pnl": base_total_pnl,
             "max_drawdown_frac": base_max_dd_frac,
             "trade_count": base_trade_count,
