@@ -88,6 +88,10 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
         pa.field("n_fold_effective", pa.int64(), nullable=True),
         pa.field("positive_fold_ratio_effective", pa.float64(), nullable=True),
         pa.field("stage_b_reason_codes", pa.string(), nullable=True),
+        # T043: live_criteria 4 軸 soft 合算スコア (Stage C base 評価から計算)。
+        # 観測指標として archive/report に記録。GA fitness や stage_c.passed には影響しない。
+        # 詳細: docs/alpha_factory/mission-score.md
+        pa.field("mission_score", pa.float64(), nullable=True),
     ]
 )
 
@@ -150,6 +154,8 @@ def _create_row_template() -> dict[str, Any]:
         "n_fold_effective": None,
         "positive_fold_ratio_effective": None,
         "stage_b_reason_codes": None,
+        # T043: mission_score (Stage C 評価時のみ書き込み、それ以外は None)
+        "mission_score": None,
     }
 
 
@@ -490,6 +496,9 @@ class GenomeArchive:
             row["ii_lite_pass"] = None
         else:
             row["ii_lite_pass"] = bool(cp_result.passed)
+        # T043: mission_score を payload から書き写す (stage_gate 側で計算済)。
+        # base 評価が trade を出さず Sharpe=None だった場合は None になる。
+        row["mission_score"] = _opt_float(payload, "mission_score")
         self._mark_stage(row, "C")
 
     def mark_graduated(

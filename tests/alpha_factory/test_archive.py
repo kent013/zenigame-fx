@@ -164,10 +164,11 @@ def _make_archive() -> GenomeArchive:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_has_33_columns() -> None:
+def test_schema_has_34_columns() -> None:
     # T-sharpe Phase 1A: trade_sharpe_raw + sharpe_calc_version (28→30)
     # T035: n_fold_effective + positive_fold_ratio_effective + stage_b_reason_codes (30→33)
-    assert len(GENOMES_SCHEMA.names) == 33
+    # T043: mission_score (33→34)
+    assert len(GENOMES_SCHEMA.names) == 34
     expected = {
         "run_id", "run_number", "generation", "individual_name",
         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
@@ -181,6 +182,8 @@ def test_schema_has_33_columns() -> None:
         # T035: Stage B 観察可能性
         "n_fold_effective", "positive_fold_ratio_effective",
         "stage_b_reason_codes",
+        # T043: live_criteria 4 軸 soft 合算スコア
+        "mission_score",
     }
     assert set(GENOMES_SCHEMA.names) == expected
 
@@ -202,6 +205,8 @@ def test_template_default_values() -> None:
         # T035
         "n_fold_effective", "positive_fold_ratio_effective",
         "stage_b_reason_codes",
+        # T043: mission_score (Stage C 評価時のみ書き込み)
+        "mission_score",
     ):
         assert t[k] is None, f"{k} should default to None"
     # non-null bool -> False
@@ -374,6 +379,45 @@ def test_collect_stage_c_ii_lite_pass_false() -> None:
                                         cross_pair_passed=False))
     row = arc._rows[("lane", 0, "g0_i0")]
     assert row["ii_lite_pass"] is False
+
+
+# T043: mission_score 伝搬テスト ===============================================
+
+
+def test_collect_stage_c_writes_mission_score_from_payload() -> None:
+    """Stage C payload に mission_score があれば archive 行に書き写される。"""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(),
+                         instrument="USD_JPY")
+    arc.collect_stage_c(
+        g, "lane", 0,
+        _stage_c_result(mission_score=0.42),
+    )
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["mission_score"] == pytest.approx(0.42, abs=1e-9)
+
+
+def test_collect_stage_c_mission_score_none_when_payload_missing() -> None:
+    """payload に mission_score が無ければ None (Stage A のみで終わる行と同等)."""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(),
+                         instrument="USD_JPY")
+    # _stage_c_result は default で mission_score を入れていない
+    arc.collect_stage_c(g, "lane", 0, _stage_c_result())
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["mission_score"] is None
+
+
+def test_collect_stage_a_only_leaves_mission_score_none() -> None:
+    """Stage C を呼ばなければ mission_score は default の None のまま."""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(),
+                         instrument="USD_JPY")
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["mission_score"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -690,6 +734,8 @@ def test_schema_nullable_attributes() -> None:
         # T035
         "n_fold_effective", "positive_fold_ratio_effective",
         "stage_b_reason_codes",
+        # T043: Stage C 評価時のみ書き込まれるため nullable
+        "mission_score",
     }
     for f in GENOMES_SCHEMA:
         if f.name in nullable_cols:

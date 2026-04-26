@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import pytest
 
@@ -24,6 +24,7 @@ from src.alpha_factory.stage_gate import (
     CrossPairResult,
     StageGateConfig,
     StageResult,
+    _compute_mission_score,
     evaluate_stage_a,
     evaluate_stage_b,
     evaluate_stage_c,
@@ -1186,3 +1187,125 @@ class TestT035StageBObservability:
             assert payload["positive_fold_ratio_effective"] is None
         else:
             assert isinstance(payload["positive_fold_ratio_effective"], float)
+
+
+# T043: mission_score 4 軸 soft 合算 ===========================================
+
+
+class TestT043MissionScore:
+    """live_criteria 4 軸の soft 合算スコア (observation only)。"""
+
+    LC_DEFAULT: ClassVar[dict[str, float]] = {
+        "sharpe_min": 1.0,
+        "total_pnl_min": 50000.0,
+        "max_drawdown_max": 0.2,
+        "trade_count_min": 50.0,
+        "trade_count_max": 5000.0,
+    }
+
+    def test_returns_none_when_sharpe_is_none(self) -> None:
+        """base 評価が trade を出せず Sharpe=None なら mission_score=None."""
+        score = _compute_mission_score(
+            sharpe=None,
+            total_pnl=10000.0,
+            max_drawdown_frac=0.05,
+            trade_count=30,
+            live_criteria=self.LC_DEFAULT,
+        )
+        assert score is None
+
+    def test_all_axes_at_target_returns_one(self) -> None:
+        """全軸 target 達成で mission_score = 1.0 (幾何平均上限)."""
+        score = _compute_mission_score(
+            sharpe=1.0,
+            total_pnl=50000.0,
+            max_drawdown_frac=0.0,
+            trade_count=50,
+            live_criteria=self.LC_DEFAULT,
+        )
+        assert score is not None
+        assert score == pytest.approx(1.0, abs=1e-9)
+
+    def test_all_axes_at_lower_returns_floor(self) -> None:
+        """全軸 lower 以下で mission_score = floor (=0.1) ^ 1 = 0.1."""
+        score = _compute_mission_score(
+            sharpe=0.0,
+            total_pnl=0.0,
+            max_drawdown_frac=0.2,  # = max_drawdown_max (lower)
+            trade_count=0,
+            live_criteria=self.LC_DEFAULT,
+        )
+        assert score is not None
+        assert score == pytest.approx(0.1, abs=1e-9)
+
+    def test_score_above_target_clipped_to_one(self) -> None:
+        """target 超過は 1.0 にクリップされ、scaled 0.1〜1.0 の幾何平均。"""
+        score = _compute_mission_score(
+            sharpe=2.0,  # > target=1.0
+            total_pnl=100000.0,  # > target=50000
+            max_drawdown_frac=0.0,
+            trade_count=100,  # > target=50, < max=5000
+            live_criteria=self.LC_DEFAULT,
+        )
+        assert score is not None
+        assert score == pytest.approx(1.0, abs=1e-9)
+
+    def test_trade_count_above_max_yields_zero_axis(self) -> None:
+        """trade_count > max は 0 score → 幾何平均が大幅減 (1 軸 floor で全体下落)."""
+        score = _compute_mission_score(
+            sharpe=1.0,
+            total_pnl=50000.0,
+            max_drawdown_frac=0.0,
+            trade_count=10000,  # > trade_count_max=5000
+            live_criteria=self.LC_DEFAULT,
+        )
+        assert score is not None
+        # 1 軸 0 (= scaled 0.1)、他 3 軸 1 (= scaled 1.0) → (0.1*1*1*1)^(1/4)
+        expected = (0.1 * 1.0 * 1.0 * 1.0) ** (1.0 / 4.0)
+        assert score == pytest.approx(expected, abs=1e-9)
+
+    def test_partial_progress_returns_intermediate_value(self) -> None:
+        """部分達成: sharpe=0.5 (半分), pnl=25000 (半分), dd=0.1 (半分), tc=25 (半分)
+        → 各軸 score=0.5, scaled=0.55, geomean ≈ 0.55."""
+        score = _compute_mission_score(
+            sharpe=0.5,
+            total_pnl=25000.0,
+            max_drawdown_frac=0.1,
+            trade_count=25,
+            live_criteria=self.LC_DEFAULT,
+        )
+        assert score is not None
+        assert score == pytest.approx(0.55, abs=1e-9)
+
+    def test_drawdown_above_lower_yields_zero_axis(self) -> None:
+        """max_drawdown_frac > max_drawdown_max は dd 軸 0 score (clip)."""
+        score = _compute_mission_score(
+            sharpe=1.0,
+            total_pnl=50000.0,
+            max_drawdown_frac=0.5,  # >> max=0.2
+            trade_count=50,
+            live_criteria=self.LC_DEFAULT,
+        )
+        assert score is not None
+        # dd 軸 = 0 (scaled 0.1)、他 3 軸 = 1 (scaled 1.0)
+        expected = (0.1 * 1.0 * 1.0 * 1.0) ** (1.0 / 4.0)
+        assert score == pytest.approx(expected, abs=1e-9)
+
+    def test_evaluate_stage_c_payload_includes_mission_score(self) -> None:
+        """evaluate_stage_c の payload に mission_score キーが含まれること。"""
+        bars = _make_continuous_bars(3, bars_per_day=4)
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        cfg = _backtest_config(max_spread_bps=Decimal("10"))
+        res = evaluate_stage_c(
+            _one_clause_genome(),
+            bars,
+            usd_jpy_meta(),
+            cfg,
+            ev,
+            StageGateConfig(),
+        )
+        payload = cast(dict[str, Any], _envelope(res)["payload"])
+        assert "mission_score" in payload
+        # base が trade を出さない場合は None になる (defensive)
+        ms = payload["mission_score"]
+        assert ms is None or (isinstance(ms, float) and 0.1 <= ms <= 1.0)

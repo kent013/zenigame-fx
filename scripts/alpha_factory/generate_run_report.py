@@ -417,6 +417,41 @@ def main(argv: list[str] | None = None) -> int:
         lines.append(f"- n_nodes: {_fmt_stats(nn)}")
     lines.append("")
 
+    # T043: mission_score 分布 (Stage C 評価された個体のみ)
+    lines.append("## mission_score 分布 (T043 / observation only)")
+    lines.append("")
+    lines.append(
+        "> live_criteria 4 軸 (sharpe/total_pnl/max_drawdown/trade_count) の "
+        "soft 合算スコア (幾何平均、[0.1, 1.0])。GA fitness や stage_c.passed には "
+        "影響しない (詳細: docs/alpha_factory/mission-score.md)。"
+    )
+    lines.append("")
+    if archive_rows is None:
+        lines.append("- archive Parquet なし、計算スキップ")
+    else:
+        ms_values = [r.get("mission_score") for r in archive_rows]
+        ms_present = [v for v in ms_values if v is not None]
+        if not ms_present:
+            lines.append(
+                "- mission_score=計測対象 0 件 (Stage C base 評価で Sharpe を出した "
+                "個体が無いため未計測)"
+            )
+        else:
+            ms_stats = _basic_stats(ms_values)
+            lines.append(f"- mission_score: {_fmt_stats(ms_stats)}")
+            best_ms = max(ms_present)
+            best_row = next(
+                r for r in archive_rows
+                if r.get("mission_score") == best_ms
+            )
+            lines.append(
+                f"- best mission_score: **{best_ms:.4f}** "
+                f"(`{best_row.get('individual_name', '?')}`, "
+                f"gen={best_row.get('generation', '?')}, "
+                f"instrument={best_row.get('instrument', '?')})"
+            )
+    lines.append("")
+
     # fold_sign_ratio / dsr 分布
     lines.append("## fold_sign_ratio / dsr 分布")
     lines.append("")
