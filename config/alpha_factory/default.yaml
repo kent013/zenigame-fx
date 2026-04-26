@@ -130,6 +130,8 @@ stage_gate:
     spread_stress_min_total_pnl: 0.0
     spread_stress_min_sharpe: 0.0
     # live_criteria は上記 SSOT セクションを参照 (重複定義しない)
+    # T045: GA selection で stage_c_feasible (PnL>0 ∧ Sharpe>0) 個体を優先 (v3 selection_score)
+    feasibility_apply: true
 
 # Cross-pair (ii-lite) evaluation 設定 (T016)
 # - 実装: src/alpha_factory/cross_pair.py

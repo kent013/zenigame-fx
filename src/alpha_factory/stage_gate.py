@@ -126,6 +126,11 @@ class StageGateConfig:
     spread_stress_multiplier: float = 1.5
     spread_stress_min_total_pnl: float = 0.0
     spread_stress_min_sharpe: float = 0.0
+    # T045: GA selection で stage_c_feasible (PnL>0 ∧ Sharpe>0) を v3 selection_score に含める
+    # @why: Run-20 で Stage B 突破したが best 個体 PnL=-16850 / Sharpe=-0.19 で
+    # Stage C 不通過。soft fitness 合算では負 PnL/Sharpe 個体が GA 選抜で生き残る。
+    # PnL>0 ∧ Sharpe>0 を T031 feasible 直後に挿入し可行性優先 2 段階最適化を実装。
+    stage_c_feasibility_apply: bool = True
 
     # T-sharpe Phase 1A: trade-level Sharpe sample-size guard
     # config から compute_metrics へ伝搬する canonical 値
