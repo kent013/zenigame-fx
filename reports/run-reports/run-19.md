@@ -103,6 +103,7 @@
 | `stage_b_window_underfilled` | 0 |
 | `median_oos_sharpe<min` | 0 |
 | `positive_fold_ratio<min` | 0 |
+| `stage_b_pre_flight_underfilled` | 0 |
 | `unknown_reason` | 0 |
 | `other` | 0 |
 
@@ -116,6 +117,7 @@
 | `stage_b_window_underfilled` | 0 |
 | `median_oos_sharpe<min` | 0 |
 | `positive_fold_ratio<min` | 0 |
+| `stage_b_pre_flight_underfilled` | 0 |
 | `other` | 0 |
 
 ## Cross-pair shadow 集計
@@ -134,6 +136,12 @@
 - trade_count=0 個体比率: 5.6% (36/640)
 - best 個体 trade_count: 9578
 - best 個体 feasibility: ✅
+
+## Stage A provenance 分布 (T033 / sidecar)
+
+> Stage A 落ち個体の `total_pnl_stage_a` 分布を可視化 (`reports/run-reports/run-{N}/diagnostics/stage_a_provenance.parquet`)。archive `total_pnl=0.0` が「Stage A 落ち = 投影仕様」「実 PnL=0」「コスト過大」のいずれかを切り分けるための観測指標 (詳細: docs/alpha_factory/diagnostics-sidecar.md)。
+
+- Stage A provenance: not available (sidecar 不在)
 
 ## Archive Top-5 個体一覧
 
