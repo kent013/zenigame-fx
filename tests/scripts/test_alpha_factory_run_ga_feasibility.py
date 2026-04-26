@@ -67,29 +67,62 @@ def test_legacy_selection_score_falls_back_to_4_tuple() -> None:
     assert fb == (0, 0, 1, 1.5)
 
 
-def test_v3_selection_key_includes_stage_c_feasibility() -> None:
-    """fallback_active=False の _selection_key は v3 7 要素を返す (T045)."""
+def test_v31_selection_key_includes_stage_b_priority() -> None:
+    """T046 v3.1: _selection_key は 8 要素 (stage_b_pass を stage_c_feasible 前に挿入)."""
     e = _make_entry(
         fitness_pen=1.5,
         a=True,
+        b=True,  # T046: stage_b_pass priority
         feasible=True,
         violation=0.0,
         stage_c_feasible=True,
     )
-    v3 = _selection_key(e, fallback_active=False)
-    # (feasible, -violation, stage_c_feasible, C_pass, B_pass, A_pass, fitness_pen)
-    assert v3 == (1, -0.0, 1, 0, 0, 1, 1.5)
+    v31 = _selection_key(e, fallback_active=False)
+    # (feasible, -violation, stage_b_pass, stage_c_feasible, C_pass, B_pass, A_pass, fitness_pen)
+    assert v31 == (1, -0.0, 1, 1, 0, 1, 1, 1.5)
 
 
-def test_v3_stage_c_feasible_wins_over_infeasible_when_other_equal() -> None:
-    """T045: stage_c_feasible=True が False に勝つ (他要素同条件)."""
+def test_v31_stage_b_pass_wins_over_stage_c_feasible_only() -> None:
+    """T046: stage_b_pass=True 個体が stage_c_feasible=True のみの個体に勝つ.
+
+    Run-21 で T045 単独 (v3) では PnL/Sharpe 正だが Stage B 通過しない個体が選抜され
+    Stage B passes 退行 834→0。v3.1 で stage_b_pass を上位に置きこの退行を解消。
+    """
+    has_b = _make_entry(
+        fitness_pen=0.0,
+        feasible=True,
+        violation=0.0,
+        b=True,
+        stage_c_feasible=False,
+    )
+    only_c_feas = _make_entry(
+        fitness_pen=10.0,
+        feasible=True,
+        violation=0.0,
+        b=False,
+        stage_c_feasible=True,
+    )
+    # has_b (stage_b_pass=True) > only_c_feas (stage_b_pass=False)
+    # fitness 高くても has_b が勝つ
+    assert has_b.selection_score > only_c_feas.selection_score
+
+
+def test_v31_stage_c_feasible_wins_when_both_have_stage_b() -> None:
+    """T046: stage_b_pass 同等なら stage_c_feasible で順位決定 (T045 効果保持)."""
     yes = _make_entry(
-        fitness_pen=0.0, feasible=True, violation=0.0, stage_c_feasible=True
+        fitness_pen=0.0,
+        feasible=True,
+        violation=0.0,
+        b=True,
+        stage_c_feasible=True,
     )
     no = _make_entry(
-        fitness_pen=10.0, feasible=True, violation=0.0, stage_c_feasible=False
+        fitness_pen=10.0,
+        feasible=True,
+        violation=0.0,
+        b=True,
+        stage_c_feasible=False,
     )
-    # stage_c_feasible=True (yes) > False (no) なので fitness 高くても yes が勝つ
     assert yes.selection_score > no.selection_score
 
 

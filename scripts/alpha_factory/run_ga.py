@@ -111,6 +111,8 @@ class IndividualCacheEntry:
     ``selection_score`` 6 要素化 (v2)。
     T045 Stage C Feasibility: ``stage_c_feasible`` (PnL>0 ∧ Sharpe>0) を
     ``feasible`` 直後に挿入し v3 7 要素化。
+    T046 v3.1: stage_b_pass を stage_c_feasible より前 (上位) に移動して
+    Stage B 整合との両立を確保 (Run-20→21 で観測された B 退行 834→0 の解消)。
     """
 
     generation: int
@@ -124,12 +126,13 @@ class IndividualCacheEntry:
     stage_c_feasible: bool = True
 
     @property
-    def selection_score(self) -> tuple[int, float, int, int, int, int, float]:
-        """Lexicographic 7-tuple v3:
-        ``(feasible, -violation, stage_c_feasible, C_pass, B_pass, A_pass, fitness_pen)``.
+    def selection_score(self) -> tuple[int, float, int, int, int, int, int, float]:
+        """Lexicographic 8-tuple v3.1:
+        ``(feasible, -violation, stage_b_pass, stage_c_feasible, C_pass, B_pass, A_pass, fitness_pen)``.
 
-        T045: stage_c_feasible (PnL>0 ∧ Sharpe>0) を T031 feasible 直後に挿入し
-        負 PnL/負 Sharpe 個体の GA 選抜を構造的に下位化する。
+        T046: stage_b_pass を stage_c_feasible より前に置き「Stage B 整合 + 単期間 PnL/Sharpe 正」
+        の両立を構造的に保証。Run-21 で T045 単独 (v3) が Stage B passes を 834→0 に退行させた
+        副作用を解消する。
 
         非有限値 (NaN/inf) は順序比較を破壊するため finite guard で正規化:
         - violation: 非有限なら ``+inf`` 扱い (= ``-inf`` を要素 2 に置く → 最下位)
@@ -142,6 +145,7 @@ class IndividualCacheEntry:
         return (
             int(self.feasible),
             -v_norm,
+            int(self.stage_b_pass),  # T046: Stage B 整合 priority
             int(self.stage_c_feasible),
             int(self.stage_c_pass),
             int(self.stage_b_pass),
@@ -812,13 +816,14 @@ def _write_reports(
             "selection_score": [
                 int(best_entry.feasible),
                 -float(_safe_finite(best_entry.violation_magnitude)[0]),
+                int(best_entry.stage_b_pass),  # T046 v3.1
                 int(best_entry.stage_c_feasible),
                 int(best_entry.stage_c_pass),
                 int(best_entry.stage_b_pass),
                 int(best_entry.stage_a_pass),
                 float(best_fitness_val),
             ],
-            "selection_score_schema": "v3_stage_c_feasibility",
+            "selection_score_schema": "v3_1_stage_b_priority",
             "metrics": best_metrics,
         },
         "live_criteria": live_check,
