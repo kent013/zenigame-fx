@@ -128,7 +128,7 @@ display 用に `reason_if_failed` property (`";".join(reason_codes)`) を提供�
 | C | `live_criteria.trade_count<min` | trade_count < trade_count_min |
 | C | `live_criteria.trade_count>max` | trade_count > trade_count_max |
 | C | `intraday_constraint_violation` | 日跨ぎ trade が存在 |
-| C | `spread_stress_skipped` | max_spread_bps=None で stress 評価不能 (fail-closed) |
+| C | `spread_stress_skipped` | max_spread_bps=None で stress 評価不能 (fail-closed)。**T041 (Phase 0) で `config/alpha_factory/default.yaml::backtest.max_spread_bps=10` を設定し、production パスで本 reason は出ない状態に解消済**。Run 1〜16 で本 reason が常時付与され Stage C pass=0 だった構造的原因。 |
 | C | `spread_stress.sharpe<min` | stress 後 sharpe < spread_stress_min_sharpe |
 | C | `spread_stress.total_pnl<min` | stress 後 total_pnl < spread_stress_min_total_pnl |
 | C | `spread_stress.trade_count<min` | stress 後 trade_count < live_criteria.trade_count_min |

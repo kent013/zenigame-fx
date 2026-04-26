@@ -15,6 +15,20 @@ backtest:
   initial_cash: "1000000"
   leverage: 25
   units: 10000
+  # T041 Phase 0 / Stage C unblock:
+  # @why: max_spread_bps 未設定のとき stage_gate.evaluate_stage_c は
+  # `spread_stress_skipped` 理由を必ず追加し Stage C を fail-closed する
+  # (src/alpha_factory/stage_gate.py:630-632)。Run 1〜16 の Stage C pass=0 は
+  # この未設定が上流原因。AGENTS.md「絶対制約: スワップ・スプレッドを
+  # fitness に反映」遵守のため Phase 0 で導入。
+  # 値根拠: EUR_JPY tier1 broker (OANDA) の典型 spread 1.0〜2.0 pips ≈
+  # 6〜12 bps の保守的中央値 10 bps (≈ 1.4 pips)。Stage C stress 1.5x で
+  # base 15 bps (≈ 2.1 pips) で評価される。
+  # 通貨ペア別 override は Phase 1 で per_pair_overrides として検討。
+  max_spread_bps: "10"
+  # @why: 明示 0 でイントラデイ前提を表現 (overnight 持ち越し設計禁止)。
+  # holding cost 反映は将来別タスクで設計。
+  holding_cost_per_day_bps: "0"
 
 ga:
   population_size: 40
