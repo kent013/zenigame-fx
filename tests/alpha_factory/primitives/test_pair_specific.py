@@ -44,6 +44,7 @@ from src.alpha_factory.primitives.pair_specific import (
     P11_SPEC,
     P12_SPEC,
     PAIR_SPECIFIC_SPECS,
+    _p10_compute_all,
     all_specs,
 )
 from src.domain.price import Ohlc, PriceBar
@@ -1167,3 +1168,81 @@ class TestViaRegistryEvaluator:
                 assert -1e-9 <= val <= 1.0 + 1e-9
             else:
                 assert -1.0 - 1e-9 <= val <= 1.0 + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# T039: P10 NADataProximityGate per-bar gate (as_of_strict=True)
+# ---------------------------------------------------------------------------
+
+
+class TestT039P10AsOfStrict:
+    """P10 でも as_of_strict=True で per-bar gate が有効化される (causality)."""
+
+    def _bar_at_na_session(self, base_time: datetime) -> list[PriceBar]:
+        """NA セッション内 (15:00 UTC) を含む bars を生成 (P10 gate 適用範囲)."""
+        # 15:00, 15:01, 15:02, ... 8 bars within NA session 12-21 UTC
+        na_base = base_time.replace(hour=15, minute=0, second=0, microsecond=0)
+        return _build_bars(8, seed=39, base_time=na_base, step=timedelta(minutes=1))
+
+    def test_p10_strict_excludes_future_event_per_bar(self) -> None:
+        bars = self._bar_at_na_session(datetime(2026, 1, 5, tzinfo=UTC))
+        # past event 30 分前、future event 4 分後 (= 5 番目の bar の直前)。
+        # legacy では future が bars[1..3] で最近接、strict では future event が
+        # 当該 bar より未来の bars (bars[0..3]) では除外され、past を使う。
+        past_event = EconomicEvent(
+            event_time=bars[0].bar_time - timedelta(minutes=30),
+            currency="USD",
+            name="past_NFP",
+            impact=3,
+        )
+        future_event = EconomicEvent(
+            event_time=bars[0].bar_time + timedelta(minutes=4),
+            currency="USD",
+            name="future_FOMC",
+            impact=3,
+        )
+        snap_legacy = EconomicEventSnapshot(
+            calendar=EconomicCalendar([past_event, future_event]),
+            as_of=datetime(2099, 1, 1, tzinfo=UTC),
+            as_of_strict=False,
+        )
+        snap_strict = EconomicEventSnapshot(
+            calendar=EconomicCalendar([past_event, future_event]),
+            as_of=datetime(2099, 1, 1, tzinfo=UTC),
+            as_of_strict=True,
+        )
+        out_legacy = _p10_compute_all(
+            _ctx(bars, 0, P10_SPEC, pair="USD_CAD", event_snapshot=snap_legacy)
+        )
+        out_strict = _p10_compute_all(
+            _ctx(bars, 0, P10_SPEC, pair="USD_CAD", event_snapshot=snap_strict)
+        )
+        assert out_legacy.shape == out_strict.shape
+        assert not np.array_equal(out_legacy, out_strict)
+
+    def test_p10_strict_no_future_returns_legacy_equiv(self) -> None:
+        """全 event が全 bar より過去なら legacy と strict は同じ."""
+        bars = self._bar_at_na_session(datetime(2026, 1, 5, tzinfo=UTC))
+        past_event = EconomicEvent(
+            event_time=bars[0].bar_time - timedelta(hours=2),
+            currency="USD",
+            name="past",
+            impact=3,
+        )
+        snap_legacy = EconomicEventSnapshot(
+            calendar=EconomicCalendar([past_event]),
+            as_of=datetime(2099, 1, 1, tzinfo=UTC),
+            as_of_strict=False,
+        )
+        snap_strict = EconomicEventSnapshot(
+            calendar=EconomicCalendar([past_event]),
+            as_of=datetime(2099, 1, 1, tzinfo=UTC),
+            as_of_strict=True,
+        )
+        out_legacy = _p10_compute_all(
+            _ctx(bars, 0, P10_SPEC, pair="USD_CAD", event_snapshot=snap_legacy)
+        )
+        out_strict = _p10_compute_all(
+            _ctx(bars, 0, P10_SPEC, pair="USD_CAD", event_snapshot=snap_strict)
+        )
+        assert np.array_equal(out_legacy, out_strict)

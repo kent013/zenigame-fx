@@ -710,6 +710,9 @@ P9_SPEC = PrimitiveSpec(
 def _p10_compute_all(ctx: EvaluationContext) -> np.ndarray:
     """NA セッション (12:00-21:00 UTC) かつ USD/CAD イベント ±window 分以内で
     gate を抑制 (0 寄り)。NA セッション外は 1.0 (gate open) で M4 と切り分け。
+
+    T039 per-bar gate: snapshot.as_of_strict=True の場合、各 bar の bar_time までに
+    既知のイベントのみを採用 (二段ガード)。M4 と同じ実装方針 (bisect で O(log E))。
     """
     n = len(ctx.bars)
     na_lo, na_hi = 12 * 60.0, 21 * 60.0
@@ -723,6 +726,7 @@ def _p10_compute_all(ctx: EvaluationContext) -> np.ndarray:
     snapshot = ctx.event_snapshot
     calendar = snapshot.calendar
     as_of_ts = snapshot.as_of.timestamp()
+    strict = snapshot.as_of_strict
     min_impact = _get_int_param(ctx.params, "min_impact")
     window_min = _get_float_param(ctx.params, "window_min")
     scale_min = _get_float_param(ctx.params, "scale_min")
@@ -739,13 +743,27 @@ def _p10_compute_all(ctx: EvaluationContext) -> np.ndarray:
     event_times = np.array(
         [e.event_time.timestamp() for e in relevant], dtype=np.float64
     )
+    if strict:
+        event_times = np.sort(event_times)
     for i in range(n):
         m = _bar_time_minutes_utc(ctx.bars[i])
         if not (na_lo <= m < na_hi):
             out[i] = 1.0
             continue
         t = ctx.bars[i].bar_time.timestamp()
-        diff_min = float(np.min(np.abs(event_times - t)) / 60.0)
+        if strict:
+            # T039 per-bar gate (Codex round-1 [Suggestion] 反映): cutoff-1 のみ
+            # 参照して O(1) で最近接イベントを取得。strict 化では将来 event は
+            # 除外されるため、最近接は必ず "bar_time 以下で最大" の event_time。
+            cutoff = int(np.searchsorted(event_times, t, side="right"))
+            if cutoff == 0:
+                out[i] = 1.0
+                continue
+            diff_sec = t - float(event_times[cutoff - 1])
+        else:
+            # legacy: ソート保証無し、線形スキャン (既存挙動互換)
+            diff_sec = float(np.min(np.abs(event_times - t)))
+        diff_min = abs(diff_sec) / 60.0
         raw = (window_min - diff_min) / (scale_min + _EPS)
         out[i] = 1.0 - float(sigmoid(raw))
     return out

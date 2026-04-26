@@ -270,6 +270,9 @@ def _m4_compute_all(ctx: EvaluationContext) -> np.ndarray:
 
     look-ahead 回避:
         - `event.event_time > snapshot.as_of` のイベントは未知として除外
+        - T039: `snapshot.as_of_strict=True` の場合 **per-bar gate** を有効化、
+          `event.event_time > bar_time[i]` のイベントは bar i では除外
+          (二段ガード)。snapshot.as_of は最大 cap として残る
         - `event.actual` は参照しない（schedule のみ使用）
 
     snapshot=None:
@@ -299,6 +302,7 @@ def _m4_compute_all(ctx: EvaluationContext) -> np.ndarray:
     snapshot = ctx.event_snapshot
     calendar = snapshot.calendar
     as_of = snapshot.as_of
+    strict = snapshot.as_of_strict
 
     pair = ctx.pair
     try:
@@ -306,6 +310,8 @@ def _m4_compute_all(ctx: EvaluationContext) -> np.ndarray:
     except Exception:
         base, quote = ("", "")
     as_of_ts = as_of.timestamp()
+    # T039: as_of で 1 段目 cap (relevant 集合を絞り込み)。
+    # 2 段目 cap (per-bar) は strict=True のときに bar ループ内で適用する。
     relevant_events = [
         e for e in calendar.events
         if e.impact >= min_impact
@@ -318,9 +324,31 @@ def _m4_compute_all(ctx: EvaluationContext) -> np.ndarray:
     event_times = np.array(
         [e.event_time.timestamp() for e in relevant_events], dtype=np.float64
     )
+    # T039: per-bar gate のため event_times は昇順ソート (bisect 化のため)
+    if strict:
+        event_times = np.sort(event_times)
     for i in range(length):
         t = ctx.bars[i].bar_time.timestamp()
-        diff_min = float(np.min(np.abs(event_times - t)) / 60.0)
+        if strict:
+            # T039 per-bar gate: bar_time までに既知のイベントのみ採用 (二段目 cap)。
+            # event_times は昇順なので bisect_right で event_time <= t の cutoff を
+            # O(log E) で取得し、最近接候補は cutoff-1 (= 直前の既知イベント)
+            # のみを参照すれば十分 (Codex round-1 [Suggestion] 反映: prefix 全走査
+            # ではなく O(1) 評価に短縮)。strict 化では future event は除外される
+            # ため、最近接イベントは必ず "bar_time 以下で最大" の event_time。
+            cutoff = int(np.searchsorted(event_times, t, side="right"))
+            if cutoff == 0:
+                # bar i 時点で既知イベントなし → gate 開放
+                out[i] = 1.0
+                continue
+            diff_sec = t - float(event_times[cutoff - 1])
+        else:
+            # legacy MVP: 全 event の中で最近接 (将来 event も含む)。
+            # 過去/未来両側を見る必要があるため、event_times がソート済の場合は
+            # bar_time の左右から距離最小値を求めれば O(log E) だが、legacy は
+            # ソート保証無く既存挙動互換のため線形スキャンを維持。
+            diff_sec = float(np.min(np.abs(event_times - t)))
+        diff_min = abs(diff_sec) / 60.0
         raw = (window_min - diff_min) / (scale_min + _EPS)
         out[i] = 1.0 - float(sigmoid(raw))
     return out
