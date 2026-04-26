@@ -79,6 +79,11 @@ stage_gate:
     target_pass_rate: 0.15      # 探索圧の代理指標 (calibrate-gate T027 で使用)
     alpha: 0.03
     threshold: 0.0              # cycle 7 reset: cycle 5/6 で gate 0.4655→0.3655 でも A=0 継続。delta_max=0.1 では復旧 4 run 必要なので即時 reset。本 cycle は calibrate-gate skip。
+    # T034: trade_count<min_exposure_trade_count の個体は no_exposure reason +
+    # NO_EXPOSURE_FITNESS sentinel で淘汰する (selection_score tie-break で
+    # 「無取引優位」を構造的に解消)。default 1 = 「1 trade 未満 = 取引未成立」。
+    # 不変条件: 1 <= min_exposure_trade_count < live_criteria.trade_count_min。
+    min_exposure_trade_count: 1
     # T027 calibrate-gate 設定 (deterministic 制御則)
     # - 概念設計: docs/alpha_factory/concepts/calibrate-gate.md
     # - SSOT: 本セクション、loader: scripts/alpha_factory/calibrate_gate.py

@@ -34,6 +34,8 @@ import numpy as np
 import pyarrow as pa
 import structlog
 
+from src.alpha_factory.stage_gate import STAGE_A_FITNESS_SENTINELS
+
 __all__ = [
     "AGGREGATION_MODES",
     "REQUIRED_COLS",
@@ -281,6 +283,21 @@ class AggregatedSample:
     window: int
 
 
+def _pool_excluding_sentinels(rows: Iterable[Mapping[str, Any]]) -> tuple[float, ...]:
+    """T034: fitness_pen pool から Stage A failure sentinel 値を除外する。
+
+    sentinel (SYSTEM_FAILURE / NO_EXPOSURE / METRIC_UNAVAILABLE) を quantile 計算
+    に混ぜると threshold が不当に低く出る (探索圧崩壊) ため、値一致 (set
+    membership) で明示除外する。閾値分離 (例: < -100) は fitness_pen 通常実値域
+    と被る可能性があり安全でない (sharpe 下限 clamp が無いため)。
+    """
+    return tuple(
+        float(r["fitness_pen"])
+        for r in rows
+        if float(r["fitness_pen"]) not in STAGE_A_FITNESS_SENTINELS
+    )
+
+
 def aggregate_sample(
     rows: Iterable[Mapping[str, Any]],
     *,
@@ -323,14 +340,14 @@ def aggregate_sample(
         n_used = len(used)
         pass_count = sum(1 for r in used if bool(r["stage_a_pass"]))
         actual = (pass_count / n_used) if n_used > 0 else 0.0
-        pool = tuple(float(r["fitness_pen"]) for r in used)
+        pool = _pool_excluding_sentinels(used)
 
     elif mode == "all_generations":
         used = rows_list
         n_used = len(used)
         pass_count = sum(1 for r in used if bool(r["stage_a_pass"]))
         actual = (pass_count / n_used) if n_used > 0 else 0.0
-        pool = tuple(float(r["fitness_pen"]) for r in used)
+        pool = _pool_excluding_sentinels(used)
 
     else:  # generation_weighted_mean
         gen_to_rows: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
@@ -348,8 +365,8 @@ def aggregate_sample(
             )
             weighted_sum += weights[g] * gen_pass_rate
         actual = (weighted_sum / total_w) if total_w > 0 else 0.0
-        # 全世代統一: pool は全行
-        pool = tuple(float(r["fitness_pen"]) for r in rows_list)
+        # 全世代統一: pool は全行 (sentinel 除外)
+        pool = _pool_excluding_sentinels(rows_list)
         n_used = len(rows_list)
         pass_count = round(actual * n_used)
 

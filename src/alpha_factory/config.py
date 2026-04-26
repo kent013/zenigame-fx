@@ -328,6 +328,10 @@ def _build_stage_gate(
         "stage_a_window_days": int(a_raw.get("window_days", 60)),
         "stage_a_alpha": float(a_raw.get("alpha", 0.03)),
         "stage_a_threshold": float(a_raw.get("threshold", 0.0)),
+        # T034: 取引未成立 (no_exposure) を sentinel 化するための下限
+        "min_exposure_trade_count": int(
+            a_raw.get("min_exposure_trade_count", 1)
+        ),
         "stage_b_window_months": int(b_raw.get("window_months", 18)),
         "wf_train_days": int(b_raw.get("wf_train_days", 120)),
         "wf_test_days": int(b_raw.get("wf_test_days", 20)),
