@@ -389,6 +389,10 @@ def _build_stage_gate(
         "spread_stress_min_sharpe": float(
             c_raw.get("spread_stress_min_sharpe", 0.0)
         ),
+        # T045: GA selection で stage_c_feasible (PnL>0 ∧ Sharpe>0) を含める
+        "stage_c_feasibility_apply": bool(
+            c_raw.get("feasibility_apply", True)
+        ),
     }
     if live_criteria_raw:
         kwargs["live_criteria"] = dict(live_criteria_raw)

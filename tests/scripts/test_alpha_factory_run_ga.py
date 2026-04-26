@@ -391,14 +391,16 @@ def test_smoke_run_holdout_ok(
     # best.fitness は Decimal 互換 (有限値)
     Decimal(summary["best"]["fitness"])
     assert isinstance(summary["best"]["fitness_finite"], bool)
-    # T031: selection_score schema = v2_feasibility (6 要素)
-    assert summary["best"]["selection_score_schema"] == "v2_feasibility"
-    assert len(summary["best"]["selection_score"]) == 6
-    # 1 要素目は feasible_int (0 or 1)
+    # T045: selection_score_schema v3_stage_c_feasibility (7 要素)
+    assert summary["best"]["selection_score_schema"] == "v3_stage_c_feasibility"
+    assert len(summary["best"]["selection_score"]) == 7
+    # 1 要素目は feasible_int (0 or 1), 3 要素目は stage_c_feasible_int (0 or 1)
     assert summary["best"]["selection_score"][0] in (0, 1)
-    # best.feasible / violation_magnitude キーが存在
+    assert summary["best"]["selection_score"][2] in (0, 1)
+    # best.feasible / violation_magnitude / stage_c_feasible キーが存在
     assert isinstance(summary["best"]["feasible"], bool)
     assert isinstance(summary["best"]["violation_magnitude"], float)
+    assert isinstance(summary["best"]["stage_c_feasible"], bool)
     # per_generation に feasible_count
     for pg in summary["per_generation"]:
         assert isinstance(pg["feasible_count"], int)

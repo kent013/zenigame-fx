@@ -107,8 +107,10 @@ class LaneBarsBundle:
 class IndividualCacheEntry:
     """GA selection 用の cache entry (archive 由来).
 
-    T031 RPC Phase 1: ``feasible`` / ``violation_magnitude`` を追加し、
-    ``selection_score`` を 6 要素化する (旧 4 要素は ``_legacy_selection_score``)。
+    T031 RPC Phase 1: ``feasible`` / ``violation_magnitude`` を追加し
+    ``selection_score`` 6 要素化 (v2)。
+    T045 Stage C Feasibility: ``stage_c_feasible`` (PnL>0 ∧ Sharpe>0) を
+    ``feasible`` 直後に挿入し v3 7 要素化。
     """
 
     generation: int
@@ -118,15 +120,20 @@ class IndividualCacheEntry:
     stage_c_pass: bool
     feasible: bool = True
     violation_magnitude: float = 0.0
+    # T045
+    stage_c_feasible: bool = True
 
     @property
-    def selection_score(self) -> tuple[int, float, int, int, int, float]:
-        """Lexicographic 6-tuple:
-        ``(feasible_int, -violation, C_pass, B_pass, A_pass, fitness_pen)``.
+    def selection_score(self) -> tuple[int, float, int, int, int, int, float]:
+        """Lexicographic 7-tuple v3:
+        ``(feasible, -violation, stage_c_feasible, C_pass, B_pass, A_pass, fitness_pen)``.
+
+        T045: stage_c_feasible (PnL>0 ∧ Sharpe>0) を T031 feasible 直後に挿入し
+        負 PnL/負 Sharpe 個体の GA 選抜を構造的に下位化する。
 
         非有限値 (NaN/inf) は順序比較を破壊するため finite guard で正規化:
-        - violation: 非有限なら ``+inf`` 扱い (= ``-inf`` を二要素目に置く → 確実に最下位)
-        - fitness_pen: 既存と同じく非有限は ``-inf`` として比較最下位扱い
+        - violation: 非有限なら ``+inf`` 扱い (= ``-inf`` を要素 2 に置く → 最下位)
+        - fitness_pen: 非有限は ``-inf`` として比較最下位扱い
         """
         v = self.violation_magnitude
         v_norm = math.inf if not math.isfinite(v) else float(v)
@@ -135,6 +142,7 @@ class IndividualCacheEntry:
         return (
             int(self.feasible),
             -v_norm,
+            int(self.stage_c_feasible),
             int(self.stage_c_pass),
             int(self.stage_b_pass),
             int(self.stage_a_pass),
@@ -513,11 +521,14 @@ def _update_cache(
     lane_id: str,
     generation: int,
     feasibility_cfg: GAFeasibilityConfig,
+    stage_c_feasibility_apply: bool = True,
 ) -> None:
     """archive の row から fitness_pen / stage pass / feasibility を取り出し cache 更新.
 
     T031: ``feasibility_cfg.apply_from_generation <= generation`` で feasibility を
     実評価。archive 不在 (評価失敗) は明確に infeasible として violation を最大化。
+    T045: ``stage_c_feasibility_apply=True`` で archive 行の total_pnl>0 ∧ trade_sharpe_raw>0
+    を満たす個体に ``stage_c_feasible=True`` をセット (selection_score v3)。
     """
     apply = generation >= feasibility_cfg.apply_from_generation
     entry_min = feasibility_cfg.entry_count_min
@@ -532,6 +543,7 @@ def _update_cache(
                 stage_c_pass=False,
                 feasible=(not apply),
                 violation_magnitude=float(entry_min) if apply else 0.0,
+                stage_c_feasible=(not stage_c_feasibility_apply),
             )
             continue
         fp_raw = row.get("fitness_pen")
@@ -550,6 +562,27 @@ def _update_cache(
         else:
             feasible = True
             violation = 0.0
+        # T045: stage_c_feasible 計算
+        if stage_c_feasibility_apply:
+            try:
+                pnl = float(row.get("total_pnl") or 0.0)
+            except (TypeError, ValueError):
+                pnl = 0.0
+            sharpe_raw = row.get("trade_sharpe_raw")
+            try:
+                sharpe = (
+                    float(sharpe_raw) if sharpe_raw is not None else 0.0
+                )
+            except (TypeError, ValueError):
+                sharpe = 0.0
+            stage_c_feasible = (
+                math.isfinite(pnl)
+                and math.isfinite(sharpe)
+                and pnl > 0.0
+                and sharpe > 0.0
+            )
+        else:
+            stage_c_feasible = True
         cache[g.name] = IndividualCacheEntry(
             generation=generation,
             fitness_pen=fp,
@@ -558,6 +591,7 @@ def _update_cache(
             stage_c_pass=bool(row.get("stage_c_pass", False)),
             feasible=feasible,
             violation_magnitude=violation,
+            stage_c_feasible=stage_c_feasible,
         )
 
 
@@ -773,15 +807,18 @@ def _write_reports(
             "violation_magnitude": float(
                 _safe_finite(best_entry.violation_magnitude)[0]
             ),
+            # T045
+            "stage_c_feasible": bool(best_entry.stage_c_feasible),
             "selection_score": [
                 int(best_entry.feasible),
                 -float(_safe_finite(best_entry.violation_magnitude)[0]),
+                int(best_entry.stage_c_feasible),
                 int(best_entry.stage_c_pass),
                 int(best_entry.stage_b_pass),
                 int(best_entry.stage_a_pass),
                 float(best_fitness_val),
             ],
-            "selection_score_schema": "v2_feasibility",
+            "selection_score_schema": "v3_stage_c_feasibility",
             "metrics": best_metrics,
         },
         "live_criteria": live_check,
@@ -962,6 +999,7 @@ def main(argv: list[str] | None = None) -> int:
             lane_id,
             current_generation,
             cfg.ga.feasibility,
+            stage_c_feasibility_apply=cfg.stage_gate.stage_c_feasibility_apply,
         )
 
         best_fp = max(

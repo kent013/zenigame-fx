@@ -32,6 +32,7 @@ def _make_entry(
     feasible: bool = True,
     violation: float = 0.0,
     generation: int = 0,
+    stage_c_feasible: bool = True,  # T045
 ) -> IndividualCacheEntry:
     return IndividualCacheEntry(
         generation=generation,
@@ -41,6 +42,7 @@ def _make_entry(
         stage_c_pass=c,
         feasible=feasible,
         violation_magnitude=violation,
+        stage_c_feasible=stage_c_feasible,
     )
 
 
@@ -65,11 +67,30 @@ def test_legacy_selection_score_falls_back_to_4_tuple() -> None:
     assert fb == (0, 0, 1, 1.5)
 
 
-def test_v2_selection_key_includes_feasibility() -> None:
-    """fallback_active=False の _selection_key は v2 6 要素を返す."""
-    e = _make_entry(fitness_pen=1.5, a=True, feasible=True, violation=0.0)
-    v2 = _selection_key(e, fallback_active=False)
-    assert v2 == (1, -0.0, 0, 0, 1, 1.5)
+def test_v3_selection_key_includes_stage_c_feasibility() -> None:
+    """fallback_active=False の _selection_key は v3 7 要素を返す (T045)."""
+    e = _make_entry(
+        fitness_pen=1.5,
+        a=True,
+        feasible=True,
+        violation=0.0,
+        stage_c_feasible=True,
+    )
+    v3 = _selection_key(e, fallback_active=False)
+    # (feasible, -violation, stage_c_feasible, C_pass, B_pass, A_pass, fitness_pen)
+    assert v3 == (1, -0.0, 1, 0, 0, 1, 1.5)
+
+
+def test_v3_stage_c_feasible_wins_over_infeasible_when_other_equal() -> None:
+    """T045: stage_c_feasible=True が False に勝つ (他要素同条件)."""
+    yes = _make_entry(
+        fitness_pen=0.0, feasible=True, violation=0.0, stage_c_feasible=True
+    )
+    no = _make_entry(
+        fitness_pen=10.0, feasible=True, violation=0.0, stage_c_feasible=False
+    )
+    # stage_c_feasible=True (yes) > False (no) なので fitness 高くても yes が勝つ
+    assert yes.selection_score > no.selection_score
 
 
 def test_is_all_infeasible_returns_true_when_no_feasible() -> None:
@@ -296,3 +317,118 @@ def test_elite_selection_consistent_with_tournament_under_fallback() -> None:
         reverse=True,
     )
     assert sorted_names[0] == "lo"
+
+
+# T045 Stage C Feasibility =================================================
+
+
+def test_update_cache_marks_negative_pnl_infeasible_for_c() -> None:
+    """T045: total_pnl<=0 なら stage_c_feasible=False."""
+    cfg = GAFeasibilityConfig(apply_from_generation=0, entry_count_min=1)
+
+    class _A:
+        def get_row_snapshot(
+            self, lane_id: str, generation: int, name: str
+        ) -> dict[str, Any]:
+            return {
+                "fitness_pen": 1.0,
+                "trade_count": 100,
+                "stage_a_pass": True,
+                "stage_b_pass": False,
+                "stage_c_pass": False,
+                "total_pnl": -100.0,
+                "trade_sharpe_raw": 0.5,
+            }
+
+    class _G:
+        name = "g0_i0"
+
+    cache: dict[str, IndividualCacheEntry] = {}
+    _update_cache(
+        cache, [_G()], _A(), "lane", 0, cfg, stage_c_feasibility_apply=True
+    )
+    assert cache["g0_i0"].stage_c_feasible is False
+
+
+def test_update_cache_marks_negative_sharpe_infeasible_for_c() -> None:
+    """T045: trade_sharpe_raw<=0 なら stage_c_feasible=False."""
+    cfg = GAFeasibilityConfig(apply_from_generation=0, entry_count_min=1)
+
+    class _A:
+        def get_row_snapshot(
+            self, lane_id: str, generation: int, name: str
+        ) -> dict[str, Any]:
+            return {
+                "fitness_pen": 1.0,
+                "trade_count": 100,
+                "stage_a_pass": True,
+                "stage_b_pass": False,
+                "stage_c_pass": False,
+                "total_pnl": 1000.0,
+                "trade_sharpe_raw": -0.1,
+            }
+
+    class _G:
+        name = "g0_i0"
+
+    cache: dict[str, IndividualCacheEntry] = {}
+    _update_cache(
+        cache, [_G()], _A(), "lane", 0, cfg, stage_c_feasibility_apply=True
+    )
+    assert cache["g0_i0"].stage_c_feasible is False
+
+
+def test_update_cache_marks_positive_both_feasible_for_c() -> None:
+    """T045: PnL>0 ∧ Sharpe>0 で stage_c_feasible=True."""
+    cfg = GAFeasibilityConfig(apply_from_generation=0, entry_count_min=1)
+
+    class _A:
+        def get_row_snapshot(
+            self, lane_id: str, generation: int, name: str
+        ) -> dict[str, Any]:
+            return {
+                "fitness_pen": 1.0,
+                "trade_count": 100,
+                "stage_a_pass": True,
+                "stage_b_pass": True,
+                "stage_c_pass": False,
+                "total_pnl": 500.0,
+                "trade_sharpe_raw": 0.3,
+            }
+
+    class _G:
+        name = "g0_i0"
+
+    cache: dict[str, IndividualCacheEntry] = {}
+    _update_cache(
+        cache, [_G()], _A(), "lane", 0, cfg, stage_c_feasibility_apply=True
+    )
+    assert cache["g0_i0"].stage_c_feasible is True
+
+
+def test_update_cache_stage_c_feasibility_disabled_keeps_true() -> None:
+    """T045: config で disabled なら stage_c_feasible は常に True."""
+    cfg = GAFeasibilityConfig(apply_from_generation=0, entry_count_min=1)
+
+    class _A:
+        def get_row_snapshot(
+            self, lane_id: str, generation: int, name: str
+        ) -> dict[str, Any]:
+            return {
+                "fitness_pen": 1.0,
+                "trade_count": 100,
+                "stage_a_pass": True,
+                "stage_b_pass": False,
+                "stage_c_pass": False,
+                "total_pnl": -1000.0,  # 負だが disabled なので True
+                "trade_sharpe_raw": -0.5,
+            }
+
+    class _G:
+        name = "g0_i0"
+
+    cache: dict[str, IndividualCacheEntry] = {}
+    _update_cache(
+        cache, [_G()], _A(), "lane", 0, cfg, stage_c_feasibility_apply=False
+    )
+    assert cache["g0_i0"].stage_c_feasible is True
