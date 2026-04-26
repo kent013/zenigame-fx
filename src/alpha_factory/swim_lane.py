@@ -37,7 +37,10 @@ from __future__ import annotations
 import time as _time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from src.alpha_factory.diagnostics_collector import DiagnosticsCollector
 
 import structlog
 
@@ -213,6 +216,7 @@ class LaneManager:
         backtest_config_factory: Callable[[str], BacktestConfig],
         *,
         deferred_promotion: bool = False,
+        diagnostics_collector: DiagnosticsCollector | None = None,
     ) -> None:
         if not tier1:
             raise ValueError(
@@ -276,6 +280,9 @@ class LaneManager:
         self._archive = archive
         self._bt_factory = backtest_config_factory
         self._deferred_promotion = deferred_promotion
+        # T033: post-RUN sidecar diagnostics 用 collector (optional)。
+        # None なら record_* は no-op (production 経路の opt-in)。
+        self._diagnostics: DiagnosticsCollector | None = diagnostics_collector
         # 冪等性ガード: 二重昇格を in-memory set で抑止
         self._promoted_keys: set[tuple[str, int, str]] = set()
         # health-check: factory が intraday 制約を満たすか確認
@@ -502,6 +509,14 @@ class LaneManager:
                 parent_a=parent_a,
                 parent_b=parent_b,
             )
+            # T033: sidecar diagnostics に Stage A 結果を記録
+            if self._diagnostics is not None:
+                self._diagnostics.record_stage_a(
+                    lane.lane_id,
+                    lane.generation_count,
+                    genome.name,
+                    a_result,
+                )
             if not a_result.passed:
                 continue
             stage_a_pass += 1
@@ -553,6 +568,14 @@ class LaneManager:
                 lane.generation_count,
                 b_result,
             )
+            # T033: sidecar diagnostics に Stage B pass/fail を記録
+            if self._diagnostics is not None:
+                self._diagnostics.record_stage_b(
+                    lane.lane_id,
+                    lane.generation_count,
+                    genome.name,
+                    bool(b_result.passed),
+                )
             if not b_result.passed:
                 continue
             stage_b_pass += 1
@@ -574,6 +597,14 @@ class LaneManager:
                 lane.generation_count,
                 c_result,
             )
+            # T033: sidecar diagnostics に Stage C pass/fail を記録
+            if self._diagnostics is not None:
+                self._diagnostics.record_stage_c(
+                    lane.lane_id,
+                    lane.generation_count,
+                    genome.name,
+                    bool(c_result.passed),
+                )
             if c_result.passed:
                 stage_c_pass += 1
             # Graduation 判定 (Stage C 通過 AND cross-pair 通過の AND)

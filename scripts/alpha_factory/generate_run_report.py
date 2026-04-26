@@ -609,6 +609,115 @@ def main(argv: list[str] | None = None) -> int:
         )
     lines.append("")
 
+    # T033: Stage A provenance (sidecar diagnostics) — 固定セクション
+    # sidecar 不在時は "not available" を明記 (契約ぶれ回避)
+    lines.append("## Stage A provenance 分布 (T033 / sidecar)")
+    lines.append("")
+    lines.append(
+        "> Stage A 落ち個体の `total_pnl_stage_a` 分布を可視化 "
+        "(`reports/run-reports/run-{N}/diagnostics/stage_a_provenance.parquet`)。"
+        "archive `total_pnl=0.0` が「Stage A 落ち = 投影仕様」「実 PnL=0」「コスト過大」"
+        "のいずれかを切り分けるための観測指標 (詳細: docs/alpha_factory/diagnostics-sidecar.md)。"
+    )
+    lines.append("")
+    sidecar_path_str = summary.get("diagnostics_sidecar")
+    sidecar_path = (
+        Path(sidecar_path_str) if sidecar_path_str else None
+    )
+    if sidecar_path and not sidecar_path.is_absolute():
+        sidecar_path = REPO_ROOT / sidecar_path
+    if sidecar_path is None or not sidecar_path.exists():
+        lines.append("- Stage A provenance: not available (sidecar 不在)")
+    else:
+        try:
+            import pyarrow.parquet as _pq
+            sidecar_rows = list(_pq.read_table(sidecar_path).to_pylist())
+        except Exception as exc:
+            lines.append(f"- sidecar 読み込みエラー: {exc}")
+            sidecar_rows = None
+        if sidecar_rows is not None:
+            stage_counts: dict[str, int] = {}
+            # T033 Codex round-1 [Warning] 対応: Run 9 で問題化した
+            # "trade_count>0 ∧ total_pnl=0" を切り分けるため、以下 3 群に
+            # 分けて分布を出す:
+            #  (1) Stage A 落ち全体
+            #  (2) Stage A 落ち かつ trade_count>0 (取引したのに PnL=? を観測)
+            #  (3) Stage A 通過個体 (比較対照)
+            stage_a_only_pnls: list[float] = []
+            stage_a_only_with_trades_pnls: list[float] = []
+            stage_a_passed_pnls: list[float] = []
+            zero_pnl_with_trades_count = 0
+            for r in sidecar_rows:
+                ms = r.get("metric_stage", "")
+                stage_counts[ms] = stage_counts.get(ms, 0) + 1
+                pnl_val = r.get("total_pnl_stage_a")
+                # T033 round-2 [Critical] 対応: sidecar の trade_count が NaN /
+                # 文字列 / その他で int() 失敗するとレポート生成が落ちる。
+                # 既存パターンの _as_int_safe で防御し、不正値は 0 扱いにする。
+                tc = _as_int_safe(r.get("trade_count"))
+                try:
+                    pnl = float(pnl_val) if pnl_val is not None else None
+                    if pnl is not None and not math.isfinite(pnl):
+                        pnl = None
+                except (TypeError, ValueError):
+                    pnl = None
+                if ms == "stage_a_only":
+                    if pnl is not None:
+                        stage_a_only_pnls.append(pnl)
+                        if tc > 0:
+                            stage_a_only_with_trades_pnls.append(pnl)
+                            if pnl == 0.0:
+                                zero_pnl_with_trades_count += 1
+                else:
+                    # stage_a_evaluated / stage_b_evaluated / stage_c_evaluated
+                    # = Stage A 通過個体
+                    if pnl is not None:
+                        stage_a_passed_pnls.append(pnl)
+            lines.append(f"- sidecar 行数: {len(sidecar_rows)}")
+            lines.append(
+                "- metric_stage 分布: "
+                + ", ".join(
+                    f"{k}={v}"
+                    for k, v in sorted(stage_counts.items())
+                )
+            )
+            # (1) Stage A 落ち全体
+            if stage_a_only_pnls:
+                lines.append(
+                    "- (1) Stage A 落ち全体 `total_pnl_stage_a` 分布: "
+                    + _fmt_stats(_basic_stats(stage_a_only_pnls))
+                )
+            else:
+                lines.append("- (1) Stage A 落ち全体: 0 件")
+            # (2) Stage A 落ち かつ trade_count>0 (Run 9 監査の核心)
+            if stage_a_only_with_trades_pnls:
+                lines.append(
+                    "- (2) Stage A 落ち かつ trade_count>0 の "
+                    f"`total_pnl_stage_a` 分布 (n={len(stage_a_only_with_trades_pnls)}): "
+                    + _fmt_stats(_basic_stats(stage_a_only_with_trades_pnls))
+                )
+                lines.append(
+                    f"  - うち PnL=0 個体: {zero_pnl_with_trades_count} 件 "
+                    "(取引したのに PnL=0 = Run 9 監査の対象観測)"
+                )
+            else:
+                lines.append(
+                    "- (2) Stage A 落ち かつ trade_count>0: 0 件 "
+                    "(該当無し or 全 Stage A 通過)"
+                )
+            # (3) Stage A 通過個体 (比較対照)
+            if stage_a_passed_pnls:
+                lines.append(
+                    "- (3) Stage A 通過個体 `total_pnl_stage_a` 分布 "
+                    f"(n={len(stage_a_passed_pnls)}): "
+                    + _fmt_stats(_basic_stats(stage_a_passed_pnls))
+                )
+            else:
+                lines.append(
+                    "- (3) Stage A 通過個体: 0 件 (比較対照なし)"
+                )
+    lines.append("")
+
     # archive Top-5 個体一覧 (Best とは別物)
     lines.append("## Archive Top-5 個体一覧")
     lines.append("")

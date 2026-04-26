@@ -55,6 +55,11 @@ from src.alpha_factory.config import (
     StageWindowsConfig,
     load_config,
 )
+from src.alpha_factory.diagnostics_collector import DiagnosticsCollector
+from src.alpha_factory.diagnostics_sidecar import (
+    sidecar_relative_path,
+    write_stage_a_provenance,
+)
 from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
 from src.alpha_factory.swim_lane import (
     GRADUATION_LANE_ID,
@@ -682,6 +687,7 @@ def _write_reports(
     lane_manager: LaneManager,
     cross_pair_mode: str,
     now: datetime,
+    diagnostics_sidecar_path: Path | None = None,
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -783,6 +789,15 @@ def _write_reports(
         "graduation_count": lane_manager.promote_graduates(),
         "archive_parquet": str(archive_path),
     }
+    # T033: 書き込み成功時のみ summary に sidecar path を追加
+    # (consumer は missing field を無視できる契約)
+    if diagnostics_sidecar_path is not None:
+        try:
+            summary["diagnostics_sidecar"] = str(
+                diagnostics_sidecar_path.relative_to(REPO_ROOT)
+            )
+        except ValueError:
+            summary["diagnostics_sidecar"] = str(diagnostics_sidecar_path)
     (run_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -872,6 +887,10 @@ def main(argv: list[str] | None = None) -> int:
     primitive_evaluator = RegistryEvaluator(pair=cfg.dataset.instrument)
     bt_factory = _make_bt_factory(cfg.dataset, cfg.backtest)
 
+    # T033: Stage A/B/C diagnostics を蓄積する run-level collector。
+    # GA 完了後 sidecar Parquet として flush する。
+    diagnostics_collector = DiagnosticsCollector()
+
     tier1_lane = Tier1Lane(
         lane_id=lane_id,
         instrument=cfg.dataset.instrument,
@@ -893,6 +912,7 @@ def main(argv: list[str] | None = None) -> int:
         primitive_evaluator=primitive_evaluator,
         archive=archive,
         backtest_config_factory=bt_factory,
+        diagnostics_collector=diagnostics_collector,
     )
     cross_pair_mode = (
         "enabled" if graduation_lane.pair_bars
@@ -975,6 +995,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     best_genome = genomes_by_name[best_name]
 
+    # T033: Stage A diagnostics sidecar を _write_reports の前に flush して、
+    # 書き込み成功時のみ summary.json に diagnostics_sidecar field を追加する。
+    # --no-report 時は sidecar も skip (reports/ ディレクトリを触らない契約と整合)。
+    sidecar_path_written: Path | None = None
+    if not args.no_report:
+        sidecar_path = REPO_ROOT / sidecar_relative_path(run_number)
+        sidecar_path_written = write_stage_a_provenance(
+            diagnostics_collector, sidecar_path
+        )
+
     if not args.no_report:
         _write_reports(
             run_dir=run_dir,
@@ -993,6 +1023,7 @@ def main(argv: list[str] | None = None) -> int:
             lane_manager=lane_manager,
             cross_pair_mode=cross_pair_mode,
             now=now,
+            diagnostics_sidecar_path=sidecar_path_written,
         )
     else:
         logger.info(
