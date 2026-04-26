@@ -1,0 +1,49 @@
+{
+  "name": "g58_i70",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F6",
+          "weight": 0.6241431176646699,
+          "params": {
+            "session": 0,
+            "k": 2.981727426028068,
+            "atr_n": 17
+          }
+        },
+        {
+          "name": "P9",
+          "weight": 1.3968001980349123,
+          "params": {
+            "mom_n": 15,
+            "scale": 0.09356701526807312,
+            "staleness_bars": 478
+          }
+        },
+        {
+          "name": "F1",
+          "weight": 0.7410200370942874,
+          "params": {
+            "fast_n": 20,
+            "slow_n": 27,
+            "atr_n": 24
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.9955810502236623
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.4073234228002365,
+    "exit_threshold": 0.09223073697663108,
+    "max_pos": 3,
+    "time_stop_min": 287
+  },
+  "risk": {
+    "stop_atr": 1.6077334430740504,
+    "take_atr": 2.341214499034189
+  }
+}
