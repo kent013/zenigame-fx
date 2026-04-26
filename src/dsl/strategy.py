@@ -21,7 +21,7 @@ import numpy as np
 
 from src.broker.orders import OrderSignal, PortfolioSnapshot
 from src.domain.price import PriceBar
-from src.dsl.composite import compute_composite
+from src.dsl.composite import compute_clause_score, compute_composite
 from src.dsl.genome import Genome, SignalConfig
 
 # SignalCacheKey: (primitive_id, sorted params tuple)
@@ -175,10 +175,24 @@ class DslStrategy:
         # paper trading / live feed では常に None のまま (P8 Verified)。
         self._prepared: PreparedSignals | None = None
         self._bar_count = 0
+        # T037: runtime fired clause idx 集合 (compute_clause_score != 0.0 が
+        # 1 度でも起きた clause)。observability only、entry/exit/composite には
+        # 影響しない。詳細: devnotes/20260425-0958-signal-active-clause-metric/
+        self._active_clause_indices: set[int] = set()
 
     @property
     def genome(self) -> Genome:
         return self._genome
+
+    @property
+    def active_clause_indices(self) -> frozenset[int]:
+        """T037: backtest 中に compute_clause_score != 0.0 だった clause idx 集合。
+
+        observability only、entry/exit/composite/fitness には影響しない。
+        backtest 開始時 (`prepare()` または on_bar 初回) に空集合からスタート、
+        各 bar で値を蓄積する。再 `prepare()` 時は集合をリセットする。
+        """
+        return frozenset(self._active_clause_indices)
 
     def warmup_bars(self) -> int:
         return self._warmup
@@ -202,6 +216,9 @@ class DslStrategy:
         # 再 prepare() 時の stale state 除去 (Round 1 Warning 対応)
         self._prepared = None
         self._bar_count = 0
+        # T037: 再 prepare() で active clause counter もリセット
+        # (新規 backtest 開始 = 集合空 が契約)。
+        self._active_clause_indices.clear()
 
         if not hasattr(self._evaluator, "evaluate_all_bars"):
             return
@@ -292,7 +309,19 @@ class DslStrategy:
                     )
                 values_per_clause.append(vals)
 
+        # T037: composite の数値・例外契約は完全に compute_composite() に
+        # 委譲し (clauses 空 / 長さ不一致は ValueError として伝搬)、それとは
+        # 独立に per-clause score を別途 compute_clause_score で取得して
+        # active_clause_indices に集計する (observability only、composite 計算
+        # 結果には一切影響しない)。同 clause について compute_clause_score を
+        # 2 回計算するが clause 数は 1-3 で重い処理ではない (Codex round-1
+        # [Critical] 反映)。
         composite = compute_composite(self._genome.clauses, values_per_clause)
+        for ci, (clause, vals) in enumerate(
+            zip(self._genome.clauses, values_per_clause, strict=True)
+        ):
+            if compute_clause_score(clause, vals) != 0.0:
+                self._active_clause_indices.add(ci)
         pos_cfg = self._genome.position
 
         # 保有あり: exit 判定のみ（無保有のみ entry を試みる = ドテン禁止）

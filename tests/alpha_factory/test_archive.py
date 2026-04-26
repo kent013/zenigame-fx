@@ -15,9 +15,9 @@ from src.alpha_factory.archive import (
     _MAX_STAGE_KEY,
     GENOMES_SCHEMA,
     GenomeArchive,
-    _compute_active_clause_placeholder,
     _compute_n_nodes,
     _create_row_template,
+    _read_active_clause_from_payload,
 )
 from src.alpha_factory.stage_gate import CrossPairResult, StageResult
 from src.dsl.genome import (
@@ -68,6 +68,8 @@ def _stage_a_result(
         "trade_count": 25,
         # T-sharpe Phase 1A: payload key を sharpe_raw → trade_sharpe_raw にリネーム
         "trade_sharpe_raw": 0.3,
+        # T037: stage_a payload に active_clause が必ず入る契約。テストでも default で付与。
+        "active_clause": 0,
     }
     payload.update(payload_overrides)
     return StageResult(
@@ -269,13 +271,39 @@ def test_collect_stage_a_n_nodes_computed() -> None:
     assert _compute_n_nodes(g) == 4
 
 
-def test_collect_stage_a_active_clause_placeholder() -> None:
+def test_collect_stage_a_active_clause_from_payload() -> None:
+    """T037: archive `active_clause` 列は Stage A payload の値を書き写す。"""
     arc = _make_archive()
-    arc.collect_stage_a(_stub_genome(), "lane", 0, _stage_a_result(),
-                         instrument="USD_JPY")
+    arc.collect_stage_a(
+        _stub_genome(), "lane", 0,
+        _stage_a_result(active_clause=3),
+        instrument="USD_JPY",
+    )
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["active_clause"] == 3
+
+
+def test_collect_stage_a_active_clause_zero_when_payload_missing() -> None:
+    """T037: payload に active_clause が無い場合は 0 (defensive)."""
+    arc = _make_archive()
+    # _stage_a_result の default に active_clause=0 が入るが、明示削除して検証
+    sa = _stage_a_result()
+    payload = sa.metrics["payload"]
+    assert isinstance(payload, dict)
+    payload.pop("active_clause", None)
+    arc.collect_stage_a(_stub_genome(), "lane", 0, sa, instrument="USD_JPY")
     row = arc._rows[("lane", 0, "g0_i0")]
     assert row["active_clause"] == 0
-    assert _compute_active_clause_placeholder() == 0
+
+
+def test_read_active_clause_from_payload_handles_invalid_inputs() -> None:
+    """T037: payload helper は bool/non-int/負値 を 0 にクリップ."""
+    assert _read_active_clause_from_payload({"active_clause": 5}) == 5
+    assert _read_active_clause_from_payload({"active_clause": 0}) == 0
+    assert _read_active_clause_from_payload({"active_clause": -1}) == 0
+    assert _read_active_clause_from_payload({"active_clause": True}) == 0
+    assert _read_active_clause_from_payload({"active_clause": "3"}) == 0
+    assert _read_active_clause_from_payload({}) == 0
 
 
 def test_collect_stage_a_genome_json_roundtrip() -> None:

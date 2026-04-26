@@ -179,13 +179,19 @@ def _compute_n_nodes(genome: Genome) -> int:
     return sum(len(c.directional) + len(c.local_gate) for c in genome.clauses)
 
 
-def _compute_active_clause_placeholder() -> int:
-    """**Phase 2 placeholder**: runtime 発火 clause 数取得経路が未整備のため
-    ``0`` を返す。
+def _read_active_clause_from_payload(payload: Mapping[str, object]) -> int:
+    """T037: Stage A payload から ``active_clause`` (runtime fired clause idx 数)
+    を取り出す。
 
-    将来 ``DslStrategy`` / engine 側に発火カウンタを追加し、
-    ``collect_stage_a`` の引数で受け渡すよう拡張予定（別 TODO）。
+    payload に key が無い / 非数値 / 負値の場合は 0 (defensive)。
+    archive ``active_clause`` 列は non-null int32 契約のため、不明時も 0 で埋める。
+    Stage A 経路 (``evaluate_stage_a``) では必ず int を入れる契約 (T037 完了)。
     """
+    v = payload.get("active_clause")
+    if isinstance(v, bool):
+        return 0  # bool は数値として扱わない (archive 規約)
+    if isinstance(v, int):
+        return v if v >= 0 else 0
     return 0
 
 
@@ -366,7 +372,9 @@ class GenomeArchive:
         row["sharpe_calc_version"] = "v2_trade_level"
         row["sharpe"] = None  # v2 archive では legacy sharpe は埋めない
         row["n_nodes"] = _compute_n_nodes(genome)
-        row["active_clause"] = _compute_active_clause_placeholder()
+        # T037: placeholder (常時 0) を撤廃、Stage A payload の runtime fired
+        # clause 数を読み取る。`evaluate_stage_a` が必ず int を入れる契約。
+        row["active_clause"] = _read_active_clause_from_payload(payload)
         row["genome_json"] = json.dumps(genome_to_dict(genome), sort_keys=True)
         self._mark_stage(row, "A")
 
