@@ -166,11 +166,12 @@ def _make_archive() -> GenomeArchive:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_has_34_columns() -> None:
+def test_schema_has_40_columns() -> None:
     # T-sharpe Phase 1A: trade_sharpe_raw + sharpe_calc_version (28→30)
     # T035: n_fold_effective + positive_fold_ratio_effective + stage_b_reason_codes (30→33)
     # T043: mission_score (33→34)
-    assert len(GENOMES_SCHEMA.names) == 34
+    # T036: FSP 6 列 (34→40)
+    assert len(GENOMES_SCHEMA.names) == 40
     expected = {
         "run_id", "run_number", "generation", "individual_name",
         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
@@ -186,6 +187,9 @@ def test_schema_has_34_columns() -> None:
         "stage_b_reason_codes",
         # T043: live_criteria 4 軸 soft 合算スコア
         "mission_score",
+        # T036: Factor Shadow Plane (FSP) 6 列
+        "fsp_runtime_mode", "fsp_sampling_mode", "fsp_factor_set",
+        "fsp_rolling_corr_60d", "fsp_explained_variance", "fsp_idio_ratio",
     }
     assert set(GENOMES_SCHEMA.names) == expected
 
@@ -764,6 +768,9 @@ def test_schema_nullable_attributes() -> None:
         "stage_b_reason_codes",
         # T043: Stage C 評価時のみ書き込まれるため nullable
         "mission_score",
+        # T036: FSP 6 列 (post-RUN updater が書き込む、collect_stage_* では null)
+        "fsp_runtime_mode", "fsp_sampling_mode", "fsp_factor_set",
+        "fsp_rolling_corr_60d", "fsp_explained_variance", "fsp_idio_ratio",
     }
     for f in GENOMES_SCHEMA:
         if f.name in nullable_cols:

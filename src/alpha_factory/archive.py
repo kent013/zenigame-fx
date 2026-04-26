@@ -92,6 +92,17 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
         # 観測指標として archive/report に記録。GA fitness や stage_c.passed には影響しない。
         # 詳細: docs/alpha_factory/mission-score.md
         pa.field("mission_score", pa.float64(), nullable=True),
+        # T036: Factor Shadow Plane (FSP) — single instrument 用 diagnostic layer。
+        # post-RUN updater (src/alpha_factory/fsp_updater.py) が一括書き戻し。
+        # collect_stage_* は触らない (template 初期化時の None のまま flush)。
+        # 詳細: docs/alpha_factory/factor-shadow-plane.md /
+        # devnotes/20260425-0956-factor-shadow-plane-single-instr/
+        pa.field("fsp_runtime_mode", pa.string(), nullable=True),
+        pa.field("fsp_sampling_mode", pa.string(), nullable=True),
+        pa.field("fsp_factor_set", pa.list_(pa.string()), nullable=True),
+        pa.field("fsp_rolling_corr_60d", pa.list_(pa.float64()), nullable=True),
+        pa.field("fsp_explained_variance", pa.float64(), nullable=True),
+        pa.field("fsp_idio_ratio", pa.float64(), nullable=True),
     ]
 )
 
@@ -156,6 +167,13 @@ def _create_row_template() -> dict[str, Any]:
         "stage_b_reason_codes": None,
         # T043: mission_score (Stage C 評価時のみ書き込み、それ以外は None)
         "mission_score": None,
+        # T036: FSP — post-RUN updater が一括書き戻し、template は null 初期化のみ
+        "fsp_runtime_mode": None,
+        "fsp_sampling_mode": None,
+        "fsp_factor_set": None,
+        "fsp_rolling_corr_60d": None,
+        "fsp_explained_variance": None,
+        "fsp_idio_ratio": None,
     }
 
 
