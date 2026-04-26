@@ -331,6 +331,10 @@ def evaluate_stage_a(
     fitness_pen: float | None = None
     sharpe_raw: float | None = None
     trade_count = 0
+    # T033: Stage A backtest の total_pnl を payload に in-memory only で添加。
+    # archive Parquet には書かない (28+ カラム fixed schema を尊重)。
+    # post-RUN sidecar diagnostics (`stage_a_provenance.parquet`) で参照する。
+    total_pnl_a: float = 0.0
     # T037: Stage A backtest 中に runtime fired した clause idx 数 (observation
     # only, archive `active_clause` 列に記録される)。例外時 / strategy 未生成時は
     # 0 (測定不能を表すが、archive 既存契約 (non-null int32) との整合のため 0
@@ -352,6 +356,13 @@ def evaluate_stage_a(
         sharpe_raw = (
             float(bt.trade_sharpe_raw) if bt.trade_sharpe_raw is not None else None
         )
+        # T033: total_pnl を sidecar diagnostics 用に保持 (size_norm 例外と独立)
+        try:
+            total_pnl_a = float(bt.total_pnl)
+            if not math.isfinite(total_pnl_a):
+                total_pnl_a = 0.0
+        except Exception:
+            total_pnl_a = 0.0
         # T037: backtest 完了後の strategy.active_clause_indices を集計。
         # backtest 経路で必ず prepare()→on_bar が呼ばれているはずだが、
         # defensive に len() 経由で取り出す。
@@ -416,6 +427,9 @@ def evaluate_stage_a(
             "trade_sharpe_raw": sharpe_raw,
             # T037: runtime fired clause idx 数 (observation only)
             "active_clause": active_clause_count,
+            # T033: sidecar diagnostics 用 in-memory only field。
+            # archive Parquet には書かない (28+ カラム fixed schema 尊重)。
+            "total_pnl": total_pnl_a,
         },
     }
     return StageResult(
