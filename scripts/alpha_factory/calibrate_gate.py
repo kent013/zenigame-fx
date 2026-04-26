@@ -44,6 +44,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from datetime import UTC  # noqa: E402
+
 from src.alpha_factory.calibrate_gate import (  # noqa: E402
     CalibrateConfig,
     ConfigError,
@@ -54,6 +56,11 @@ from src.alpha_factory.calibrate_gate import (  # noqa: E402
     decide,
     load_calibrate_config,
     validate_schema,
+)
+from src.alpha_factory.calibrate_gate_history import (  # noqa: E402
+    DEFAULT_HISTORY_PATH,
+    HistoryRecord,
+    append_record,
 )
 
 logger = structlog.get_logger("calibrate_gate")
@@ -373,6 +380,40 @@ def main(argv: list[str] | None = None) -> int:
             reason=reason,
             dry_run=args.dry_run,
             new_threshold=decision.new_threshold,
+        )
+
+    # ---- T040: drift 監視用 JSONL 履歴に append (fail-open) ----
+    # dry_run でも観察記録は残す (制御則は変えない、観察のみ)。
+    try:
+        from datetime import datetime
+        record = HistoryRecord(
+            run_id=run_id_resolved,
+            applied_at=datetime.now(UTC).isoformat(),
+            n_rows_total=sample.n_rows_total,
+            n_rows_used=sample.n_rows_used,
+            aggregation_mode=sample.mode,
+            aggregation_window=sample.window,
+            actual_pass_rate=sample.actual_pass_rate,
+            target_pass_rate=config.target_pass_rate,
+            tol=config.pass_rate_tolerance_abs,
+            prev_threshold=config.prev_threshold,
+            new_threshold=decision.new_threshold,
+            delta=decision.delta,
+            decision=decision.decision,
+            var_fitness_pen=decision.var_fitness_pen,
+            clamped_by_delta=decision.clamped_by_delta,
+            clamped_by_floor_or_ceiling=decision.clamped_by_floor_or_ceiling,
+            stage_b_pass_count=monitoring.stage_b_pass_count,
+            stage_c_pass_count=monitoring.stage_c_pass_count,
+            live_criteria_gap=monitoring.live_criteria_gap,
+        )
+        history_path = REPO_ROOT / DEFAULT_HISTORY_PATH
+        append_record(record, history_path)
+    except Exception as e:
+        # fail-open: history 永続化エラーは calibrate-gate を止めない
+        print(
+            f"[warn] calibrate_gate.history append failed: {e}",
+            file=sys.stderr,
         )
 
     # ---- human-readable report ----
