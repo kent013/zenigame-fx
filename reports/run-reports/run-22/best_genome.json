@@ -1,0 +1,57 @@
+{
+  "name": "g44_i92",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F6",
+          "weight": 1.0966859871259227,
+          "params": {
+            "session": 0,
+            "k": 2.1982656135486573,
+            "atr_n": 12
+          }
+        },
+        {
+          "name": "F10",
+          "weight": 1.1441016806070343,
+          "params": {
+            "n": 52
+          }
+        },
+        {
+          "name": "F1",
+          "weight": 0.9771954411719538,
+          "params": {
+            "fast_n": 12,
+            "slow_n": 62,
+            "atr_n": 23
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "P6",
+          "weight": -1.1068521136959564,
+          "params": {
+            "atr_n": 28,
+            "threshold_rel": 0.009816639755780203,
+            "scale_rel": 0.008330876386457069
+          }
+        }
+      ],
+      "weight": 1.0362049327254732
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.17290921720834956,
+    "exit_threshold": 0.010108387734028557,
+    "max_pos": 2,
+    "time_stop_min": 182
+  },
+  "risk": {
+    "stop_atr": 3.3868331507456335,
+    "take_atr": 3.4573286118436704
+  }
+}
