@@ -1,0 +1,50 @@
+{
+  "name": "g53_i76",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F14",
+          "weight": 0.8115999911950377,
+          "params": {
+            "fast_n": 20,
+            "slow_n": 94,
+            "rv_n": 32,
+            "scale": 2.454748765095493,
+            "k_scale": 4.04260686379523
+          }
+        },
+        {
+          "name": "F6",
+          "weight": 0.8452923506496868,
+          "params": {
+            "session": 0,
+            "k": 0.8561122937041883,
+            "atr_n": 27
+          }
+        },
+        {
+          "name": "F9",
+          "weight": 0.7526670484750433,
+          "params": {
+            "n": 28,
+            "scale": 16.32849304616151
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.253750332410479
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.4666433361493436,
+    "exit_threshold": -0.19347607667126798,
+    "max_pos": 2,
+    "time_stop_min": 261
+  },
+  "risk": {
+    "stop_atr": 3.3083552764625295,
+    "take_atr": 0.8134772079920097
+  }
+}
