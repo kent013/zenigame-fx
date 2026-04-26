@@ -1,0 +1,43 @@
+{
+  "n_individuals": 4082,
+  "trade_sharpe_raw": {
+    "n": 4082,
+    "min": -0.9917293557335635,
+    "q25": -0.16136602930151958,
+    "median": 0.18601756321259028,
+    "q75": 0.3198935792625804,
+    "q85": 0.3411706435446119,
+    "q95": 0.3411706435446119,
+    "max": 0.3411706435446119,
+    "mean": 0.0714170409614847
+  },
+  "sharpe_annualized": {
+    "n": 4082,
+    "min": -55.55271663966358,
+    "q25": -12.61474842071473,
+    "median": 2.5600484566966477,
+    "q75": 3.8296309757073494,
+    "q85": 3.8296309757073494,
+    "q95": 3.8296309757073494,
+    "max": 4.861961473967182,
+    "mean": -5.6032091187864905
+  },
+  "lambda_day": {
+    "n": 4082,
+    "min": 0.5,
+    "q25": 0.5,
+    "median": 1.1166666666666667,
+    "q75": 20.766666666666666,
+    "q85": 41.93333333333333,
+    "q95": 574.4666666666667,
+    "max": 983.5166666666667,
+    "mean": 65.80895394414506
+  },
+  "target_pass_rate": 0.15,
+  "recommended_stage_a_threshold_trade_level": 0.3411706435446119,
+  "recommended_threshold_annualized": 3.8296309757073494,
+  "source_parquet": "/Users/ishitoya/repository/zenigame-fx/.cache/alpha_factory/runs/genomes_run_20260425_235717.parquet",
+  "window_days": 60,
+  "formula": "S_annual ≈ S_trade × sqrt((trade_count / window_days) × 252)",
+  "formula_caveat": "no autocorrelation correction (Phase 0 minimum). Lo (2002) 完全式は trade-level 時系列を archive に格納する Phase 1+ で導入。"
+}

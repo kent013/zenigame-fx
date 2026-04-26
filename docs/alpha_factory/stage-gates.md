@@ -23,6 +23,8 @@ session close は engine 不変条件として fitness に反映される。
 
 本ドキュメントで使用する用語: [Stage A](terminology.md#stage-a), [Stage B](terminology.md#stage-b), [Stage C](terminology.md#stage-c), [Walk-Forward](terminology.md#walk-forward), [IS / OOS](terminology.md#is-oos), [DSR](terminology.md#dsr), [(ii-lite)](terminology.md#ii-lite), [TC](terminology.md#tc), [StageResult](terminology.md#stage-result), [WF Fold](terminology.md#wf-fold), [Embargo](terminology.md#embargo), [Reason Code](terminology.md#reason-code), [CrossPairResult](terminology.md#cross-pair-result)
 
+**重要 (T042)**: `live_criteria.sharpe_min` は **annualized Sharpe** スケール、Stage A/B threshold は **trade-level Sharpe** スケール。Stage C 内部で `_annualize_trade_sharpe` により換算してから比較する。詳細: [sharpe-rescale.md](sharpe-rescale.md)
+
 ## 主要定義
 
 ### Stage A — Fast Screen

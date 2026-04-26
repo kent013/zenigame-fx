@@ -15,12 +15,12 @@
 
 各軸 `i` ∈ {sharpe, total_pnl, max_drawdown, trade_count} について `lower_i` / `target_i` を定義:
 
-| 軸 | lower | target | 向き |
-|----|------|--------|------|
-| sharpe | 0.0 | `live_criteria.sharpe_min` | 大きいほど良い |
-| total_pnl | 0.0 | `live_criteria.total_pnl_min` | 大きいほど良い |
-| max_drawdown_frac | `live_criteria.max_drawdown_max` | 0.0 | **小さいほど良い (逆向き)** |
-| trade_count | 0 | `live_criteria.trade_count_min` | 大きいほど良い、ただし `> trade_count_max` で score=0 (範囲制約) |
+| 軸 | lower | target | 向き | スケール (T042 後) |
+|----|------|--------|------|------------------|
+| sharpe | 0.0 | `live_criteria.sharpe_min` | 大きいほど良い | **annualized** (`_annualize_trade_sharpe` 経由)、[sharpe-rescale.md](sharpe-rescale.md) |
+| total_pnl | 0.0 | `live_criteria.total_pnl_min` | 大きいほど良い | 通貨単位（JPY） |
+| max_drawdown_frac | `live_criteria.max_drawdown_max` | 0.0 | **小さいほど良い (逆向き)** | fraction (0-1) |
+| trade_count | 0 | `live_criteria.trade_count_min` | 大きいほど良い、ただし `> trade_count_max` で score=0 (範囲制約) | trade 数 |
 
 ### 軸別スコア (clip + 線形正規化)
 
