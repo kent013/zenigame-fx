@@ -1,0 +1,130 @@
+[
+  {
+    "generation": 0,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 1,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 2,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 3,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 4,
+    "best_fitness": "-0.03563288985692997",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 5,
+    "best_fitness": "-0.035158035194193075",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 6,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 7,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 8,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 9,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 10,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 11,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 12,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 13,
+    "best_fitness": "-0.011671197424478152",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 14,
+    "best_fitness": "0",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "generation": 15,
+    "best_fitness": "-0.011671197424478152",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  }
+]

@@ -1,0 +1,30 @@
+{
+  "name": "g10_i10",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F8",
+          "weight": 1.1303887740723204,
+          "params": {
+            "n": 23,
+            "k": 2.737584528125071
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.1792601751852771
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.46149453189704115,
+    "exit_threshold": 0.10563424026213517,
+    "max_pos": 3,
+    "time_stop_min": 85
+  },
+  "risk": {
+    "stop_atr": 2.777381369034747,
+    "take_atr": 3.4033173440676663
+  }
+}
