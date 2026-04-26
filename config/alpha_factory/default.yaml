@@ -114,6 +114,8 @@ stage_gate:
     median_oos_sharpe_min: 0.05  # trade-level (T042 再校正)
     positive_fold_min: 0.60
     dsr_min: 0.0                # monitor_only (Phase 4 で hard 化)
+    # T044: pre-flight feasibility (LaneManager で max_folds < min なら全 lane 全個体 skip)
+    wf_min_folds_required: 2
   stage_c:
     holdout_days: 60
     spread_stress_multiplier: 1.5

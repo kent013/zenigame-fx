@@ -124,7 +124,7 @@ def test_stage_b_reason_known_codes_includes_median_and_positive_fold() -> None:
             "stage_b_reason_codes": "positive_fold_ratio<min",
         },
     ]
-    primary, any_, _, _ = _count_primary_and_any(rows)
+    primary, _, _, _ = _count_primary_and_any(rows)
     assert primary["median_oos_sharpe<min"] == 1
     assert primary["positive_fold_ratio<min"] == 1
     assert primary["other"] == 0
@@ -148,3 +148,28 @@ def test_stage_b_reason_excludes_non_stage_a_pass() -> None:
     assert n_eval == 0
     assert n_pass == 0
     assert primary["no_folds"] == 0
+
+
+def test_stage_b_reason_pre_flight_underfilled() -> None:
+    """T044: stage_b_pre_flight_underfilled が known_codes に含まれる."""
+    rows = [
+        {
+            "stage_a_pass": True,
+            "stage_b_pass": False,
+            "stage_b_reason_codes": "stage_b_pre_flight_underfilled",
+        },
+    ]
+    primary, _, _, _ = _count_primary_and_any(
+        rows,
+        known_codes=(
+            "no_folds",
+            "insufficient_folds",
+            "all_folds_unavailable",
+            "stage_b_window_underfilled",
+            "median_oos_sharpe<min",
+            "positive_fold_ratio<min",
+            "stage_b_pre_flight_underfilled",
+        ),
+    )
+    assert primary["stage_b_pre_flight_underfilled"] == 1
+    assert primary["other"] == 0

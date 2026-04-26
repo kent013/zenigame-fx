@@ -340,6 +340,7 @@ def _build_stage_gate(
             b_raw.get("positive_fold_min", 0.60)
         ),
         "stage_b_dsr_min": float(b_raw.get("dsr_min", 0.0)),
+        "wf_min_folds_required": int(b_raw.get("wf_min_folds_required", 2)),
         "stage_c_holdout_days": int(c_raw.get("holdout_days", 60)),
         "spread_stress_multiplier": float(
             c_raw.get("spread_stress_multiplier", 1.5)

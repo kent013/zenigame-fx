@@ -88,6 +88,11 @@ class StageGateConfig:
     stage_b_median_oos_sharpe_min: float = 0.05
     stage_b_positive_fold_min: float = 0.60
     stage_b_dsr_min: float = 0.0  # monitor only (Phase 4 で hard 化)
+    # T044: pre-flight feasibility minimum
+    # @why: LaneManager で max_folds < min なら全 lane 全個体 Stage B skip し
+    # stage_b_pre_flight_underfilled で fail-fast。insufficient_folds の後段検出ではなく
+    # 構造的に弾く。default 2 は WF 評価として最低限のサンプル数。
+    wf_min_folds_required: int = 2
 
     # Stage C
     stage_c_holdout_days: int = 60
@@ -134,6 +139,11 @@ class StageGateConfig:
         if self.wf_embargo_days < 0:
             raise ValueError(
                 f"wf_embargo_days must be >= 0: got {self.wf_embargo_days}"
+            )
+        if self.wf_min_folds_required < 1:
+            raise ValueError(
+                f"wf_min_folds_required must be >= 1: "
+                f"got {self.wf_min_folds_required}"
             )
         if self.spread_stress_multiplier <= 1.0:
             raise ValueError(

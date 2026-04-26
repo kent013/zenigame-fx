@@ -16,7 +16,12 @@ from datetime import date
 
 from src.domain.price import PriceBar
 
-__all__ = ["make_wf_folds", "n_unique_dates", "wf_min_unique_dates"]
+__all__ = [
+    "compute_max_folds",
+    "make_wf_folds",
+    "n_unique_dates",
+    "wf_min_unique_dates",
+]
 
 
 def wf_min_unique_dates(
@@ -38,6 +43,30 @@ def n_unique_dates(bars: list[PriceBar]) -> int:
     for b in bars:
         seen.add(b.bar_time.date())
     return len(seen)
+
+
+def compute_max_folds(
+    n_unique_dates: int,
+    train_days: int,
+    embargo_days: int,
+    test_days: int,
+    step_days: int,
+) -> int:
+    """与えられた WF パラメータと観測日数で生成可能な fold 数の最大値を返す (T044).
+
+    ``make_wf_folds`` のループ条件 (``test_end_excl <= n_days``) と一致させる:
+    - k 番目 fold の test_end_excl = step_days * k + train_days + embargo_days + test_days
+    - test_end_excl <= n_unique_dates を満たす最大 k+1 を返す
+    - n_unique_dates < fold_len なら 0 (空 list 相当)
+
+    LaneManager が Stage B 評価前に pre-flight feasibility check を行うための helper.
+    """
+    if step_days < 1:
+        raise ValueError("step_days must be >= 1")
+    fold_len = wf_min_unique_dates(train_days, embargo_days, test_days)
+    if n_unique_dates < fold_len:
+        return 0
+    return (n_unique_dates - fold_len) // step_days + 1
 
 
 def make_wf_folds(

@@ -243,3 +243,39 @@ def test_make_wf_folds_uses_wf_min_unique_dates_internally() -> None:
     # 30+1+10 = 41 <= 50 → 1 fold 以上
     folds = make_wf_folds(bars, train_days=30, embargo_days=1, test_days=10, step_days=5)
     assert len(folds) >= 1
+
+
+# T044 ===================================================================
+
+
+def test_compute_max_folds_returns_zero_when_underfilled() -> None:
+    from src.alpha_factory.walk_forward import compute_max_folds
+
+    # n_unique_dates < fold_len (60+1+10=71)
+    assert compute_max_folds(50, 60, 1, 10, 10) == 0
+
+
+def test_compute_max_folds_matches_make_wf_folds_count() -> None:
+    """compute_max_folds が make_wf_folds の実 fold 数と一致."""
+    from src.alpha_factory.walk_forward import compute_max_folds
+
+    bars = _continuous_bars(200, bars_per_day=1)
+    expected = len(make_wf_folds(bars, train_days=120, embargo_days=1, test_days=20, step_days=20))
+    actual = compute_max_folds(200, 120, 1, 20, 20)
+    assert actual == expected, f"expected={expected} actual={actual}"
+
+
+def test_compute_max_folds_step_progression() -> None:
+    """step_days を 2 倍にすると fold 数が概ね半減."""
+    from src.alpha_factory.walk_forward import compute_max_folds
+
+    fewer_steps = compute_max_folds(200, 50, 0, 20, 20)
+    more_steps = compute_max_folds(200, 50, 0, 20, 10)
+    assert more_steps > fewer_steps
+
+
+def test_compute_max_folds_invalid_step() -> None:
+    from src.alpha_factory.walk_forward import compute_max_folds
+
+    with pytest.raises(ValueError, match="step_days must be >= 1"):
+        compute_max_folds(100, 50, 1, 20, 0)
