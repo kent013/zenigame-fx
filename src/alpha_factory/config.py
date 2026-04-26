@@ -34,6 +34,7 @@ __all__ = [
     "BacktestSectionConfig",
     "CrossPairConfig",
     "DatasetConfig",
+    "FspConfig",
     "GAConfig",
     "GAFeasibilityConfig",
     "StageGateConfig",
@@ -196,6 +197,38 @@ class StageWindowsConfig:
 
 
 @dataclass(frozen=True)
+class FspConfig:
+    """T036: Factor Shadow Plane (FSP) — single instrument 専用 diagnostic layer 設定.
+
+    Phase 1: diagnostic-only (選抜介入なし)、post-RUN 独立計算。default で無効。
+    詳細: docs/alpha_factory/factor-shadow-plane.md (新規) /
+    devnotes/20260425-0956-factor-shadow-plane-single-instr/
+    """
+
+    enabled: bool = False
+    factors: tuple[str, ...] = ("DXY",)
+    sampling_mode: Literal["daily"] = "daily"
+    window_days: int = 60
+    factor_asof_lag: int = 1
+    conditioning_set: Literal[
+        "all_bars_all_individuals"
+    ] = "all_bars_all_individuals"
+
+    def __post_init__(self) -> None:
+        if self.window_days < 1:
+            raise ValueError(
+                f"factor_shadow.window_days must be >= 1: got {self.window_days}"
+            )
+        if self.factor_asof_lag < 0:
+            raise ValueError(
+                f"factor_shadow.factor_asof_lag must be >= 0: "
+                f"got {self.factor_asof_lag}"
+            )
+        if not self.factors:
+            raise ValueError("factor_shadow.factors must be non-empty")
+
+
+@dataclass(frozen=True)
 class AlphaFactoryConfig:
     """Alpha Factory 全体 config。loader から返される SSOT 構造。
 
@@ -209,6 +242,7 @@ class AlphaFactoryConfig:
     stage_gate: StageGateConfig
     cross_pair: CrossPairConfig
     stage_windows: StageWindowsConfig
+    fsp: FspConfig = field(default_factory=FspConfig)
 
     @property
     def live_criteria(self) -> Mapping[str, float | int]:
@@ -423,4 +457,27 @@ def load_config(
         stage_windows=_build_stage_windows(
             raw.get("stage_windows") or {}, stage_gate
         ),
+        fsp=_build_fsp(raw.get("factor_shadow") or {}),
     )
+
+
+def _build_fsp(raw: Mapping[str, Any]) -> FspConfig:
+    """T036: factor_shadow yaml section → FspConfig.
+
+    yaml キー名は `factor_shadow` (FSP は実装内部の略称、yaml は full name)。
+    factors は list → tuple 変換 (FspConfig は frozen dataclass)。
+    """
+    kwargs: dict[str, Any] = {}
+    if "enabled" in raw:
+        kwargs["enabled"] = bool(raw["enabled"])
+    if "factors" in raw:
+        kwargs["factors"] = tuple(str(f) for f in raw["factors"])
+    if "sampling_mode" in raw:
+        kwargs["sampling_mode"] = str(raw["sampling_mode"])
+    if "window_days" in raw:
+        kwargs["window_days"] = int(raw["window_days"])
+    if "factor_asof_lag" in raw:
+        kwargs["factor_asof_lag"] = int(raw["factor_asof_lag"])
+    if "conditioning_set" in raw:
+        kwargs["conditioning_set"] = str(raw["conditioning_set"])
+    return FspConfig(**kwargs)

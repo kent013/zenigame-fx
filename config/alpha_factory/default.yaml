@@ -179,3 +179,17 @@ improve_cycle:
   plateau_cycles: 3
   plateau_mutation_bump: 0.05
   mutation_rate_max: 0.6
+
+# T036: Factor Shadow Plane (FSP) — single instrument 専用 外生因子 diagnostic layer
+# - 概念設計: devnotes/20260425-0956-factor-shadow-plane-single-instr/conceptual-design.md
+# - Phase 1: diagnostic-only (選抜介入なし)、post-RUN 独立計算
+# - default で無効化 (enabled: false)。実データ無い間は skipped_no_factor_data を
+#   archive に記録するのみ (副作用なし)。enabled=true 化前に data/raw/fred/DXY.csv
+#   (close 列必須) を整備すること。
+factor_shadow:
+  enabled: false
+  factors: ["DXY"]
+  sampling_mode: "daily"
+  window_days: 60
+  factor_asof_lag: 1
+  conditioning_set: "all_bars_all_individuals"
