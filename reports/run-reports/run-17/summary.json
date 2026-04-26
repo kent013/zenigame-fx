@@ -1,0 +1,777 @@
+{
+  "run_id": "run_20260426_003931",
+  "run_number": 17,
+  "generated_at": "2026-04-26T00:39:31.353022+00:00",
+  "dataset": {
+    "instrument": "EUR_JPY",
+    "start": "2025-10-01T00:00:00+00:00",
+    "end": "2026-04-01T00:00:00+00:00",
+    "bars": 183403,
+    "bars_stage_a": 86400,
+    "bars_stage_b": 183403,
+    "bars_holdout": 20457
+  },
+  "ga_config": {
+    "population_size": 96,
+    "generations": 60,
+    "crossover_rate": 0.7,
+    "mutation_rate": 0.3,
+    "tournament_size": 3,
+    "elite_count": 2,
+    "max_depth": 4,
+    "max_clause": 1,
+    "units": 10000,
+    "fitness_metric": "sharpe",
+    "seed": null
+  },
+  "backtest_config": {
+    "initial_cash": "1000000",
+    "leverage": 25,
+    "units": 10000
+  },
+  "stage_gate_config": {
+    "stage_a_window_days": 60,
+    "stage_a_alpha": 0.03,
+    "stage_a_threshold": 0.3655,
+    "stage_b_window_months": 18,
+    "stage_c_holdout_days": 60,
+    "spread_stress_multiplier": 1.5
+  },
+  "cross_pair_config": {
+    "mode": "shadow",
+    "aggregator_lambda": 0.5
+  },
+  "cross_pair_runtime_mode": "skipped_single_instrument",
+  "per_generation": [
+    {
+      "generation": 0,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.0,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 65
+    },
+    {
+      "generation": 1,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.0,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 92
+    },
+    {
+      "generation": 2,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.0,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 90
+    },
+    {
+      "generation": 3,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.0,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 90
+    },
+    {
+      "generation": 4,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.0,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 87
+    },
+    {
+      "generation": 5,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.0,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 87
+    },
+    {
+      "generation": 6,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.0,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 80
+    },
+    {
+      "generation": 7,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.04808199378645682,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 87
+    },
+    {
+      "generation": 8,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.04808199378645682,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 85
+    },
+    {
+      "generation": 9,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.04808199378645682,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 86
+    },
+    {
+      "generation": 10,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.04808199378645682,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 85
+    },
+    {
+      "generation": 11,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.11056972973538097,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 92
+    },
+    {
+      "generation": 12,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.13789017777314963,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 91
+    },
+    {
+      "generation": 13,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.14081654758277154,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 91
+    },
+    {
+      "generation": 14,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.14081654758277154,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 90
+    },
+    {
+      "generation": 15,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.14081654758277154,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 95
+    },
+    {
+      "generation": 16,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.14081654758277154,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 92
+    },
+    {
+      "generation": 17,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.14081654758277154,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 93
+    },
+    {
+      "generation": 18,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.16719496789067503,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 96
+    },
+    {
+      "generation": 19,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.16719496789067503,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 92
+    },
+    {
+      "generation": 20,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.16719496789067503,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 96
+    },
+    {
+      "generation": 21,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.21467550475477162,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 95
+    },
+    {
+      "generation": 22,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.21467550475477162,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 96
+    },
+    {
+      "generation": 23,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.21467550475477162,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 93
+    },
+    {
+      "generation": 24,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.21467550475477162,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 95
+    },
+    {
+      "generation": 25,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.21467550475477162,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 93
+    },
+    {
+      "generation": 26,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.21467550475477162,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 96
+    },
+    {
+      "generation": 27,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.21483342211292428,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 95
+    },
+    {
+      "generation": 28,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.21483342211292428,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 95
+    },
+    {
+      "generation": 29,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.21483342211292428,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 95
+    },
+    {
+      "generation": 30,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.21483342211292428,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 94
+    },
+    {
+      "generation": 31,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2298859236436565,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 93
+    },
+    {
+      "generation": 32,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2298859236436565,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 96
+    },
+    {
+      "generation": 33,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2298859236436565,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 93
+    },
+    {
+      "generation": 34,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2298859236436565,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 96
+    },
+    {
+      "generation": 35,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2298859236436565,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 93
+    },
+    {
+      "generation": 36,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2298859236436565,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 96
+    },
+    {
+      "generation": 37,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2298859236436565,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 95
+    },
+    {
+      "generation": 38,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2381446755058411,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 94
+    },
+    {
+      "generation": 39,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2381446755058411,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 94
+    },
+    {
+      "generation": 40,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2381446755058411,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 96
+    },
+    {
+      "generation": 41,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2381446755058411,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 95
+    },
+    {
+      "generation": 42,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2381446755058411,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 96
+    },
+    {
+      "generation": 43,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2381446755058411,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 96
+    },
+    {
+      "generation": 44,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2381446755058411,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 95
+    },
+    {
+      "generation": 45,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2381446755058411,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 96
+    },
+    {
+      "generation": 46,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2381446755058411,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 95
+    },
+    {
+      "generation": 47,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2381446755058411,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 95
+    },
+    {
+      "generation": 48,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2381446755058411,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 93
+    },
+    {
+      "generation": 49,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2381446755058411,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 95
+    },
+    {
+      "generation": 50,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.24989120028516545,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 94
+    },
+    {
+      "generation": 51,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.24989120028516545,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 94
+    },
+    {
+      "generation": 52,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.24989120028516545,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 96
+    },
+    {
+      "generation": 53,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.24989120028516545,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 94
+    },
+    {
+      "generation": 54,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.24989120028516545,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 95
+    },
+    {
+      "generation": 55,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.24989120028516545,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 94
+    },
+    {
+      "generation": 56,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.24989120028516545,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 94
+    },
+    {
+      "generation": 57,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.24989120028516545,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 92
+    },
+    {
+      "generation": 58,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.24989120028516545,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 93
+    },
+    {
+      "generation": 59,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2507807321122144,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 95
+    },
+    {
+      "generation": 60,
+      "n_evaluated": 96,
+      "stage_a_pass": 0,
+      "stage_b_pass": 0,
+      "stage_c_pass": 0,
+      "graduation_count": 0,
+      "best_fitness_pen": 0.2507807321122144,
+      "best_fitness_pen_finite": true,
+      "feasible_count": 96
+    }
+  ],
+  "best": {
+    "name": "g59_i42",
+    "generation": 59,
+    "fitness": "0.2507807321122144",
+    "fitness_finite": true,
+    "stage_a_pass": false,
+    "stage_b_pass": false,
+    "stage_c_pass": false,
+    "feasible": true,
+    "violation_magnitude": 0.0,
+    "selection_score": [
+      1,
+      -0.0,
+      0,
+      0,
+      0,
+      0.2507807321122144
+    ],
+    "selection_score_schema": "v2_feasibility",
+    "metrics": {
+      "total_pnl": "0.0",
+      "sharpe": "0.2687807321122144",
+      "sortino": null,
+      "calmar": null,
+      "max_drawdown_pct": "0.0",
+      "trade_count": 37,
+      "sharpe_calc_version": "v2_trade_level"
+    }
+  },
+  "live_criteria": {
+    "checks": {
+      "sharpe": {
+        "value": "0.2687807321122144",
+        "threshold": "1.0",
+        "pass": false,
+        "sharpe_calc_version": "v2_trade_level"
+      },
+      "total_pnl": {
+        "value": "0.0",
+        "threshold": "50000.0",
+        "pass": false
+      },
+      "max_drawdown_pct": {
+        "value": "0.0",
+        "threshold": "20.0",
+        "pass": true
+      },
+      "trade_count": {
+        "value": 37,
+        "threshold_min": 50,
+        "threshold_max": 5000,
+        "pass": false
+      }
+    },
+    "all_pass": false
+  },
+  "population_size": 96,
+  "graduation_count": 0,
+  "archive_parquet": ".cache/alpha_factory/runs/genomes_run_20260426_003931.parquet"
+}
