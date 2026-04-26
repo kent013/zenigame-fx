@@ -1,0 +1,55 @@
+{
+  "name": "g55_i24",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F5",
+          "weight": 0.6402133180619446,
+          "params": {
+            "short_n": 17,
+            "long_n": 111,
+            "k": 9.595196371253587
+          }
+        },
+        {
+          "name": "P3",
+          "weight": 0.8025723715487162,
+          "params": {
+            "n": 9,
+            "scale": 0.015338642931951888
+          }
+        },
+        {
+          "name": "P2",
+          "weight": 1.295113934209174,
+          "params": {
+            "atr_n": 20
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "M2",
+          "weight": -1.2272805610515451,
+          "params": {
+            "session": 1,
+            "soft_edge_min": 51.634089483948834
+          }
+        }
+      ],
+      "weight": 1.3941405688373574
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.46405239288001454,
+    "exit_threshold": 0.03733765427158557,
+    "max_pos": 3,
+    "time_stop_min": 204
+  },
+  "risk": {
+    "stop_atr": 1.670279394532676,
+    "take_atr": 2.446513261213752
+  }
+}
