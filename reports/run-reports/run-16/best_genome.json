@@ -1,0 +1,38 @@
+{
+  "name": "g26_i34",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F7",
+          "weight": 0.9043434786274526,
+          "params": {
+            "n": 23,
+            "scale": 25.447430191646017
+          }
+        },
+        {
+          "name": "P5",
+          "weight": 0.9233927072400296,
+          "params": {
+            "z_n": 169,
+            "scale": 2.615608057810676
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.124783746154911
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.4098633616397792,
+    "exit_threshold": 0.14585797535623654,
+    "max_pos": 2,
+    "time_stop_min": 19
+  },
+  "risk": {
+    "stop_atr": 3.7601612131047033,
+    "take_atr": 3.8472054723633704
+  }
+}
