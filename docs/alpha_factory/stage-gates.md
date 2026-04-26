@@ -114,10 +114,18 @@ display 用に `reason_if_failed` property (`";".join(reason_codes)`) を提供�
 
 | Stage | Reason Code | 意味 |
 |-------|-------------|------|
-| A | `system_failure` | backtest / size_norm 計算で例外 |
-| A | `no_trades` | trade_count == 0 |
-| A | `metric_unavailable` | sharpe が計算不可 (returns 不足など) |
+| A | `system_failure` | backtest / size_norm 計算で例外。payload `fitness_pen` に `SYSTEM_FAILURE_FITNESS=-1e12` (T034) |
+| A | `no_exposure` | trade_count < `min_exposure_trade_count` (default 1)。旧 `no_trades` を置き換え。payload `fitness_pen` に `NO_EXPOSURE_FITNESS=-1e9` (T034) |
+| A | `metric_unavailable` | sharpe が計算不可 (returns 不足など)。payload `fitness_pen` に `METRIC_UNAVAILABLE_FITNESS=-1e6` (T034) |
 | A | `below_threshold` | fitness_pen ≤ stage_a_threshold |
+
+**T034 sentinel 序列** (selection_score tie-break で「無取引優位」を解消):
+```
+system_failure (-1e12) < no_exposure (-1e9) < metric_unavailable (-1e6) < below_threshold (実値) < 通常
+```
+calibrate_gate は `STAGE_A_FITNESS_SENTINELS` 集合一致で sentinel を quantile pool から除外する (混入による threshold 不当緩和を防ぐ)。詳細: [stage_gate.py](../../src/alpha_factory/stage_gate.py) / [calibrate_gate.py](../../src/alpha_factory/calibrate_gate.py)。
+
+**`min_exposure_trade_count` 不変条件**: `1 <= min_exposure_trade_count < live_criteria.trade_count_min` (live_criteria 緩和回避、禁止事項 #4 ガード)。`live_criteria.trade_count_min == 0` (緩和テスト用) では validation skip。
 | B | `no_folds` | bars が train+embargo+test 未満で fold が出ない |
 | B | `insufficient_folds` | fold が 1 のみ (n_fold < 2) |
 | B | `median_oos_sharpe<min` | median OOS Sharpe < 閾値 |

@@ -511,3 +511,55 @@ def test_validate_schema_raises_on_nan_in_trade_count_via_float_column() -> None
     )
     with pytest.raises(SchemaMismatchError, match="NaN or Inf"):
         validate_schema(table)
+
+
+# T034: sentinel 値除外 ========================================================
+
+
+class TestT034SentinelExclusion:
+    """fitness_pen pool は Stage A failure sentinel を除外する。
+    sentinel が混入すると quantile が不当に低くなり threshold が過剰緩和される。"""
+
+    def test_sentinel_values_excluded_from_pool_last_k(self) -> None:
+        from src.alpha_factory.stage_gate import (
+            METRIC_UNAVAILABLE_FITNESS,
+            NO_EXPOSURE_FITNESS,
+            SYSTEM_FAILURE_FITNESS,
+        )
+        rows = [
+            _row(generation=0, stage_a_pass=False, fitness_pen=NO_EXPOSURE_FITNESS),
+            _row(generation=0, stage_a_pass=False, fitness_pen=SYSTEM_FAILURE_FITNESS),
+            _row(generation=0, stage_a_pass=False, fitness_pen=METRIC_UNAVAILABLE_FITNESS),
+            _row(generation=0, stage_a_pass=True, fitness_pen=0.5),
+            _row(generation=0, stage_a_pass=False, fitness_pen=-0.1),
+        ]
+        s = aggregate_sample(rows, mode="last_k_generations", window=1)
+        # sentinel 3 件除外 → pool は実値 2 件のみ
+        assert s.n_rows_used == 5  # used 自体は除外しない (pass_rate 計算に使う)
+        assert len(s.fitness_pen_pool) == 2
+        assert sorted(s.fitness_pen_pool) == [-0.1, 0.5]
+
+    def test_sentinel_values_excluded_from_pool_all_generations(self) -> None:
+        from src.alpha_factory.stage_gate import NO_EXPOSURE_FITNESS
+        rows = [
+            _row(generation=g, stage_a_pass=False, fitness_pen=NO_EXPOSURE_FITNESS)
+            for g in range(3)
+        ] + [
+            _row(generation=0, stage_a_pass=False, fitness_pen=-0.5),
+            _row(generation=1, stage_a_pass=True, fitness_pen=0.2),
+        ]
+        s = aggregate_sample(rows, mode="all_generations", window=1)
+        assert len(s.fitness_pen_pool) == 2
+        assert sorted(s.fitness_pen_pool) == [-0.5, 0.2]
+
+    def test_sentinel_values_excluded_from_pool_weighted_mean(self) -> None:
+        from src.alpha_factory.stage_gate import SYSTEM_FAILURE_FITNESS
+        rows = [
+            _row(generation=0, stage_a_pass=False, fitness_pen=SYSTEM_FAILURE_FITNESS),
+            _row(generation=0, stage_a_pass=False, fitness_pen=0.1),
+            _row(generation=1, stage_a_pass=True, fitness_pen=0.3),
+        ]
+        s = aggregate_sample(rows, mode="generation_weighted_mean", window=1)
+        # sentinel は除外、実値 2 件のみ
+        assert len(s.fitness_pen_pool) == 2
+        assert sorted(s.fitness_pen_pool) == [0.1, 0.3]

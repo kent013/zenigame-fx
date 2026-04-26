@@ -21,6 +21,10 @@ from typing import Any, ClassVar, cast
 import pytest
 
 from src.alpha_factory.stage_gate import (
+    METRIC_UNAVAILABLE_FITNESS,
+    NO_EXPOSURE_FITNESS,
+    STAGE_A_FITNESS_SENTINELS,
+    SYSTEM_FAILURE_FITNESS,
     TRADING_DAYS_PER_YEAR,
     CrossPairResult,
     StageGateConfig,
@@ -357,8 +361,9 @@ class TestStageA:
         assert isinstance(ac, int)
         assert ac >= 0
 
-    def test_no_trades_reason(self) -> None:
-        """Constant 0.0 では entry シグナルが発生しない → trade_count == 0."""
+    def test_no_exposure_reason(self) -> None:
+        """T034: Constant 0.0 では entry シグナルが発生しない → trade_count == 0
+        → no_exposure (旧 no_trades)。fitness_pen に NO_EXPOSURE_FITNESS が入る。"""
         bars = _make_continuous_bars(2, bars_per_day=4)
         ev = ConstantPrimitiveEvaluator(value=0.0)
         res = evaluate_stage_a(
@@ -370,7 +375,10 @@ class TestStageA:
             StageGateConfig(),
         )
         assert not res.passed
-        assert res.reason_codes == ("no_trades",)
+        assert res.reason_codes == ("no_exposure",)
+        payload = cast(dict[str, Any], _envelope(res)["payload"])
+        # T034: payload fitness_pen は sentinel 値 (None ではなく数値で埋まる)
+        assert payload["fitness_pen"] == NO_EXPOSURE_FITNESS
 
     def test_system_failure_reason(self) -> None:
         bars = _make_continuous_bars(2, bars_per_day=4)
@@ -401,9 +409,9 @@ class TestStageA:
             ev,
             stage_cfg,
         )
-        # trade があれば below_threshold、なければ no_trades のいずれか
+        # T034: trade があれば below_threshold、なければ no_exposure のいずれか
         assert not res.passed
-        assert res.reason_codes[0] in {"below_threshold", "no_trades", "metric_unavailable"}
+        assert res.reason_codes[0] in {"below_threshold", "no_exposure", "metric_unavailable"}
 
     def test_fitness_pen_includes_complexity_penalty(self) -> None:
         """size_norm が大きい genome は fitness_pen が必ず低い (penalty 反映).
@@ -1420,3 +1428,113 @@ class TestT042StageCLiveCriteriaAnnualized:
             ann = float(payload["trade_sharpe_annualized"])
             expected = ann >= 0.5
             assert payload["live_criteria_pass"]["sharpe"] is expected
+
+
+# T034: 無取引優位の遮断 (no_exposure / sentinel) ===============================
+
+
+class TestT034NoExposureSentinel:
+    """trade_count<min_exposure_trade_count を no_exposure reason + sentinel
+    fitness_pen で淘汰する。selection_score tie-break で「無取引優位」を
+    構造的に解消する設計の動作検証。"""
+
+    def test_sentinel_constants_have_correct_ordering(self) -> None:
+        """sentinel 序列: system_failure < no_exposure < metric_unavailable < 0."""
+        assert SYSTEM_FAILURE_FITNESS < NO_EXPOSURE_FITNESS
+        assert NO_EXPOSURE_FITNESS < METRIC_UNAVAILABLE_FITNESS
+        assert METRIC_UNAVAILABLE_FITNESS < 0.0
+
+    def test_sentinel_set_membership(self) -> None:
+        """STAGE_A_FITNESS_SENTINELS は 3 sentinel 全てを含む."""
+        assert SYSTEM_FAILURE_FITNESS in STAGE_A_FITNESS_SENTINELS
+        assert NO_EXPOSURE_FITNESS in STAGE_A_FITNESS_SENTINELS
+        assert METRIC_UNAVAILABLE_FITNESS in STAGE_A_FITNESS_SENTINELS
+        assert len(STAGE_A_FITNESS_SENTINELS) == 3
+
+    def test_no_exposure_payload_fitness_pen_is_sentinel(self) -> None:
+        """trade_count=0 なら payload fitness_pen は NO_EXPOSURE_FITNESS."""
+        bars = _make_continuous_bars(2, bars_per_day=4)
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        res = evaluate_stage_a(
+            _one_clause_genome(),
+            bars,
+            usd_jpy_meta(),
+            _backtest_config(),
+            ev,
+            StageGateConfig(),
+        )
+        payload = cast(dict[str, Any], _envelope(res)["payload"])
+        assert payload["fitness_pen"] == NO_EXPOSURE_FITNESS
+
+    def test_system_failure_payload_fitness_pen_is_sentinel(self) -> None:
+        """exception 経路では payload fitness_pen は SYSTEM_FAILURE_FITNESS."""
+        bars = _make_continuous_bars(2, bars_per_day=4)
+        ev = _RaisingEvaluator()
+        res = evaluate_stage_a(
+            _one_clause_genome(),
+            bars,
+            usd_jpy_meta(),
+            _backtest_config(),
+            ev,
+            StageGateConfig(),
+        )
+        payload = cast(dict[str, Any], _envelope(res)["payload"])
+        assert "system_failure" in res.reason_codes
+        assert payload["fitness_pen"] == SYSTEM_FAILURE_FITNESS
+
+    def test_min_exposure_threshold_above_one_triggers_no_exposure(self) -> None:
+        """min_exposure_trade_count=10 で trade_count=5 → no_exposure 判定."""
+        bars = _make_oscillating_bars(5, bars_per_day=4)
+        ev = _AlternatingEvaluator()
+        # min_exposure_trade_count=10, live_criteria 緩和で他軸は通る
+        relaxed_lc = {
+            "sharpe_min": -1e9,
+            "total_pnl_min": -1e9,
+            "max_drawdown_max": 1.0,
+            "trade_count_min": 100,  # >= 10 + 1 (validation)
+            "trade_count_max": 1_000_000,
+        }
+        cfg = StageGateConfig(
+            live_criteria=relaxed_lc,
+            min_exposure_trade_count=10,
+            stage_a_threshold=-1e9,
+        )
+        res = evaluate_stage_a(
+            _one_clause_genome(),
+            bars,
+            usd_jpy_meta(),
+            _backtest_config(),
+            ev,
+            cfg,
+        )
+        payload = cast(dict[str, Any], _envelope(res)["payload"])
+        # trade_count が 10 未満なら no_exposure、十分にあれば pass / below
+        if payload["trade_count"] < 10:
+            assert "no_exposure" in res.reason_codes
+            assert payload["fitness_pen"] == NO_EXPOSURE_FITNESS
+
+    def test_min_exposure_must_be_lt_trade_count_min(self) -> None:
+        """validation: min_exposure_trade_count >= live_criteria.trade_count_min は ValueError."""
+        with pytest.raises(ValueError, match="禁止事項 #4 ガード"):
+            StageGateConfig(min_exposure_trade_count=50)  # default trade_count_min=50
+
+    def test_min_exposure_must_be_at_least_one(self) -> None:
+        """validation: min_exposure_trade_count < 1 は ValueError."""
+        with pytest.raises(ValueError, match="must be >= 1"):
+            StageGateConfig(min_exposure_trade_count=0)
+
+    def test_min_exposure_validation_skipped_when_lc_trade_count_min_zero(self) -> None:
+        """live_criteria.trade_count_min=0 (緩和テスト用) では validation skip."""
+        relaxed_lc = {
+            "sharpe_min": 0.0,
+            "total_pnl_min": 0.0,
+            "max_drawdown_max": 1.0,
+            "trade_count_min": 0,  # 制約無効
+            "trade_count_max": 1_000_000,
+        }
+        # min_exposure_trade_count=1 で 0 と比較されないこと
+        cfg = StageGateConfig(
+            live_criteria=relaxed_lc,
+            min_exposure_trade_count=1,
+        )
+        assert cfg.min_exposure_trade_count == 1

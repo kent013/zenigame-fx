@@ -44,7 +44,27 @@ from src.ga.complexity import genome_size_norm
 
 logger = structlog.get_logger(__name__)
 
+# T034: Stage A fitness_pen sentinel 序列。
+# archive `_required_float` は None → 0.0 fallback するため、Stage A の 3 失敗
+# 経路 (system_failure / no_exposure / metric_unavailable) は payload に明示的な
+# 大負値 sentinel を入れることで selection_score tie-break で「無取引優位」を解消する。
+# 序列: system_failure < no_exposure < metric_unavailable < below_threshold (実値)
+# 詳細: docs/alpha_factory/stage-gates.md / devnotes/20260425-0937-risk-no-trade-fitness-guard/
+SYSTEM_FAILURE_FITNESS: Final[float] = -1e12
+NO_EXPOSURE_FITNESS: Final[float] = -1e9
+METRIC_UNAVAILABLE_FITNESS: Final[float] = -1e6
+
+# T034: calibrate_gate が threshold 計算時に除外する sentinel 値の集合。
+# 値一致 (set membership) で判定する (閾値分離は通常実値域と被るため安全でない)。
+STAGE_A_FITNESS_SENTINELS: Final[frozenset[float]] = frozenset(
+    {SYSTEM_FAILURE_FITNESS, NO_EXPOSURE_FITNESS, METRIC_UNAVAILABLE_FITNESS}
+)
+
 __all__ = [
+    "METRIC_UNAVAILABLE_FITNESS",
+    "NO_EXPOSURE_FITNESS",
+    "STAGE_A_FITNESS_SENTINELS",
+    "SYSTEM_FAILURE_FITNESS",
     "CrossPairEvaluator",
     "CrossPairInputs",
     "CrossPairResult",
@@ -74,6 +94,13 @@ class StageGateConfig:
     stage_a_window_days: int = 60
     stage_a_alpha: float = 0.03
     stage_a_threshold: float = 0.0  # 暫定固定 (calibrate-gate TODO で動的化)
+    # T034: 取引が成立しなかった個体 (trade_count < min_exposure_trade_count) を
+    # `no_exposure` reason + sentinel fitness_pen で淘汰する。
+    # default 1 = 「1 trade 未満 = 取引未成立 = 評価不能」(従来 no_trades と同等)。
+    # live_criteria.trade_count_min との不変条件: min_exposure_trade_count <
+    # trade_count_min (live_criteria 緩和回避、__post_init__ で検証)。
+    # 詳細: docs/alpha_factory/stage-gates.md (sentinel 序列)
+    min_exposure_trade_count: int = 1
 
     # Stage B
     stage_b_window_months: int = 18
@@ -144,6 +171,31 @@ class StageGateConfig:
         if missing:
             raise ValueError(
                 f"live_criteria missing required keys: {sorted(missing)}"
+            )
+        # T034: min_exposure_trade_count の不変条件:
+        # 0 < min_exposure_trade_count < live_criteria.trade_count_min。
+        # 上限を trade_count_min 未満に制限することで「Stage A で trade_count_min
+        # まで要求 = 事実上 live_criteria.trade_count_min を緩和」を防ぐ
+        # (禁止事項 #4 ガード)。
+        if self.min_exposure_trade_count < 1:
+            raise ValueError(
+                "min_exposure_trade_count must be >= 1: "
+                f"got {self.min_exposure_trade_count}"
+            )
+        # 禁止事項 #4 ガード: live_criteria.trade_count_min を Stage A 内で
+        # 事実上強化することを禁ずる。trade_count_min が緩和テスト等で 0/小さい
+        # 場合 (relaxed_lc) は live_criteria 自体が「制約無効」を表明している
+        # ため本ガードは適用しない (defensive 動作)。
+        lc_trade_count_min = int(self.live_criteria["trade_count_min"])
+        if (
+            lc_trade_count_min >= 1
+            and self.min_exposure_trade_count >= lc_trade_count_min
+        ):
+            raise ValueError(
+                "min_exposure_trade_count must be < live_criteria.trade_count_min "
+                f"(禁止事項 #4 ガード): got min_exposure_trade_count="
+                f"{self.min_exposure_trade_count}, "
+                f"trade_count_min={lc_trade_count_min}"
             )
         # MappingProxyType で frozen dict 化（外部書換不能）
         object.__setattr__(
@@ -258,7 +310,7 @@ def evaluate_stage_a(
     控除して ``fitness_pen`` を算出。``stage_a_threshold`` 超過で通過。
 
     判定優先順位 (canonical):
-        ``system_failure`` > ``no_trades`` > ``metric_unavailable`` >
+        ``system_failure`` > ``no_exposure`` > ``metric_unavailable`` >
         ``below_threshold`` > 通過。
 
     Args:
@@ -325,13 +377,19 @@ def evaluate_stage_a(
         exception_caught = True
 
     # 判定優先順位 (canonical):
-    #   system_failure > no_trades > metric_unavailable > below_threshold
+    #   system_failure > no_exposure > metric_unavailable > below_threshold
+    # T034: 3 失敗経路は payload に sentinel fitness_pen を入れる (None → 0.0
+    # fallback の排除、selection_score tie-break で「無取引優位」を解消)。
+    # fitness_raw は変更しない (観察値は保持、ペナルティは fitness_pen のみ)。
     if exception_caught:
         reasons.append("system_failure")
-    elif trade_count < 1:
-        reasons.append("no_trades")
+        fitness_pen = SYSTEM_FAILURE_FITNESS
+    elif trade_count < stage_config.min_exposure_trade_count:
+        reasons.append("no_exposure")
+        fitness_pen = NO_EXPOSURE_FITNESS
     elif sharpe_raw is None:
         reasons.append("metric_unavailable")
+        fitness_pen = METRIC_UNAVAILABLE_FITNESS
     else:
         assert size_norm_val is not None  # type narrowing
         fitness_raw = sharpe_raw
