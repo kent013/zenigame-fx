@@ -295,3 +295,95 @@ def test_session_close_before_time_no_force() -> None:
     # 20:59
     bar = make_bar(20 * 60 + 59, bid_close="154.0", ask_close="154.01")
     assert strat.on_bar(bar, _long_snapshot(entry_time)) == []
+
+
+# ---- T037: active_clause_indices (runtime fired clause counter) -------------
+
+
+def _mk_two_clause_genome() -> Genome:
+    """2 clause × 1 directional の genome (T037 active_clause テスト用)."""
+    return Genome(
+        name="g_two",
+        units=1000,
+        clauses=(
+            ClauseConfig(
+                directional=(SignalConfig(name="F1", weight=1.0),),
+                local_gate=(),
+                weight=1.0,
+            ),
+            ClauseConfig(
+                directional=(SignalConfig(name="F2", weight=1.0),),
+                local_gate=(),
+                weight=1.0,
+            ),
+        ),
+        position=PositionConfig(
+            entry_threshold=0.3,
+            exit_threshold=0.1,
+            max_pos=1,
+            time_stop_min=0,
+        ),
+        risk=RiskConfig(stop_atr=2.0, take_atr=3.0),
+    )
+
+
+def test_active_clause_indices_initially_empty() -> None:
+    """T037: backtest 開始前は空集合."""
+    g = _mk_two_clause_genome()
+    evaluator = ScriptedEvaluator({0: {"F1": 0.5, "F2": 0.0}})
+    strat = DslStrategy(g, evaluator)
+    assert strat.active_clause_indices == frozenset()
+
+
+def test_active_clause_indices_records_fired_clause_idx() -> None:
+    """T037: clause_score != 0.0 だった clause idx が集合に入る.
+
+    clause0 は F1=0.5 で score 0.5 (発火)、clause1 は F2=0.0 で score 0.0 (不発)。
+    """
+    g = _mk_two_clause_genome()
+    evaluator = ScriptedEvaluator({0: {"F1": 0.5, "F2": 0.0}})
+    strat = DslStrategy(g, evaluator)
+    strat.on_bar(_bar(0), _empty_snapshot())
+    assert strat.active_clause_indices == frozenset({0})
+
+
+def test_active_clause_indices_excludes_never_fired_clause() -> None:
+    """T037: 全期間で clause_score=0 だった clause は集合に入らない."""
+    g = _mk_two_clause_genome()
+    evaluator = ScriptedEvaluator(
+        {
+            0: {"F1": 0.5, "F2": 0.0},
+            1: {"F1": -0.4, "F2": 0.0},  # clause1 は連続不発
+        }
+    )
+    strat = DslStrategy(g, evaluator)
+    strat.on_bar(_bar(0), _empty_snapshot())
+    strat.on_bar(_bar(1), _empty_snapshot())
+    assert strat.active_clause_indices == frozenset({0})
+
+
+def test_active_clause_indices_accumulates_across_bars() -> None:
+    """T037: 異なる bar で異なる clause が発火した場合は両方記録される."""
+    g = _mk_two_clause_genome()
+    evaluator = ScriptedEvaluator(
+        {
+            0: {"F1": 0.5, "F2": 0.0},  # clause0 のみ
+            1: {"F1": 0.0, "F2": 0.4},  # clause1 のみ
+        }
+    )
+    strat = DslStrategy(g, evaluator)
+    strat.on_bar(_bar(0), _empty_snapshot())
+    strat.on_bar(_bar(1), _empty_snapshot())
+    assert strat.active_clause_indices == frozenset({0, 1})
+
+
+def test_active_clause_indices_returns_frozenset_immutable() -> None:
+    """T037: 返り値は frozenset (外部から mutate 不能)."""
+    g = _mk_two_clause_genome()
+    evaluator = ScriptedEvaluator({0: {"F1": 0.5, "F2": 0.0}})
+    strat = DslStrategy(g, evaluator)
+    strat.on_bar(_bar(0), _empty_snapshot())
+    s = strat.active_clause_indices
+    assert isinstance(s, frozenset)
+    # 外部参照からは mutate 不能 (frozenset は add/remove なし)
+    assert not hasattr(s, "add")

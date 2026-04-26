@@ -348,8 +348,14 @@ class TestStageA:
             "trade_count",
             # T-sharpe Phase 1A: payload key を sharpe_raw → trade_sharpe_raw に
             "trade_sharpe_raw",
+            # T037: runtime fired clause 数 (active_clause)
+            "active_clause",
         ):
             assert key in payload
+        # T037: active_clause は int (>=0)
+        ac = payload["active_clause"]
+        assert isinstance(ac, int)
+        assert ac >= 0
 
     def test_no_trades_reason(self) -> None:
         """Constant 0.0 では entry シグナルが発生しない → trade_count == 0."""

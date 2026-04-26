@@ -279,6 +279,11 @@ def evaluate_stage_a(
     fitness_pen: float | None = None
     sharpe_raw: float | None = None
     trade_count = 0
+    # T037: Stage A backtest 中に runtime fired した clause idx 数 (observation
+    # only, archive `active_clause` 列に記録される)。例外時 / strategy 未生成時は
+    # 0 (測定不能を表すが、archive 既存契約 (non-null int32) との整合のため 0
+    # を入れる)。
+    active_clause_count: int = 0
     exception_caught = False
 
     try:
@@ -295,6 +300,10 @@ def evaluate_stage_a(
         sharpe_raw = (
             float(bt.trade_sharpe_raw) if bt.trade_sharpe_raw is not None else None
         )
+        # T037: backtest 完了後の strategy.active_clause_indices を集計。
+        # backtest 経路で必ず prepare()→on_bar が呼ばれているはずだが、
+        # defensive に len() 経由で取り出す。
+        active_clause_count = len(strategy.active_clause_indices)
     except Exception as exc:
         logger.warning(
             "stage_a.system_failure",
@@ -347,6 +356,8 @@ def evaluate_stage_a(
             "trade_count": trade_count,
             # T-sharpe Phase 1A: payload key を "sharpe_raw" → "trade_sharpe_raw"
             "trade_sharpe_raw": sharpe_raw,
+            # T037: runtime fired clause idx 数 (observation only)
+            "active_clause": active_clause_count,
         },
     }
     return StageResult(
