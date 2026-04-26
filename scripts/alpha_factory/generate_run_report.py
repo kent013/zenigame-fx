@@ -721,7 +721,14 @@ def main(argv: list[str] | None = None) -> int:
     # archive Top-5 個体一覧 (Best とは別物)
     lines.append("## Archive Top-5 個体一覧")
     lines.append("")
-    if schema == "v3_stage_c_feasibility":
+    if schema == "v3_1_stage_b_priority":
+        note = (
+            "Best は "
+            "(feasible, -violation, stage_b_pass, stage_c_feasible, "
+            "stage_c_pass, stage_b_pass, stage_a_pass, fitness_pen) "
+            "の辞書式 (v3.1_stage_b_priority, T046)。"
+        )
+    elif schema == "v3_stage_c_feasibility":
         note = (
             "Best は "
             "(feasible, -violation, stage_c_feasible, stage_c_pass, stage_b_pass, stage_a_pass, fitness_pen) "
