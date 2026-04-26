@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from types import MappingProxyType
-from typing import ClassVar, Literal, Protocol, TypedDict, cast
+from typing import ClassVar, Final, Literal, Protocol, TypedDict, cast
 
 import structlog
 
@@ -527,6 +527,95 @@ def evaluate_stage_b(
 # ---------------------------------------------------------------------------
 
 
+# T043: mission_score (live_criteria 4 軸 soft 合算)
+# - 詳細設計: devnotes/20260426-1030-phase0-mission-score/detailed-design.md
+# - 各軸 i: score_i = clip((metric - lower) / (target - lower), 0, 1)
+#   ただし max_drawdown は逆向き (小さいほど高 score)、trade_count は範囲外で 0
+# - 0 を避けて log 表示可能化: score_i' = 0.1 + 0.9 * score_i
+# - 幾何平均: mission_score = (Π score_i')^(1/4)  -> [0.1, 1.0]
+# - GA fitness や stage_c.passed には影響しない (observation only)
+_MISSION_SCORE_FLOOR: Final[float] = 0.1
+_MISSION_SCORE_RANGE: Final[float] = 0.9  # = 1.0 - _MISSION_SCORE_FLOOR
+
+
+def _compute_mission_score(
+    *,
+    sharpe: float | None,
+    total_pnl: float,
+    max_drawdown_frac: float,
+    trade_count: int,
+    live_criteria: Mapping[str, float | int],
+) -> float | None:
+    """live_criteria 4 軸の soft 合算スコア (幾何平均, [0.1, 1.0])。
+
+    sharpe が None (= base 評価が trade を出せず Sharpe 計算不能) の場合は
+    score 計算不能として None を返す (報告側で「未計測」表示)。
+    その他の軸は数値必須 (Stage C base 評価が成功していれば自動で揃う)。
+    """
+    if sharpe is None:
+        return None
+
+    # sharpe: lower=0, target=sharpe_min (T042 換算後値が入る想定)
+    sharpe_target = float(live_criteria["sharpe_min"])
+    sharpe_lower = 0.0
+    sharpe_score = _axis_score(sharpe, sharpe_lower, sharpe_target)
+
+    # total_pnl: lower=0, target=total_pnl_min
+    pnl_target = float(live_criteria["total_pnl_min"])
+    pnl_lower = 0.0
+    pnl_score = _axis_score(total_pnl, pnl_lower, pnl_target)
+
+    # max_drawdown_frac: lower=max_drawdown_max (高 dd = 0 score), target=0 (低 dd = 1 score)
+    dd_lower = float(live_criteria["max_drawdown_max"])
+    dd_target = 0.0
+    dd_score = _axis_score_inverted(max_drawdown_frac, dd_lower, dd_target)
+
+    # trade_count: lower=0, target=trade_count_min。範囲外 (>max) は 0 score
+    tc_target = float(live_criteria["trade_count_min"])
+    tc_max = float(live_criteria["trade_count_max"])
+    tc_score = (
+        0.0
+        if trade_count > tc_max
+        else _axis_score(float(trade_count), 0.0, tc_target)
+    )
+
+    # 0 を避けて floor 0.1 にスケール
+    floor = _MISSION_SCORE_FLOOR
+    rng = _MISSION_SCORE_RANGE
+    s = [floor + rng * x for x in (sharpe_score, pnl_score, dd_score, tc_score)]
+
+    # 幾何平均
+    product = 1.0
+    for v in s:
+        product *= v
+    return product ** (1.0 / 4.0)
+
+
+def _axis_score(metric: float, lower: float, target: float) -> float:
+    """min-max 正規化 + clip([0, 1])。target == lower で metric>=target なら 1.0、
+    target < lower (= 設定不整合) は 0.0 を返す (defensive)。"""
+    if target <= lower:
+        return 1.0 if metric >= target else 0.0
+    raw = (metric - lower) / (target - lower)
+    if raw < 0.0:
+        return 0.0
+    if raw > 1.0:
+        return 1.0
+    return raw
+
+
+def _axis_score_inverted(metric: float, lower: float, target: float) -> float:
+    """逆向き軸 (drawdown 等、小さいほど良い)。lower > target を期待。"""
+    if lower <= target:
+        return 1.0 if metric <= target else 0.0
+    raw = (lower - metric) / (lower - target)
+    if raw < 0.0:
+        return 0.0
+    if raw > 1.0:
+        return 1.0
+    return raw
+
+
 def evaluate_stage_c(
     genome: Genome,
     bars_holdout: list[PriceBar],
@@ -547,6 +636,10 @@ def evaluate_stage_c(
 
     drawdown は **fraction (0-1)** に統一して比較
     (``BacktestMetrics.max_drawdown_pct`` は percent → ``/100`` 換算)。
+
+    payload には observation 用に ``mission_score`` (T043) を含める。
+    ``mission_score`` は live_criteria 4 軸の soft 合算で、GA fitness や
+    ``passed`` 判定には影響しない。
 
     Returns:
         StageResult(stage="C", ...)。
@@ -728,6 +821,15 @@ def evaluate_stage_c(
     passed = len(reasons) == 0
     elapsed = _time.perf_counter() - start
 
+    # T043: mission_score (4 軸 soft 合算スコア、observation only / GA fitness 不変)
+    mission_score = _compute_mission_score(
+        sharpe=base_sharpe,
+        total_pnl=base_total_pnl,
+        max_drawdown_frac=base_max_dd_frac,
+        trade_count=base_trade_count,
+        live_criteria=lc,
+    )
+
     metrics_envelope: dict[str, object] = {
         "stage": "C",
         "genome_name": genome.name,
@@ -740,6 +842,7 @@ def evaluate_stage_c(
             "total_pnl": base_total_pnl,
             "max_drawdown_frac": base_max_dd_frac,
             "trade_count": base_trade_count,
+            "mission_score": mission_score,
             "live_criteria_pass": lc_pass,
             "intraday_compliant": intraday_compliant,
             "overnight_violations": overnight_violations,
