@@ -679,6 +679,28 @@ class TestStageC:
         payload = _payload(res)
         assert payload["stress"]["skipped"] is True
 
+    def test_max_spread_bps_set_does_not_skip_stress(self) -> None:
+        """max_spread_bps を明示設定すると spread_stress_skipped は出ず stress を実評価する.
+
+        T041: Stage C を spread_stress_skipped 常時 fail 状態から開放する規約の
+        retest。base が trade を出さなくても stress の skip フラグは立たないこと
+        を unit test で固定。
+        """
+        bars = _make_continuous_bars(3, bars_per_day=4)
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        cfg = _backtest_config(max_spread_bps=Decimal("10"))
+        res = evaluate_stage_c(
+            _one_clause_genome(),
+            bars,
+            usd_jpy_meta(),
+            cfg,
+            ev,
+            StageGateConfig(),
+        )
+        assert "spread_stress_skipped" not in res.reason_codes
+        payload = _payload(res)
+        assert payload["stress"]["skipped"] is False
+
     def test_drawdown_unit_is_fraction(self) -> None:
         """payload.max_drawdown_frac は fraction (0-1) スケール."""
         bars = _make_continuous_bars(3, bars_per_day=4)

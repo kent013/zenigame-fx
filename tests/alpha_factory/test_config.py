@@ -181,6 +181,32 @@ def test_load_config_yaml_without_feasibility_section_uses_defaults(
     assert cfg.ga.feasibility.apply_from_generation == 0
 
 
+def test_default_yaml_loads_max_spread_bps_for_stage_c(tmp_path: Path) -> None:
+    """T041: 既定 default.yaml が backtest.max_spread_bps を Decimal で読み込み、
+    holding_cost_per_day_bps が Decimal('0') として明示される。
+
+    Stage C stress (`evaluate_stage_c`) は max_spread_bps が None だと
+    spread_stress_skipped で fail-closed するため、production yaml で値が
+    確実に伝搬していることを保護する unit test。
+    """
+    from decimal import Decimal
+
+    repo_yaml = (
+        Path(__file__).resolve().parents[2]
+        / "config"
+        / "alpha_factory"
+        / "default.yaml"
+    )
+    cfg = load_config(repo_yaml)
+    assert cfg.backtest.max_spread_bps is not None
+    assert isinstance(cfg.backtest.max_spread_bps, Decimal)
+    # T041 設計合意値の固定 (Codex impl-review round-2 Suggestion 反映)。
+    # 将来この値を変更する場合は本 assertion と detailed-design.md を同時に
+    # 更新すること（@why コメントの値根拠も追従）。
+    assert cfg.backtest.max_spread_bps == Decimal("10")
+    assert cfg.backtest.holding_cost_per_day_bps == Decimal("0")
+
+
 def test_strict_bool_string_false_is_false() -> None:
     """`bool("false")` の罠を回避."""
     from src.alpha_factory.config import _strict_bool
