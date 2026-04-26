@@ -492,6 +492,8 @@ def main(argv: list[str] | None = None) -> int:
             # を known_codes に追加。これらが Stage B 全滅 reason に隠蔽されていた。
             "median_oos_sharpe<min",
             "positive_fold_ratio<min",
+            # T044: pre-flight feasibility skip-path
+            "stage_b_pre_flight_underfilled",
         )
         # Primary reason: ;-split の先頭のみで集計、合計 = failures
         primary_counts: dict[str, int] = {c: 0 for c in known_codes}

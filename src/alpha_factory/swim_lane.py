@@ -55,6 +55,7 @@ from src.alpha_factory.stage_gate import (
     evaluate_stage_c,
 )
 from src.alpha_factory.walk_forward import (
+    compute_max_folds,
     n_unique_dates,
     wf_min_unique_dates,
 )
@@ -469,6 +470,16 @@ class LaneManager:
             self._stage_gate_config.wf_embargo_days,
             self._stage_gate_config.wf_test_days,
         )
+        # T044: pre-flight feasibility (max_folds < min なら全 lane 全個体 skip)
+        lane_max_folds = compute_max_folds(
+            lane_n_unique_dates,
+            self._stage_gate_config.wf_train_days,
+            self._stage_gate_config.wf_embargo_days,
+            self._stage_gate_config.wf_test_days,
+            self._stage_gate_config.wf_step_days,
+        )
+        wf_min_folds = self._stage_gate_config.wf_min_folds_required
+        preflight_underfilled = lane_max_folds < wf_min_folds
         for genome in lane.population:
             # Stage A
             a_result = evaluate_stage_a(
@@ -494,8 +505,11 @@ class LaneManager:
             if not a_result.passed:
                 continue
             stage_a_pass += 1
-            # Stage B (T035: 観測日数充足検査 → underfilled なら skip-path)
-            if lane_n_unique_dates < wf_min_dates:
+            # Stage B feasibility check (T044 が T035 wf_min_unique_dates を superset)
+            # `wf_min_folds_required >= 1` なら lane_n_unique_dates < wf_min_dates の
+            # 場合は必ず lane_max_folds = 0 < min となり pre_flight が成立する。
+            # T035 の wf_min_unique_dates 単独経路は dead branch のため削除。
+            if preflight_underfilled:
                 b_result = StageResult(
                     stage="B",
                     passed=False,
@@ -507,6 +521,8 @@ class LaneManager:
                         "payload": {
                             "n_unique_dates": lane_n_unique_dates,
                             "wf_min_unique_dates": wf_min_dates,
+                            "max_folds": lane_max_folds,
+                            "wf_min_folds_required": wf_min_folds,
                             "n_fold": 0,
                             "n_fold_unavailable": 0,
                             "n_fold_effective": 0,
@@ -515,13 +531,12 @@ class LaneManager:
                             "positive_fold_ratio": None,
                             "positive_fold_ratio_effective": None,
                             "dsr": None,
-                            # 未評価を明示するため None
                             "is_full_sharpe": None,
                             "is_full_total_pnl": None,
                             "is_full_trade_count": None,
                         },
                     },
-                    reason_codes=("stage_b_window_underfilled",),
+                    reason_codes=("stage_b_pre_flight_underfilled",),
                 )
             else:
                 b_result = evaluate_stage_b(

@@ -907,14 +907,14 @@ def test_run_generation_skips_cp_evaluator_when_pair_data_missing(
     assert counts["c"] == 2
 
 
-# T035: Stage B skip-path =====================================================
+# T035 / T044: Stage B skip-path ==============================================
 
 
 def test_stage_b_skipped_when_unique_dates_below_minimum(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """bars_18m の unique dates < wf_min_unique_dates → evaluate_stage_b 不発火、
-    archive に reason_codes=('stage_b_window_underfilled',) で記録される."""
+    """bars_18m の unique dates < wf_min_unique_dates → T044 pre-flight が先取りし
+    reason_codes=('stage_b_pre_flight_underfilled',) で記録される (T035 wf_min_unique_dates 単独経路は dead)."""
     counts = _patch_stage_funcs(
         monkeypatch,
         a_result=_stage_a_result(passed=True),
@@ -930,16 +930,17 @@ def test_stage_b_skipped_when_unique_dates_below_minimum(
     assert counts["a"] == 2
     # Stage B は skip-path で 0 回呼ばれる
     assert counts["b"] == 0
-    # archive.collect_stage_b は 2 回呼ばれる (stage A pass 個体すべてで underfilled 記録)
     assert archive.collect_stage_b.call_count == 2
-    # 渡された stage_result が underfilled
     for call in archive.collect_stage_b.call_args_list:
         sr = call.kwargs.get("stage_result") or call.args[3]
-        assert sr.reason_codes == ("stage_b_window_underfilled",)
+        # T044: pre_flight が wf_min_folds_required (default 2) で先取り
+        assert sr.reason_codes == ("stage_b_pre_flight_underfilled",)
         assert sr.passed is False
         payload = sr.metrics["payload"]
         assert payload["n_unique_dates"] == 8
         assert payload["wf_min_unique_dates"] == 141
+        assert payload["max_folds"] == 0
+        assert payload["wf_min_folds_required"] == 2
         assert payload["n_fold"] == 0
 
 
@@ -958,4 +959,54 @@ def test_stage_b_evaluated_when_unique_dates_meet_minimum(
     mgr.run_generation("tier1_EUR_JPY")
     assert counts["a"] == 2
     # Stage B は通常通り評価される
+    assert counts["b"] == 2
+
+
+# T044: Stage B pre-flight =================================================
+
+
+def test_stage_b_skipped_pre_flight_when_max_folds_below_min(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """bars_18m が max_folds<min_folds_required → pre-flight skip-path."""
+    counts = _patch_stage_funcs(
+        monkeypatch,
+        a_result=_stage_a_result(passed=True),
+        b_result=_stage_b_result(passed=False),
+    )
+    archive = MagicMock(spec=GenomeArchive)
+    # train=120, test=20, embargo=1, step=20 → fold_len=141。bars_18m=8 → max_folds=0 < min=2
+    big_cfg = StageGateConfig(wf_min_folds_required=2)
+    mgr = _make_lane_manager(archive=archive, stage_gate_config=big_cfg)
+    mgr.run_generation("tier1_EUR_JPY")
+    # Stage A は通常通り 2 回呼ばれる
+    assert counts["a"] == 2
+    # Stage B は pre-flight で skip → 0 回
+    assert counts["b"] == 0
+    # archive に pre-flight reason で記録
+    assert archive.collect_stage_b.call_count == 2
+    for call in archive.collect_stage_b.call_args_list:
+        sr = call.kwargs.get("stage_result") or call.args[3]
+        assert sr.reason_codes == ("stage_b_pre_flight_underfilled",)
+        assert sr.passed is False
+        payload = sr.metrics["payload"]
+        assert "max_folds" in payload
+        assert "wf_min_folds_required" in payload
+        assert payload["wf_min_folds_required"] == 2
+
+
+def test_stage_b_evaluated_when_max_folds_meets_min(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """max_folds >= min_folds_required → 通常 evaluate_stage_b."""
+    counts = _patch_stage_funcs(
+        monkeypatch,
+        a_result=_stage_a_result(passed=True),
+        b_result=_stage_b_result(passed=False),
+    )
+    archive = MagicMock(spec=GenomeArchive)
+    # default _make_lane_manager は train=2/test=1/embargo=0/step=1, bars=8 → max_folds=6 >= 2
+    mgr = _make_lane_manager(archive=archive)
+    mgr.run_generation("tier1_EUR_JPY")
+    assert counts["a"] == 2
     assert counts["b"] == 2

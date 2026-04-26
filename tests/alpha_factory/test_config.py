@@ -217,3 +217,21 @@ def test_strict_bool_string_false_is_false() -> None:
     assert _strict_bool("true", default=False) is True
     assert _strict_bool(None, default=True) is True
     assert _strict_bool(None, default=False) is False
+
+
+# T044 wf_min_folds_required ============================================
+
+
+def test_wf_min_folds_required_default_value() -> None:
+    """StageGateConfig default で wf_min_folds_required=2."""
+    from src.alpha_factory.stage_gate import StageGateConfig
+
+    cfg = StageGateConfig()
+    assert cfg.wf_min_folds_required == 2
+
+
+def test_wf_min_folds_required_invalid_zero() -> None:
+    from src.alpha_factory.stage_gate import StageGateConfig
+
+    with pytest.raises(ValueError, match="wf_min_folds_required must be >= 1"):
+        StageGateConfig(wf_min_folds_required=0)
