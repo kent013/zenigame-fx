@@ -118,26 +118,42 @@ class ParamSpec:
 
 @dataclass(frozen=True)
 class EconomicEventSnapshot:
-    """as-of <= bar_time までに既知のイベントスケジュールのスナップショット (T012)。
+    """as-of <= bar_time までに既知のイベントスケジュールのスナップショット (T012/T039)。
 
-    look-ahead bias 回避のため、primitive (M4) は本 snapshot を介して
+    look-ahead bias 回避のため、primitive (M4/P10) は本 snapshot を介して
     EconomicCalendar を参照する。`as_of` は「この時刻までに schedule が既知」と
     みなす上限であり、`event.event_time > as_of` のイベントは
     「bar_time 時点で未知」として primitive 側で除外される。
 
-    MVP 仮定:
+    T039: 未来 schedule 漏洩を構造的に防ぐため `as_of_strict` フラグを追加。
+    True の場合、primitive 側で **bar_time ごと** に
+    `event_time <= min(as_of, bar_time[i])` の二段ガードを適用する
+    (per-bar gate)。False (legacy MVP) では従来通り as_of cap のみ。
+    `__post_init__` で `as_of` の tz-aware を強制する (T039)。
+
+    MVP 仮定 (legacy, as_of_strict=False):
         - backtest 使用時は calendar 全量を `as_of=+∞ 近似` で渡す運用を許容
-          （schedule の late amendment leakage は別 TODO で厳密化）
         - compute は `event.event_time` のみ参照、`event.actual` には触れない
-          （FX live 時点で未公開のため）
 
     Attributes:
         calendar: EconomicCalendar インスタンス
-        as_of: この時刻までに schedule が既知（future schedule の leakage を防ぐ cap）
+        as_of: この時刻までに schedule が既知（future schedule の leakage を防ぐ cap）。
+            tz-aware datetime 必須 (T039 強制)。
+        as_of_strict: True で per-bar gate を有効化 (production 推奨)。
+            既存 backtest の MVP 互換性のため default False。
     """
 
     calendar: EconomicCalendar
     as_of: datetime
+    as_of_strict: bool = False
+
+    def __post_init__(self) -> None:
+        """T039: as_of の tz-aware を強制 (fail-fast)."""
+        if self.as_of.tzinfo is None:
+            raise ValueError(
+                "EconomicEventSnapshot.as_of must be tz-aware datetime; "
+                f"got naive {self.as_of!r}"
+            )
 
 
 @dataclass(frozen=True)

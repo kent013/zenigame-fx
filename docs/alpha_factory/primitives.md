@@ -73,7 +73,8 @@ T012 で `src/alpha_factory/primitives/modulator_generic.py` に実装・登録�
 - M1 / M6: ATR / ADX は Wilder smoothing で過去のみ参照
 - M2: bar_time の hour/minute から計算、deterministic
 - M3: bar close 時点のスプレッドを参照（signal at close → execute next bar open 規約と整合、MVP では proxy）
-- M4: `event.actual` を一切参照せず `event.event_time` のみ使用。`EconomicEventSnapshot.as_of` を cap として `event_time > as_of` のイベントを除外
+- M4: `event.actual` を一切参照せず `event.event_time` のみ使用。`EconomicEventSnapshot.as_of` を 1 段目 cap として `event_time > as_of` のイベントを除外。**T039: `as_of_strict=True` のとき per-bar gate (二段目) を有効化し、各 bar で `event_time > bar_time[i]` のイベントを bisect で除外** (causality 強制)。
+- P10: M4 と同方針 (USD/CAD 限定 NA セッション内 gate)。`as_of_strict` で per-bar gate を有効化 (T039)。
 - M5: `bisect_left(pubs, bar_time)` の strict less than で同時刻 publication を除外
 
 **snapshot 欠損時挙動**:
@@ -89,7 +90,7 @@ T012 で `src/alpha_factory/primitives/modulator_generic.py` に実装・登録�
 T011 既存テストは新フィールドを指定せず `EvaluationContext(bars=..., idx=..., pair=..., params=...)` で構築するため壊れない（frozen dataclass への default 値付きフィールド追加は backward-compatible）。
 
 **snapshot dataclass** (`_base.py`):
-- `EconomicEventSnapshot(calendar, as_of)` — `EconomicCalendar` と as-of cap のペア
+- `EconomicEventSnapshot(calendar, as_of, as_of_strict=False)` — `EconomicCalendar` と as-of cap のペア。`as_of_strict=True` で M4/P10 の per-bar gate を有効化 (T039、production 推奨)。`__post_init__` で `as_of` の tz-aware を強制 (T039 fail-fast)。
 - `VixSeriesSnapshot(observations: tuple[(datetime, float), ...])` — publication_ts_utc 昇順、`__post_init__` で tz-aware 強制 + 昇順検証。`lookup(bar_time)` は strict less than で O(N) lookup（compute_all_bars 内で繰り返し呼ぶ場合は呼び出し側で pubs 列をキャッシュして bisect_left を直接使うこと、M5 実装参照）
 
 **実行タイミング規約**: zenigame-fx の backtest は `signal at close → execute next bar open`。

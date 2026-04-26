@@ -38,6 +38,7 @@ from src.alpha_factory.primitives.modulator_generic import (
     M5_SPEC,
     M6_SPEC,
     MODULATOR_SPECS,
+    _m4_compute_all,
     all_specs,
 )
 from src.domain.price import Ohlc, PriceBar
@@ -789,3 +790,120 @@ class _NoWarnContext:
 
 def _no_warn_context():
     return _NoWarnContext()
+
+
+# ---------------------------------------------------------------------------
+# T039: EconomicEventSnapshot as_of_strict + per-bar gate (M4)
+# ---------------------------------------------------------------------------
+
+
+class TestT039EconomicEventSnapshotStrict:
+    """as_of_strict=True で per-bar gate が有効化される (M4 causality)."""
+
+    def test_snapshot_requires_tz_aware_as_of(self) -> None:
+        """as_of が naive datetime なら ValueError (T039 fail-fast)."""
+        with pytest.raises(ValueError, match="must be tz-aware"):
+            EconomicEventSnapshot(
+                calendar=EconomicCalendar([]),
+                as_of=datetime(2026, 1, 1),  # naive
+            )
+
+    def test_snapshot_default_as_of_strict_is_false(self) -> None:
+        """既存 backtest の MVP 互換性のため default は False."""
+        snap = EconomicEventSnapshot(
+            calendar=EconomicCalendar([]),
+            as_of=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        assert snap.as_of_strict is False
+
+    def test_m4_strict_excludes_future_event_per_bar(self) -> None:
+        """T039 per-bar gate: as_of_strict=True で event_time > bar_time[i] の
+        イベントを bar i では除外する。strict=True と False で出力が変わる
+        ことを示し、causality 強制が機能していることを確認."""
+        bars = _build_bars(8, seed=39)  # 8 hourly bars
+        # 1 日目最後の bar より後 (2 日目以降) に発生する future event を仕込む
+        future_event = EconomicEvent(
+            event_time=bars[-1].bar_time + timedelta(hours=1),
+            currency="USD",
+            name="FOMC",
+            impact=3,
+        )
+        # 1 日目早い時点に既知 event
+        past_event = EconomicEvent(
+            event_time=bars[0].bar_time + timedelta(minutes=10),
+            currency="EUR",
+            name="ECB",
+            impact=3,
+        )
+        events = [past_event, future_event]
+        # legacy MVP (as_of=+∞ 近似) では future event も全 bar に影響
+        snap_legacy = EconomicEventSnapshot(
+            calendar=EconomicCalendar(events),
+            as_of=datetime(2099, 1, 1, tzinfo=UTC),
+            as_of_strict=False,
+        )
+        # strict (per-bar gate) では future event は当該 bar で除外
+        snap_strict = EconomicEventSnapshot(
+            calendar=EconomicCalendar(events),
+            as_of=datetime(2099, 1, 1, tzinfo=UTC),
+            as_of_strict=True,
+        )
+        out_legacy = _m4_compute_all(
+            _ctx(bars, 0, M4_SPEC, pair="EUR_USD", event_snapshot=snap_legacy)
+        )
+        out_strict = _m4_compute_all(
+            _ctx(bars, 0, M4_SPEC, pair="EUR_USD", event_snapshot=snap_strict)
+        )
+        # 全 bar 同じ shape
+        assert out_legacy.shape == out_strict.shape
+        # 1 つ以上の bar で値が異なる (future event の影響が strict で消える)
+        assert not np.array_equal(out_legacy, out_strict)
+
+    def test_m4_strict_legacy_equivalence_when_no_future_events(self) -> None:
+        """全 event が全 bar より過去なら legacy と strict は同じ出力."""
+        bars = _build_bars(8, seed=39)
+        # 全 bar より前の event のみ
+        past_event = EconomicEvent(
+            event_time=bars[0].bar_time - timedelta(hours=10),
+            currency="USD",
+            name="past",
+            impact=3,
+        )
+        snap_legacy = EconomicEventSnapshot(
+            calendar=EconomicCalendar([past_event]),
+            as_of=datetime(2099, 1, 1, tzinfo=UTC),
+            as_of_strict=False,
+        )
+        snap_strict = EconomicEventSnapshot(
+            calendar=EconomicCalendar([past_event]),
+            as_of=datetime(2099, 1, 1, tzinfo=UTC),
+            as_of_strict=True,
+        )
+        out_legacy = _m4_compute_all(
+            _ctx(bars, 0, M4_SPEC, pair="EUR_USD", event_snapshot=snap_legacy)
+        )
+        out_strict = _m4_compute_all(
+            _ctx(bars, 0, M4_SPEC, pair="EUR_USD", event_snapshot=snap_strict)
+        )
+        assert np.array_equal(out_legacy, out_strict)
+
+    def test_m4_strict_first_bar_with_no_known_events_returns_one(self) -> None:
+        """全 event が当該 bar より未来なら gate=1.0 (開放)."""
+        bars = _build_bars(8, seed=39)
+        # 全 event が bar より遥か未来
+        future_event = EconomicEvent(
+            event_time=bars[-1].bar_time + timedelta(days=10),
+            currency="USD",
+            name="future",
+            impact=3,
+        )
+        snap = EconomicEventSnapshot(
+            calendar=EconomicCalendar([future_event]),
+            as_of=datetime(2099, 1, 1, tzinfo=UTC),
+            as_of_strict=True,
+        )
+        out = _m4_compute_all(
+            _ctx(bars, 0, M4_SPEC, pair="EUR_USD", event_snapshot=snap)
+        )
+        # 全 bar で gate 開放 (1.0)
+        assert np.allclose(out, 1.0)
