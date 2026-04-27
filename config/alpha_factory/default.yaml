@@ -51,7 +51,7 @@ ga:
   # cycle 7 (Codex 推奨): entry_count_min 1→50 で live_criteria.trade_count_min=50 と整合化。
   # 「制約不整合 (設計バグ)」の修正 — trade_count=30 等の下限割れ個体 selection 経路を遮断。
   feasibility:
-    entry_count_min: 50                         # cycle 7: live_criteria.trade_count_min と整合
+    entry_count_min: 1                          # cycle 11 diagnostic: 50→1 (Run-20 v2 状態) で T045/T046 撤回しつつ Stage B 復活可否を確認
     apply_from_generation: 0                    # 0 世代目から制約適用
     enable_fallback_when_all_infeasible: true   # 全個体 infeasible で旧 4 要素にフォールバック
 
@@ -78,7 +78,7 @@ stage_gate:
     window_days: 60
     target_pass_rate: 0.15      # 探索圧の代理指標 (calibrate-gate T027 で使用)
     alpha: 0.03
-    threshold: 0.0              # cycle 7 reset: cycle 5/6 で gate 0.4655→0.3655 でも A=0 継続。delta_max=0.1 では復旧 4 run 必要なので即時 reset。本 cycle は calibrate-gate skip。
+    threshold: 0.0              # cycle 11 diagnostic reset: T045/T046 撤回 + gate=0 (Run-20 v2 状態に近似) で Stage B 復活可否確認。本 cycle は calibrate-gate skip。
     # T034: trade_count<min_exposure_trade_count の個体は no_exposure reason +
     # NO_EXPOSURE_FITNESS sentinel で淘汰する (selection_score tie-break で
     # 「無取引優位」を構造的に解消)。default 1 = 「1 trade 未満 = 取引未成立」。
@@ -131,7 +131,7 @@ stage_gate:
     spread_stress_min_sharpe: 0.0
     # live_criteria は上記 SSOT セクションを参照 (重複定義しない)
     # T045: GA selection で stage_c_feasible (PnL>0 ∧ Sharpe>0) 個体を優先 (v3 selection_score)
-    feasibility_apply: true
+    feasibility_apply: false   # cycle 11 diagnostic: T045 を一時無効化 (stage_c_feasible=True 固定で v3.1 priority bit を実質無効化)
 
 # Cross-pair (ii-lite) evaluation 設定 (T016)
 # - 実装: src/alpha_factory/cross_pair.py

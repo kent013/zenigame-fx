@@ -37,6 +37,24 @@
 | T038 | Sharpe 計算根本修正 Phase 1A: bar-level annualized → trade_sharpe_raw + sample-size guard | stage-gate | Critical | 2026-04-25 18:56 | todo/T038 |
 | T031 | regime-participation-constraint Phase 1: trade_count=0 を selection_score feasibility 制約で淘汰 | cross-pair | Critical | 2026-04-25 23:56 | - |
 | T035 | stats-completeness-gate-stage-b: Stage B 統計可観測性ハード契約と reason_codes 集計 | statistics | Critical | 2026-04-26 01:46 | - |
+| T041 | stage-c-spread-stress-unblock: max_spread_bps を設定して Stage C stress 関門を機能させる | stage-gate | Critical | 2026-04-26 10:42 | - |
+| T043 | mission-score-soft-aggregate: live_criteria 4 軸 soft 合算スコアを archive/report に追加 | statistics | High | 2026-04-26 12:39 | - |
+| T042 | sharpe-threshold-rescale: live_criteria/StageA/B 閾値を v2 trade-level スケールへ再標準化 | stage-gate | Critical | 2026-04-26 13:15 | - |
+| T037 | signal-active-clause-metric: clause 発火カウンタの runtime 計測と archive 反映 | primitives | Critical | 2026-04-26 13:39 | - |
+| T034 | risk-no-trade-fitness-guard: no-trade 時の fitness sentinel 一貫化と統合経路テスト整備 | stage-gate | Critical | 2026-04-26 22:37 | - |
+| T036 | factor-shadow-plane (FSP) Phase 1: single-instrument 用 daily diagnostic shadow layer | cross-pair | Critical | 2026-04-26 23:11 | - |
+| T033 | cost-pnl-ledger-eventsource: PnL/コスト sidecar 出力で Stage A Provenance 分布を可視化 | general | Critical | 2026-04-27 00:09 | - |
+| T039 | economic-event-as-of-strict: M4/P10 未来 schedule 漏洩防止 | primitives | Medium | 2026-04-27 00:27 | - |
+| T040 | calibrate-gate-drift-monitor: 直近 N Run の threshold/decision 横断観察 | stage-gate | Low | 2026-04-27 00:42 | - |
+| T044 | trade-sharpe-overwrite: trade_sharpe_raw 上書き bug 修正 (archive スキーマに stage 別 sharpe 列追加) | stage-gate | Critical | 2026-04-27 10:04 | - |
+| T045 | stageb-pnl-negative: Stage B 通過群 total_pnl 全 negative の物理調査 (WF fold dump) | stage-gate | Critical | 2026-04-27 10:10 | - |
+| T046 | p10-strict-aux: P10 NADataProximityGate strict_aux 標準化 (常時 1.0 開放を解消) | primitives | High | 2026-04-27 10:13 | - |
+| T047 | pair-specific-aux-loader: pair_specific 用 aux data loader 整備 (DXY/VIX/Copper/Gold) | data-ingest | Critical | 2026-04-27 10:16 | - |
+| T048 | max-drawdown-zero: max_drawdown=0 多発調査 (equity_curve dump) | statistics | Medium | 2026-04-27 10:20 | - |
+| T049 | negative-equity: negative equity warnings 調査 + ストップアウト logic 整備 | infrastructure | Critical | 2026-04-27 10:22 | - |
+| T050 | selection-tie-drift: selection_score tie drift 調査 (HHI / 多様性測定) | ga-architecture | Medium | 2026-04-27 10:23 | - |
+| T051 | calibrate-monotone-tighten: calibrate-gate monotone tighten 観測 (Run 23-25 drift CLI 集計) | stage-gate | Low | 2026-04-27 10:26 | - |
+| T052 | ga-parallel-workers | ga-architecture | High | 2026-04-27 14:32 | - |
 
 ## Obsoleted
 
