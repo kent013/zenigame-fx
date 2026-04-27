@@ -56,6 +56,7 @@
 | T051 | calibrate-monotone-tighten: calibrate-gate monotone tighten 観測 (Run 23-25 drift CLI 集計) | stage-gate | Low | 2026-04-27 10:26 | - |
 | T052 | ga-parallel-workers | ga-architecture | High | 2026-04-27 14:32 | - |
 | T053 | composite per-bar 計算の Numba JIT 化（dict → ndarray, fused kernel） | primitives | High | 2026-04-27 18:22 | - |
+| T054 | Stage A→B Pipeline Health Fix（calibrate 伝搬不全 + Stage B all_folds_unavailable） | stage-gate | Critical | 2026-04-27 20:26 | - |
 
 ## Obsoleted
 
