@@ -57,6 +57,7 @@
 | T052 | ga-parallel-workers | ga-architecture | High | 2026-04-27 14:32 | - |
 | T053 | composite per-bar 計算の Numba JIT 化（dict → ndarray, fused kernel） | primitives | High | 2026-04-27 18:22 | - |
 | T054 | Stage A→B Pipeline Health Fix（calibrate 伝搬不全 + Stage B all_folds_unavailable） | stage-gate | Critical | 2026-04-27 20:26 | - |
+| T055 | backtest per-bar info ログの throttle（呼び出し完全削除 + 集計サマリ化） | infrastructure | High | 2026-04-27 21:03 | - |
 
 ## Obsoleted
 
