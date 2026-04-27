@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Final
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.db.models import CurrencyPair, MacroIndexDaily, PriceBarM1
@@ -71,21 +71,18 @@ def _series_finite_coverage_pct(
 ) -> float:
     """series の period 内で「value が non-NULL の日 / 期間日数」を 0-100 で返す.
 
-    daily 系列は土日含めて期間日数を分母にすると過小評価されるが、保守側に倒すため
-    そのまま採用する。月次系列は当然低くなる (lag 35 日 + 月次粒度).
+    Codex impl-review-round-1 [Warning] 反映: 全件 ORM ロード回避し DB 側 COUNT.
     """
     period_days = max(1, int((period[1] - period[0]).total_seconds() // 86400))
-    rows = (
-        db_session.scalars(
-            select(MacroIndexDaily)
-            .where(MacroIndexDaily.series_id == series_id)
-            .where(MacroIndexDaily.date >= period[0].date())
-            .where(MacroIndexDaily.date <= period[1].date())
-        )
-        .all()
-    )
-    finite = sum(1 for r in rows if r.value is not None)
-    return min(100.0, 100.0 * finite / period_days)
+    finite = db_session.execute(
+        select(func.count())
+        .select_from(MacroIndexDaily)
+        .where(MacroIndexDaily.series_id == series_id)
+        .where(MacroIndexDaily.date >= period[0].date())
+        .where(MacroIndexDaily.date <= period[1].date())
+        .where(MacroIndexDaily.value.is_not(None))
+    ).scalar_one()
+    return min(100.0, 100.0 * float(finite) / period_days)
 
 
 def _series_latest_effective_from(
@@ -122,16 +119,17 @@ def _pair_bars_finite_coverage_pct(
     ).one_or_none()
     if pair is None:
         return 0.0
-    n_rows = len(
-        db_session.scalars(
-            select(PriceBarM1)
-            .where(PriceBarM1.pair_id == pair.id)
-            .where(PriceBarM1.bar_time >= period[0])
-            .where(PriceBarM1.bar_time < period[1])
-        ).all()
-    )
+    # Codex impl-review-round-1 [Warning] 反映: 18ヶ月 M1 = 約 70 万 row のため
+    # 全件 ORM ロード ({.all()} → len) を避けて DB 側 COUNT(*) を使う.
+    n_rows = db_session.execute(
+        select(func.count())
+        .select_from(PriceBarM1)
+        .where(PriceBarM1.pair_id == pair.id)
+        .where(PriceBarM1.bar_time >= period[0])
+        .where(PriceBarM1.bar_time < period[1])
+    ).scalar_one()
     expected_minutes = max(1, int((period[1] - period[0]).total_seconds() // 60))
-    return min(100.0, 100.0 * n_rows / expected_minutes)
+    return min(100.0, 100.0 * float(n_rows) / expected_minutes)
 
 
 def preflight_check_aux_data(

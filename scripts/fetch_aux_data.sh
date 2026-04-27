@@ -16,9 +16,11 @@
 
 set -euo pipefail
 
-# Stage B 18 ヶ月 history を含めて余裕を持たせる
+# Stage B 18 ヶ月 history を含めて余裕を持たせる。
+# Codex impl-review-round-1 [Suggestion] 反映: END 既定を 「今日 (UTC)」 に動的化
+# (固定 2026-04-30 だと 2026-05 以降 stale 化するため運用事故リスクが高い).
 START="${1:-2024-08-01}"
-END="${2:-2026-04-30}"
+END="${2:-$(date -u '+%Y-%m-%d')}"
 LOG="/tmp/fetch_aux_data_$(date +%Y%m%d_%H%M%S).log"
 
 echo "[1/3] FRED series fetch (10 series)..." | tee -a "$LOG"

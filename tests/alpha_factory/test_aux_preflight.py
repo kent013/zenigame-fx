@@ -243,6 +243,34 @@ class TestPreflightCheckAuxData:
         )
         assert "VIXCLS" in result.hard_missing
 
+    def test_stale_tail_freshness_marks_missing(self, sqlite_session) -> None:
+        """V13 反映: latest_effective_from が extended_end - safety_lag より古いと missing.
+
+        coverage は十分でも tail freshness が崩れていたら fail-closed.
+        """
+        # 期間中 dense に populate するが **末尾 1 ヶ月分が欠落**
+        # extended_end = period_end + holdout = 2026-04-01 + 60d = 2026-05-31
+        # safety_lag = 35+7 = 42 日 → 2026-05-31 - 42d = 2026-04-19
+        # latest_effective_from = 2026-02-15 + 24h = 2026-02-16 < 2026-04-19 で stale
+        _populate_dense_macro(
+            sqlite_session,
+            "VIXCLS",
+            start=date(2024, 7, 1),  # extended_start = 2026-01-01 - 18m = 2024-07-01
+            end=date(2026, 2, 15),  # 末尾 stale (本来は 2026-04 直前まで欲しい)
+        )
+        result = preflight_check_aux_data(
+            db_session=sqlite_session,
+            period=(
+                datetime(2026, 1, 1, tzinfo=UTC),
+                datetime(2026, 4, 1, tzinfo=UTC),
+            ),
+            stage_b_window_months=18,
+            stage_c_holdout_days=60,
+            allow_missing=True,
+        )
+        # tail stale → missing 判定 (両端 freshness check)
+        assert "VIXCLS" in result.hard_missing
+
 
 def test_preflight_result_passes_property() -> None:
     """PreflightResult.passes は hard_missing が空のときのみ True."""

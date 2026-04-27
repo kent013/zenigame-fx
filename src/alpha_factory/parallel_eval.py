@@ -226,7 +226,13 @@ class GenomeStageResult:
 # T057 Phase 2 Gate B: process-local aux alignment cache (key = LaneEvalContext id).
 # 同 ctx 内では bars_a/b/holdout の identity が stable なので id(bars) ベースで
 # 再利用可能。worker process が複数 ctx を扱う場合 (現状 lane 1 個前提) も問題なし。
+# Codex impl-review-round-1 [Suggestion]: 長寿命 worker でも明示クリア可能にする.
 _PROC_AUX_CACHE: dict[int, AuxAlignmentCache] = {}
+
+
+def _reset_proc_aux_cache() -> None:
+    """process-local aux alignment cache をクリアする (test 用 / 長寿命 worker 用)."""
+    _PROC_AUX_CACHE.clear()
 
 
 def _get_aligned_for_stage(

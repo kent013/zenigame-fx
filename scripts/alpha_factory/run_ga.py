@@ -1188,12 +1188,21 @@ def main(argv: list[str] | None = None) -> int:
                 coverage_pct=preflight_result.coverage_pct_by_series,
             )
             # AuxBundle を 1 度だけ構築 (raw)
+            # Codex impl-review-round-1 [Critical]: preflight と同じ拡張期間を
+            # 使う必要がある (Stage B 18ヶ月 history + Stage C holdout)。
+            # dataset 期間だけでは Stage B/holdout の bars に対応する aux 観測が
+            # 0 埋め経路に落ちる ("preflight 通過したのに評価で safe default"
+            # 値伝搬漏れリスク)。
             all_series = list(HARD_REQUIRED_AUX.keys()) + list(
                 SOFT_REQUIRED_AUX.keys()
             )
             extended_period = (
-                cfg.dataset.start,
-                cfg.dataset.end,
+                cfg.dataset.start
+                - timedelta(
+                    days=cfg.stage_gate.stage_b_window_months * 30
+                ),
+                cfg.dataset.end
+                + timedelta(days=cfg.stage_gate.stage_c_holdout_days),
             )
             aux_bundle = build_aux_bundle_from_db(
                 db_session=aux_session,

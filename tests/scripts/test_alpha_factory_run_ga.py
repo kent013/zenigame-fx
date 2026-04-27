@@ -480,8 +480,12 @@ def test_smoke_run_holdout_ok(
     )
     assert rc == 0
     # T057 Phase 2 Gate B: aux preflight + AuxBundle build で SessionLocal が
-    # 追加で 1 回呼ばれる (1 = bars 取得, 2 = preflight + aux 取得)
-    assert len(created) >= 1, "SessionLocal が少なくとも 1 回呼ばれていること"
+    # 追加で 1 回呼ばれる (Codex impl-review-round-1 [Warning] 反映:
+    # call count を厳密に固定して回帰検出を維持。1 = bars 取得, 2 = preflight + aux 取得).
+    assert len(created) == 2, (
+        "SessionLocal は本番 RUN で 2 回呼ばれる "
+        "(1 回目: bars 取得, 2 回目: aux preflight + AuxBundle 構築)"
+    )
     # stmt ベースでの bars 判別が動いていること (R1 impl-review B3)
     assert created[0].bars_calls == ["stage_b", "holdout"]
 
