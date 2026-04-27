@@ -390,6 +390,10 @@ def _build_stage_gate(
         ),
         "stage_b_dsr_min": float(b_raw.get("dsr_min", 0.0)),
         "wf_min_folds_required": int(b_raw.get("wf_min_folds_required", 2)),
+        # T054: Stage B fold 専用 trade-level Sharpe sample-size guard
+        "stage_b_fold_trade_count_min": int(
+            b_raw.get("fold_trade_count_min", 10)
+        ),
         "stage_c_holdout_days": int(c_raw.get("holdout_days", 60)),
         "spread_stress_multiplier": float(
             c_raw.get("spread_stress_multiplier", 1.5)

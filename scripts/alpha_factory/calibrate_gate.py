@@ -62,6 +62,13 @@ from src.alpha_factory.calibrate_gate_history import (  # noqa: E402
     HistoryRecord,
     append_record,
 )
+from src.alpha_factory.calibrate_state import (  # noqa: E402
+    SCHEMA_VERSION,
+    compute_base_config_hash,
+    compute_full_config_hash,
+)
+from src.alpha_factory.config import load_config  # noqa: E402
+from src.alpha_factory.stage_gate import STAGE_GATE_VERSION  # noqa: E402
 
 logger = structlog.get_logger("calibrate_gate")
 
@@ -383,9 +390,35 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     # ---- T040: drift 監視用 JSONL 履歴に append (fail-open) ----
+    # T054: cross-run contamination guard 用メタデータも一緒に書き込む。
     # dry_run でも観察記録は残す (制御則は変えない、観察のみ)。
     try:
         from datetime import datetime
+
+        # T054: AlphaFactoryConfig を別途読み込み、base/full config hash 計算に使う。
+        # (load_calibrate_config と独立、SSoT は default.yaml)
+        try:
+            af_cfg = load_config(args.config_path)
+            base_hash: str | None = compute_base_config_hash(af_cfg)
+            full_hash: str | None = compute_full_config_hash(af_cfg)
+            dataset_span: list[str] | None = [
+                str(af_cfg.dataset.start),
+                str(af_cfg.dataset.end),
+            ]
+            instrument: str | None = af_cfg.dataset.instrument
+            stage_gate_version: str | None = STAGE_GATE_VERSION
+        except Exception as inner:
+            # fallback: meta なしで record (state file load では skip される)
+            print(
+                f"[warn] calibrate_gate config hash compute failed: {inner}",
+                file=sys.stderr,
+            )
+            base_hash = None
+            full_hash = None
+            dataset_span = None
+            instrument = None
+            stage_gate_version = None
+
         record = HistoryRecord(
             run_id=run_id_resolved,
             applied_at=datetime.now(UTC).isoformat(),
@@ -406,6 +439,14 @@ def main(argv: list[str] | None = None) -> int:
             stage_b_pass_count=monitoring.stage_b_pass_count,
             stage_c_pass_count=monitoring.stage_c_pass_count,
             live_criteria_gap=monitoring.live_criteria_gap,
+            # T054: cross-run contamination guard
+            schema_version=SCHEMA_VERSION,
+            base_config_hash=base_hash,
+            full_config_hash=full_hash,
+            dataset_span=dataset_span,
+            instrument=instrument,
+            stage_gate_version=stage_gate_version,
+            applied_from_run_id=run_id_resolved,
         )
         history_path = REPO_ROOT / DEFAULT_HISTORY_PATH
         append_record(record, history_path)

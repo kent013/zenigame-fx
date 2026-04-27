@@ -105,6 +105,23 @@ zenigame 側のファイルは `.claude/settings.local.json` の `additionalDire
 
 ---
 
+## calibrate-gate と state file 経由の自動適用 (T054)
+
+`scripts/alpha_factory/calibrate_gate.py` は Stage A threshold 決定時に以下を実行:
+1. `config/alpha_factory/default.yaml` の `stage_gate.stage_a.threshold` を atomic 書き戻し
+2. `reports/calibrate-gate/history.jsonl` に cross-run contamination guard 用 metadata 付き record を append (`schema_version=1`, `base_config_hash`, `full_config_hash`, `dataset_span`, `instrument`, `stage_gate_version`, `applied_from_run_id`)
+
+`run_ga.py` 起動時、優先順位 `CLI > history > yaml` で effective threshold を確定:
+- CLI: `--stage-a-threshold X` (明示指定、最優先) → `source="cli"`
+- history: 最新適用可能 record (`base_config_hash` 一致 + `decision in (tighten, loosen)` + isfinite + range 内) → `source="history"`
+- yaml: `default.yaml` の値 (initial seed) → `source="config"`
+
+yaml を chore commit で reset しても history が新しければ history 値が effective になる (cross-run 一貫性)。startup 時に必ず `stage_gate.effective_threshold stage_a_threshold=X source={config|history|cli}` log を出力する。
+
+詳細: `docs/alpha_factory/stage-gates.md` § "T054: state file 経由の自動適用".
+
+---
+
 ## .claude/ 設定の現状
 
 `.claude/skills/` 配下は以下の三層構成:

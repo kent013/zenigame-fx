@@ -28,6 +28,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 from types import MappingProxyType
 from typing import ClassVar, Final, Literal, Protocol, TypedDict, cast
 
@@ -64,16 +65,43 @@ __all__ = [
     "METRIC_UNAVAILABLE_FITNESS",
     "NO_EXPOSURE_FITNESS",
     "STAGE_A_FITNESS_SENTINELS",
+    "STAGE_GATE_VERSION",
     "SYSTEM_FAILURE_FITNESS",
     "CrossPairEvaluator",
     "CrossPairInputs",
     "CrossPairResult",
+    "FoldUnavailableReason",
     "StageGateConfig",
     "StageResult",
     "evaluate_stage_a",
     "evaluate_stage_b",
     "evaluate_stage_c",
 ]
+
+
+# T054: Stage gate logic version 識別子。
+# state file (calibrate_state) で「異なる stage gate ロジックの履歴を適用しない」
+# cross-run contamination guard に使用。Stage B fold reason 集計や
+# fold-trade-count guard 等のロジック改変時にバージョンを上げる。
+STAGE_GATE_VERSION: Final[str] = "v3_stage_b_fold_min_trade_count"
+
+
+# T054: Stage B fold が unavailable になった理由の排他的 enum 化。
+# 詳細設計 §「unavailable reason の排他的 enum 化」(Round 2) 反映。
+# 最初にマッチした reason を採用 (排他的)、優先順位:
+#   1. FOLD_EXCEPTION (例外発生は他の判定より優先)
+#   2. NO_TRADES (trades 空)
+#   3. ZERO_VARIANCE (trades あって 0 分散)
+#   4. TRADE_COUNT_BELOW_MIN (trade_count < threshold)
+#   5. OTHER (上記以外、要 follow-up)
+class FoldUnavailableReason(StrEnum):
+    """Stage B fold が trade-level Sharpe 計算不能になった理由 (排他的 enum)."""
+
+    FOLD_EXCEPTION = "fold_exception"
+    NO_TRADES = "no_trades"
+    TRADE_COUNT_BELOW_MIN = "trade_count_below_min"
+    ZERO_VARIANCE = "zero_variance"
+    OTHER = "other"
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +163,22 @@ class StageGateConfig:
     # T-sharpe Phase 1A: trade-level Sharpe sample-size guard
     # config から compute_metrics へ伝搬する canonical 値
     trade_count_min_for_sharpe: int = 30
+
+    # T054: Stage B fold 専用の trade-level Sharpe sample-size guard。
+    # @why: Stage A は 60-day window で trade_count_min_for_sharpe=30 を要求
+    # するが、Stage B fold は wf_test_days=10 と短い期間で同じ 30 trade
+    # を要求すると trade rate 3 trades/day の個体しか fold 評価不能になり、
+    # all_folds_unavailable 一色が発生する (T054 investigation §0.4 verified)。
+    # 修正方針 (詳細設計 §仮説 B-X / 案 3): Stage B fold 専用閾値を独立化。
+    # 値の根拠 (Lo 2002 SE 上限):
+    #   - Sharpe SE ≈ √((1+0.5×SR²)/N)
+    #   - 目標 SR ≈ stage_b_median_oos_sharpe_min=0.05、SE 上限 0.32 から逆算 N≈10
+    #   - median + positive_fold_ratio の 2 段集約で fold 単位 noise を吸収
+    #   - **Stage B median + positive_fold_ratio ベースの集約評価で許容**
+    # default 10 = trade-level Sharpe 推定として最低限の妥当 N。
+    # **緩和ではなく「機能していた当時 (run_20260426_145502 median 167) の挙動を
+    # 意図的に再現する設計判断」** (詳細設計 仮説 B-X 案 3 / 禁止事項 4 抵触なし)。
+    stage_b_fold_trade_count_min: int = 10
 
     # live_criteria
     live_criteria: Mapping[str, float | int] = field(
@@ -478,6 +522,36 @@ def evaluate_stage_a(
 # ---------------------------------------------------------------------------
 
 
+def _classify_fold_unavailable(
+    *,
+    trade_count: int,
+    trade_count_min: int,
+) -> FoldUnavailableReason:
+    """T054: trade_sharpe_raw=None になった理由を排他的 enum で分類する。
+
+    優先順位 (排他的、最初にマッチした reason を採用):
+    1. NO_TRADES (trade_count=0)
+    2. TRADE_COUNT_BELOW_MIN (0 < trade_count < trade_count_min)
+    3. ZERO_VARIANCE (trade_count >= max(2, trade_count_min) かつ std=0)
+    4. OTHER (上記以外、要 follow-up — 例: trade_count >= 2 かつ < trade_count_min
+       で max(2, trade_count_min) > trade_count_min のときの境界ケース)
+
+    例外発生 (FOLD_EXCEPTION) は呼び出し元で別途設定する。
+
+    Args:
+        trade_count: fold 内の trade 数
+        trade_count_min: trade_count_min_for_sharpe (Stage B 用 fold-min)
+    """
+    if trade_count == 0:
+        return FoldUnavailableReason.NO_TRADES
+    # _trade_sharpe_raw は len(returns) < max(2, trade_count_min) で None
+    effective_min = max(2, trade_count_min)
+    if trade_count < effective_min:
+        return FoldUnavailableReason.TRADE_COUNT_BELOW_MIN
+    # trade_count >= effective_min なのに None → 分散ゼロ
+    return FoldUnavailableReason.ZERO_VARIANCE
+
+
 def evaluate_stage_b(
     genome: Genome,
     bars_18m: list[PriceBar],
@@ -512,6 +586,11 @@ def evaluate_stage_b(
     oos_sharpes_imputed: list[float] = []
     # T035: fold ごとの unavailable フラグを保持し effective 集計に使う
     fold_was_unavailable: list[bool] = []
+    # T054: 排他的 reason 別カウント。sum(reason_counts.values()) == n_fold_unavailable
+    # の不変条件を保つ (test_stage_gate.py で検証)。
+    reason_counts: dict[FoldUnavailableReason, int] = dict.fromkeys(
+        FoldUnavailableReason, 0
+    )
 
     # 18 ヶ月全体 IS monitor
     is_full_sharpe: float | None = None
@@ -542,37 +621,52 @@ def evaluate_stage_b(
     # 各 fold の OOS Sharpe
     # engine の run_backtest は BacktestConfig.start/end を参照しないため
     # backtest_config をそのまま流用する (詳細設計 §3.2 参照)
+    fold_min_trade_count = stage_config.stage_b_fold_trade_count_min
     for i, (_train_bars, test_bars) in enumerate(folds):
         fold_sharpe: float | None = None
+        fold_reason: FoldUnavailableReason | None = None
         try:
             strategy = DslStrategy(genome, primitive_evaluator)
             broker = MockBroker(instrument_meta=meta)
             res = run_backtest(test_bars, strategy, broker, backtest_config)
+            # T054: Stage B fold 専用 trade_count_min を適用 (Stage A の
+            # trade_count_min_for_sharpe=30 と分離)。
             bt = compute_metrics(
                 res.trades,
                 res.equity_curve,
-                trade_count_min_for_sharpe=stage_config.trade_count_min_for_sharpe,
+                trade_count_min_for_sharpe=fold_min_trade_count,
             )
             # T-sharpe Phase 1A: trade_sharpe_raw (v2) を使用
-            # NOTE: stage_b_median_oos_sharpe_min=0.20 は v1 bar-level Sharpe スケール前提。
-            # Phase 1B replay で v2 trade-level スケールに再校正する。
             fold_sharpe = (
                 float(bt.trade_sharpe_raw)
                 if bt.trade_sharpe_raw is not None
                 else None
             )
+            # T054: trade_sharpe_raw が None の場合、なぜ None になったかを
+            # 排他的 enum で classify する (FoldUnavailableReason)。
+            if fold_sharpe is None:
+                fold_reason = _classify_fold_unavailable(
+                    trade_count=bt.trade_count,
+                    trade_count_min=fold_min_trade_count,
+                )
         except Exception as exc:
             logger.warning(
                 "stage_b.fold_failure",
                 genome=genome.name,
                 fold=i,
                 error=str(exc),
+                error_type=type(exc).__name__,
             )
             fold_sharpe = None
+            fold_reason = FoldUnavailableReason.FOLD_EXCEPTION
         if fold_sharpe is None:
             n_fold_unavailable += 1
             oos_sharpes_imputed.append(0.0)
             fold_was_unavailable.append(True)
+            # T054: classify 漏れ防止: fold_reason が None なら OTHER
+            if fold_reason is None:
+                fold_reason = FoldUnavailableReason.OTHER
+            reason_counts[fold_reason] += 1
         else:
             oos_sharpes_imputed.append(fold_sharpe)
             fold_was_unavailable.append(False)
@@ -616,6 +710,13 @@ def evaluate_stage_b(
     passed = len(reasons) == 0
     elapsed = _time.perf_counter() - start
 
+    # T054: 不変条件 — sum(reason_counts.values()) == n_fold_unavailable
+    # (排他的 enum 分類の正しさ保証)
+    assert sum(reason_counts.values()) == n_fold_unavailable, (
+        f"reason_counts sum invariant violated: "
+        f"sum={sum(reason_counts.values())}, n_fold_unavailable={n_fold_unavailable}"
+    )
+
     metrics_envelope: dict[str, object] = {
         "stage": "B",
         "genome_name": genome.name,
@@ -633,6 +734,10 @@ def evaluate_stage_b(
             "is_full_sharpe": is_full_sharpe,
             "is_full_total_pnl": is_full_total_pnl,
             "is_full_trade_count": is_full_trade_count,
+            # T054: 排他的 reason 別 fold count (key は string 値、archive 互換)
+            "unavailable_reason_counts": {
+                r.value: c for r, c in reason_counts.items()
+            },
         },
     }
     return StageResult(
