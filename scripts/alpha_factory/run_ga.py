@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import sys
 from collections.abc import Callable, Iterable, Mapping
@@ -60,12 +61,23 @@ from src.alpha_factory.diagnostics_sidecar import (
     sidecar_relative_path,
     write_stage_a_provenance,
 )
+from src.alpha_factory.parallel_eval import (
+    GenomeEvaluator,
+    LaneEvalContext,
+    PreflightPayload,
+    measure_peak_rss_mb,
+)
 from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
 from src.alpha_factory.swim_lane import (
     GRADUATION_LANE_ID,
     GraduationLane,
     LaneManager,
     Tier1Lane,
+)
+from src.alpha_factory.walk_forward import (
+    compute_max_folds,
+    n_unique_dates,
+    wf_min_unique_dates,
 )
 from src.backtest.engine import BacktestConfig
 from src.broker import InstrumentMeta
@@ -257,7 +269,45 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "archive Parquet と RUN_CACHE_DIR state (.cache/) は常に書く。"
         ),
     )
-    return p.parse_args(argv)
+    # T052: GA 評価並列ワーカー数 (canonical: --max-workers, alias: --workers)
+    p.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help=(
+            "GA 評価並列ワーカー数 (1 = sequential, 2 以上で multiprocessing.Pool)。"
+            "未指定時は YAML config の値を使用 (default 1)。"
+        ),
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        dest="workers_alias",
+        help="--max-workers のエイリアス (zenigame との表記互換)",
+    )
+    p.add_argument(
+        "--strict-memory-guard",
+        action="store_true",
+        help=(
+            "max_workers が available_memory ベースの推奨値を超えたら "
+            "起動時 fail-fast (autopilot 等で OOM を未然防止)。"
+        ),
+    )
+    args = p.parse_args(argv)
+    # alias 統合 (両方指定時は同値でなければエラー)
+    if args.max_workers is None and args.workers_alias is not None:
+        args.max_workers = args.workers_alias
+    elif (
+        args.max_workers is not None
+        and args.workers_alias is not None
+        and args.max_workers != args.workers_alias
+    ):
+        p.error(
+            f"--max-workers ({args.max_workers}) と "
+            f"--workers ({args.workers_alias}) が異なる値で指定されました"
+        )
+    return args
 
 
 def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
@@ -277,6 +327,7 @@ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
             "max_depth": args.max_depth,
             "fitness_metric": args.fitness_metric,
             "seed": args.seed,
+            "max_workers": args.max_workers,
         },
     }
 
@@ -726,6 +777,7 @@ def _write_reports(
     cross_pair_mode: str,
     now: datetime,
     diagnostics_sidecar_path: Path | None = None,
+    peak_rss_per_generation: list[dict[str, float]] | None = None,
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -737,9 +789,28 @@ def _write_reports(
     # per_generation.best_fitness_pen を非有限値から保護する
     # (R1 impl-review B1: summary.json に -inf/nan が漏れる経路遮断)
     sanitized_per_generation: list[dict[str, Any]] = []
-    for pg in per_generation:
+    for idx, pg in enumerate(per_generation):
         raw_fp = float(pg["best_fitness_pen"])
         finite_val, finite_flag = _safe_finite(raw_fp)
+        # T052: 世代毎 RSS ピーク (測定された世代のみ追加 field として記録)
+        # ga_worker_* (pool_pids 指定時) と all_children_* (fallback) のどちらか
+        # 非ゼロ側を採用 (sequential or pool_pids fallback では all_children を使う)
+        rss_for_gen: dict[str, float] = {}
+        if peak_rss_per_generation is not None and idx < len(peak_rss_per_generation):
+            rss = peak_rss_per_generation[idx]
+            worker_max = float(rss.get("ga_worker_max_rss_mb", 0.0))
+            worker_total = float(rss.get("ga_worker_total_rss_mb", 0.0))
+            # fallback: all_children_* に集計されたケース
+            if worker_max == 0.0 and worker_total == 0.0:
+                worker_max = float(rss.get("all_children_max_rss_mb", 0.0))
+                worker_total = float(rss.get("all_children_total_rss_mb", 0.0))
+            rss_for_gen = {
+                "peak_main_rss_mb": float(rss.get("main_rss_mb", 0.0)),
+                "peak_rss_mb_per_worker": worker_max,
+                "peak_total_rss_mb": float(
+                    rss.get("main_rss_mb", 0.0) + worker_total
+                ),
+            }
         sanitized_per_generation.append(
             {
                 "generation": pg["generation"],
@@ -751,10 +822,24 @@ def _write_reports(
                 "best_fitness_pen": finite_val,
                 "best_fitness_pen_finite": bool(finite_flag),
                 "feasible_count": int(pg.get("feasible_count", 0)),
+                # T052: stage 別 timing (sum + max 併記、legacy path では 0.0)
+                "stage_a_seconds_total": float(pg.get("stage_a_seconds_total", 0.0)),
+                "stage_a_seconds_max": float(pg.get("stage_a_seconds_max", 0.0)),
+                "stage_b_seconds_total": float(pg.get("stage_b_seconds_total", 0.0)),
+                "stage_b_seconds_max": float(pg.get("stage_b_seconds_max", 0.0)),
+                "stage_c_seconds_total": float(pg.get("stage_c_seconds_total", 0.0)),
+                "stage_c_seconds_max": float(pg.get("stage_c_seconds_max", 0.0)),
+                **rss_for_gen,
             }
         )
 
+    # T052: schema_version bump (1.0 → 1.1)
+    # 1.1 で追加: per_generation[*].stage_*_seconds_total/_max,
+    #            per_generation[*].peak_*_rss_mb, top-level parallel_config,
+    #            top-level max_rss_mb_per_worker
+    # 後方互換: consumer は未知 field を無視する義務 (additionalProperties: true)
     summary: dict[str, Any] = {
+        "schema_version": "1.1",
         "run_id": run_id,
         "run_number": run_number,
         "generated_at": now.isoformat(),
@@ -830,6 +915,23 @@ def _write_reports(
         "population_size": len(final_population),
         "graduation_count": lane_manager.promote_graduates(),
         "archive_parquet": str(archive_path),
+        # T052: 並列実行設定と RSS ピーク (RUN 全体最大)
+        "parallel_config": {
+            "max_workers": cfg.ga.max_workers,
+            "mode": "parallel" if cfg.ga.max_workers > 1 else "sequential",
+        },
+        "max_rss_mb_per_worker": float(
+            max(
+                (
+                    max(
+                        rss.get("ga_worker_max_rss_mb", 0.0),
+                        rss.get("all_children_max_rss_mb", 0.0),
+                    )
+                    for rss in (peak_rss_per_generation or [])
+                ),
+                default=0.0,
+            )
+        ),
     }
     # T033: 書き込み成功時のみ summary に sidecar path を追加
     # (consumer は missing field を無視できる契約)
@@ -885,6 +987,34 @@ def _write_reports(
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+
+
+def _check_memory_budget(max_workers: int, strict: bool) -> None:
+    """T052: max_workers が available memory budget を超えたら warning。
+
+    `--strict-memory-guard` 指定時は SystemExit (autopilot 等で OOM 防止)。
+    1 worker あたり 約 400MB (保守的試算) + main 400MB + OS マージン 4GB を仮定。
+    """
+    try:
+        import psutil
+    except ImportError:
+        return  # psutil 不在ならスキップ
+    available_mb = psutil.virtual_memory().available / 1024 / 1024
+    worker_budget_mb = available_mb - 4096
+    recommended_max = max(1, int(worker_budget_mb // 400))
+    if max_workers > recommended_max:
+        logger.warning(
+            "run_ga.max_workers_exceeds_memory_budget",
+            requested=max_workers,
+            recommended=recommended_max,
+            available_mb=int(available_mb),
+        )
+        if strict:
+            raise SystemExit(
+                f"strict-memory-guard: max_workers={max_workers} > "
+                f"recommended {recommended_max} "
+                f"(available_mb={int(available_mb)})"
+            )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -946,89 +1076,184 @@ def main(argv: list[str] | None = None) -> int:
         pair_bars={},
         pair_meta={},
     )
-    lane_manager = LaneManager(
-        tier1={lane_id: tier1_lane},
-        graduation=graduation_lane,
-        stage_gate_config=cfg.stage_gate,
-        cross_pair_config=cfg.cross_pair,
-        primitive_evaluator=primitive_evaluator,
-        archive=archive,
-        backtest_config_factory=bt_factory,
-        diagnostics_collector=diagnostics_collector,
-    )
     cross_pair_mode = (
         "enabled" if graduation_lane.pair_bars
         else "skipped_single_instrument"
     )
 
-    rng = random.Random(cfg.ga.seed)
-    cache: dict[str, IndividualCacheEntry] = {}
+    # T052: GenomeEvaluator を構築 (max_workers=1 で in-process / >1 で Pool)。
+    # LaneEvalContext は RUN 中 immutable (Pool initializer で 1 度だけ broadcast)。
+    #
+    # preflight 値 (Stage B fold 不足判定) を RUN 開始時に計算して context に
+    # 埋め込む。これにより worker 側 evaluate_genome が Stage A pass 後に Stage
+    # B/C を短絡 skip でき、無駄計算を排除できる (Codex impl-review §1 Critical)。
+    bars_b_list = list(bundle.bars_stage_b)
+    lane_n_unique_dates = n_unique_dates(bars_b_list)
+    wf_min_dates = wf_min_unique_dates(
+        cfg.stage_gate.wf_train_days,
+        cfg.stage_gate.wf_embargo_days,
+        cfg.stage_gate.wf_test_days,
+    )
+    lane_max_folds = compute_max_folds(
+        lane_n_unique_dates,
+        cfg.stage_gate.wf_train_days,
+        cfg.stage_gate.wf_embargo_days,
+        cfg.stage_gate.wf_test_days,
+        cfg.stage_gate.wf_step_days,
+    )
+    wf_min_folds = cfg.stage_gate.wf_min_folds_required
+    preflight_underfilled = lane_max_folds < wf_min_folds
+    preflight_payload = PreflightPayload(
+        n_unique_dates=lane_n_unique_dates,
+        wf_min_unique_dates=wf_min_dates,
+        max_folds=lane_max_folds,
+        wf_min_folds_required=wf_min_folds,
+        n_bars=len(bars_b_list),
+    )
+
+    lane_ctx = LaneEvalContext(
+        lane_id=lane_id,
+        bars_a=tuple(bundle.bars_stage_a),
+        bars_b=tuple(bundle.bars_stage_b),
+        bars_holdout=tuple(bundle.bars_holdout),
+        meta=bundle.meta,
+        bt_cfg=bt_factory(cfg.dataset.instrument),
+        cp_inputs=None,  # Phase 2: graduation.pair_bars が空のため None
+        preflight_underfilled=preflight_underfilled,
+        preflight_payload=preflight_payload,
+    )
+    # T052: max_workers が available memory budget を超えたら warning
+    # (--strict-memory-guard 指定時のみ fail-fast)
+    _check_memory_budget(cfg.ga.max_workers, args.strict_memory_guard)
+    if cfg.ga.max_workers > os.cpu_count() if os.cpu_count() else False:
+        logger.warning(
+            "run_ga.max_workers_exceeds_cpu_count",
+            requested=cfg.ga.max_workers,
+            cpu_count=os.cpu_count(),
+        )
+    logger.info(
+        "run_ga.parallel_mode",
+        max_workers=cfg.ga.max_workers,
+        mode="parallel" if cfg.ga.max_workers > 1 else "sequential",
+    )
+
+    # GA loop は GenomeEvaluator の `with` 文内で実行 (close 漏れ防止)
     per_generation: list[dict[str, Any]] = []
     prev_population: list[Genome] = []
     genomes_by_name: dict[str, Genome] = {}
+    cache: dict[str, IndividualCacheEntry] = {}
+    rng = random.Random(cfg.ga.seed)
+    peak_rss_per_generation: list[dict[str, float]] = []
 
-    for gen in range(cfg.ga.generations + 1):
-        if gen == 0:
-            population = [
-                random_genome(
-                    rng,
-                    name=f"g0_i{i}",
-                    units=cfg.backtest.units,
-                    max_clause=cfg.ga.max_clause,
-                    max_depth=cfg.ga.max_depth,
-                    registry=rg_registry,
+    with GenomeEvaluator(
+        max_workers=cfg.ga.max_workers,
+        stage_gate_cfg=cfg.stage_gate,
+        cross_pair_cfg=cfg.cross_pair,
+        prim_evaluator=primitive_evaluator,
+        lane_contexts={lane_id: lane_ctx},
+    ) as genome_evaluator:
+        lane_manager = LaneManager(
+            tier1={lane_id: tier1_lane},
+            graduation=graduation_lane,
+            stage_gate_config=cfg.stage_gate,
+            cross_pair_config=cfg.cross_pair,
+            primitive_evaluator=primitive_evaluator,
+            archive=archive,
+            backtest_config_factory=bt_factory,
+            diagnostics_collector=diagnostics_collector,
+            genome_evaluator=genome_evaluator,
+        )
+
+        for gen in range(cfg.ga.generations + 1):
+            if gen == 0:
+                population = [
+                    random_genome(
+                        rng,
+                        name=f"g0_i{i}",
+                        units=cfg.backtest.units,
+                        max_clause=cfg.ga.max_clause,
+                        max_depth=cfg.ga.max_depth,
+                        registry=rg_registry,
+                    )
+                    for i in range(cfg.ga.population_size)
+                ]
+                provenance: dict[str, tuple[str | None, str | None]] = {
+                    g.name: (None, None) for g in population
+                }
+            else:
+                population, provenance = _breed_next_gen(
+                    prev_population, cache, cfg.ga, rg_registry, rng, gen
                 )
-                for i in range(cfg.ga.population_size)
-            ]
-            provenance: dict[str, tuple[str | None, str | None]] = {
-                g.name: (None, None) for g in population
-            }
-        else:
-            population, provenance = _breed_next_gen(
-                prev_population, cache, cfg.ga, rg_registry, rng, gen
+
+            for g in population:
+                genomes_by_name[g.name] = g
+
+            # lane.generation_count は run_generation で +1 される。ここで使う
+            # "この世代 ID" は呼び出し前の generation_count をキャプチャする。
+            current_generation = tier1_lane.generation_count
+            tier1_lane.population = population
+            tier1_lane.provenance = provenance
+            summary_out = lane_manager.run_generation(lane_id)
+            _update_cache(
+                cache,
+                population,
+                archive,
+                lane_id,
+                current_generation,
+                cfg.ga.feasibility,
+                stage_c_feasibility_apply=cfg.stage_gate.stage_c_feasibility_apply,
             )
 
-        for g in population:
-            genomes_by_name[g.name] = g
-
-        # lane.generation_count は run_generation で +1 される。ここで使う
-        # "この世代 ID" は呼び出し前の generation_count をキャプチャする。
-        current_generation = tier1_lane.generation_count
-        tier1_lane.population = population
-        tier1_lane.provenance = provenance
-        summary_out = lane_manager.run_generation(lane_id)
-        _update_cache(
-            cache,
-            population,
-            archive,
-            lane_id,
-            current_generation,
-            cfg.ga.feasibility,
-            stage_c_feasibility_apply=cfg.stage_gate.stage_c_feasibility_apply,
-        )
-
-        best_fp = max(
-            (cache[g.name].fitness_pen for g in population),
-            default=-math.inf,
-        )
-        feasible_count = sum(
-            1
-            for g in population
-            if g.name in cache and cache[g.name].feasible
-        )
-        per_generation.append(
-            {
-                "generation": gen,
-                "n_evaluated": int(summary_out["n_evaluated"]),
-                "stage_a_pass": int(summary_out["stage_a_pass"]),
-                "stage_b_pass": int(summary_out["stage_b_pass"]),
-                "stage_c_pass": int(summary_out["stage_c_pass"]),
-                "graduation_count": int(summary_out["graduation_count"]),
-                "best_fitness_pen": best_fp,
-                "feasible_count": feasible_count,
-            }
-        )
-        prev_population = population
+            best_fp = max(
+                (cache[g.name].fitness_pen for g in population),
+                default=-math.inf,
+            )
+            feasible_count = sum(
+                1
+                for g in population
+                if g.name in cache and cache[g.name].feasible
+            )
+            # T052: stage 別 timing を per_generation に伝搬
+            per_generation.append(
+                {
+                    "generation": gen,
+                    "n_evaluated": int(summary_out["n_evaluated"]),
+                    "stage_a_pass": int(summary_out["stage_a_pass"]),
+                    "stage_b_pass": int(summary_out["stage_b_pass"]),
+                    "stage_c_pass": int(summary_out["stage_c_pass"]),
+                    "graduation_count": int(summary_out["graduation_count"]),
+                    "best_fitness_pen": best_fp,
+                    "feasible_count": feasible_count,
+                    # T052: stage 別 timing (legacy path で未提供時は 0.0)
+                    "stage_a_seconds_total": float(
+                        summary_out.get("stage_a_seconds_total", 0.0)
+                    ),
+                    "stage_a_seconds_max": float(
+                        summary_out.get("stage_a_seconds_max", 0.0)
+                    ),
+                    "stage_b_seconds_total": float(
+                        summary_out.get("stage_b_seconds_total", 0.0)
+                    ),
+                    "stage_b_seconds_max": float(
+                        summary_out.get("stage_b_seconds_max", 0.0)
+                    ),
+                    "stage_c_seconds_total": float(
+                        summary_out.get("stage_c_seconds_total", 0.0)
+                    ),
+                    "stage_c_seconds_max": float(
+                        summary_out.get("stage_c_seconds_max", 0.0)
+                    ),
+                }
+            )
+            # T052: 世代終了時 RSS ピーク測定
+            # pool_pids が空 (sequential or AttributeError fallback) なら
+            # None を渡して all_children_* 経路で集計
+            # (parallel_eval.measure_peak_rss_mb の契約に従う)
+            _pids = genome_evaluator.pool_pids
+            peak_rss_per_generation.append(
+                measure_peak_rss_mb(pool_pids=_pids if _pids else None)
+            )
+            prev_population = population
 
     archive_path = archive.flush()
 
@@ -1067,6 +1292,7 @@ def main(argv: list[str] | None = None) -> int:
             cross_pair_mode=cross_pair_mode,
             now=now,
             diagnostics_sidecar_path=sidecar_path_written,
+            peak_rss_per_generation=peak_rss_per_generation,
         )
     else:
         logger.info(

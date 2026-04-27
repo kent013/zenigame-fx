@@ -99,6 +99,51 @@ post-run-review 由来の TODO は `--summary` 先頭に **`[r:{code}]`** prefix
 | `uv run python scripts/alpha_factory/todo_manager.py {add,close,list,...}` | TODO 操作 |
 | `uv run python scripts/fetch_fred.py --series ... --from ... --to ...` | FRED 日足マクロ指標取得 |
 
+### 5-1. GA 並列実行 (T052)
+
+`run_ga.py` の per-genome Stage A/B/C 評価を `multiprocessing.Pool` (spawn) で並列化できる。
+
+**CLI**:
+
+```bash
+# canonical: --max-workers
+uv run python scripts/alpha_factory/run_ga.py --max-workers 4
+
+# alias: --workers (zenigame との表記互換)
+uv run python scripts/alpha_factory/run_ga.py --workers 4
+
+# 起動時 memory budget チェック (autopilot 推奨)
+uv run python scripts/alpha_factory/run_ga.py --max-workers 4 --strict-memory-guard
+```
+
+**YAML** (`config/alpha_factory/default.yaml`):
+
+```yaml
+ga:
+  max_workers: 1   # default. autopilot/improve-cycle は変更しない
+```
+
+**決定論性契約**:
+
+- L1 selection: `best_name` / `fitness_pen` / `live_criteria_passed` が worker 数に依存しない
+- L2 row-order: archive Parquet の数値 column が `(lane_id, generation, individual_name)` ソート下で完全一致
+- L3 artifact bit equivalence は **保証外** (timestamp / wall_time_seconds 等を含むため)
+
+**運用ガード** (1 worker = 約 400MB 保守的試算):
+
+- `summary.json.max_rss_mb_per_worker` が **2.1GB (3GB の 70%)** を超えたら次回 RUN で `max_workers` を引き下げる
+- `--strict-memory-guard` 指定時は `available_mem` ベースの推奨値を超えると起動時 fail-fast (autopilot 等で OOM 防止)
+- multi-pair 化で 1 worker 試算が 2.1GB を超える時点で SharedBarStore (mmap 共有) タスクを起票
+
+**summary.json schema** (T052 で `1.0 → 1.1`):
+
+- 既存 field は全て保持 (`run_id` / `dataset` / `best` / `live_criteria` 等)
+- 追加 field (consumer は未知 field を無視する義務、`additionalProperties: true`):
+  - top-level: `schema_version`, `parallel_config.{max_workers,mode}`, `max_rss_mb_per_worker`
+  - `per_generation[*]`: `stage_{a,b,c}_seconds_total`, `stage_{a,b,c}_seconds_max`, `peak_main_rss_mb`, `peak_rss_mb_per_worker`, `peak_total_rss_mb`
+
+設計詳細: `devnotes/20260427-1114-ga-parallel-workers/`
+
 ### 6. FRED 取得手順（macro_index_daily 補充）
 
 [FRED](terminology.md#fred) の日足マクロ指標（VIX / DXY / Treasury yields / breakeven）を `macro_index_daily` テーブルへ取り込む。primitive M5 / P7 等の前提データ。

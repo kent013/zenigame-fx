@@ -219,6 +219,24 @@ class StageGateConfig:
             MappingProxyType(dict(self.live_criteria)),
         )
 
+    # T052: multiprocessing.Pool initargs で worker process に配布する際、
+    # mappingproxy は ForkingPickler で pickle 不可 (Python 3.11) なため
+    # __getstate__/__setstate__ で dict ↔ mappingproxy 変換を行う。
+    # 通常の copy.deepcopy / pickle.dumps の両方に作用する。
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        # live_criteria を plain dict に変換 (pickle 互換)
+        state["live_criteria"] = dict(self.live_criteria)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        # restore: live_criteria を MappingProxyType に再 wrap (深い不変性復元)
+        for k, v in state.items():
+            object.__setattr__(self, k, v)
+        object.__setattr__(
+            self, "live_criteria", MappingProxyType(dict(state["live_criteria"]))
+        )
+
 
 @dataclass(frozen=True)
 class StageResult:
