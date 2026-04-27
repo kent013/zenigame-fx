@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from structlog.testing import capture_logs
+
 from src.backtest.engine import BacktestConfig, run_backtest
 from src.broker import MockBroker, OrderSignal
 from src.broker.orders import PortfolioSnapshot
@@ -95,3 +97,148 @@ def test_end_of_run_closes_remaining_position() -> None:
     result = run_backtest(bars, strat, broker, config)
     assert len(broker.open_positions) == 0
     assert len(result.trades) == 1
+
+
+# -- T055: per-bar log 削除 + 集計サマリ化 ---------------------------------
+
+
+def _backtest_config_with_session_close_at_hour_zero() -> BacktestConfig:
+    """hour=0 を session close 時刻として扱う BacktestConfig。
+
+    `make_bar(minute, day=1)` は `bar_time.hour == 0` （minute < 60）または >= 1 を生成する。
+    """
+    return BacktestConfig(
+        instrument="USD_JPY",
+        start=datetime(2026, 4, 1, tzinfo=UTC),
+        end=datetime(2026, 4, 5, tzinfo=UTC),
+        initial_cash=Decimal("1000000"),
+        leverage=10,
+        session_close_utc_hours=frozenset({0}),
+    )
+
+
+def test_run_backtest_session_close_drop_open_count_in_summary() -> None:
+    """session close bar 帯で strategy が出した open シグナルが drop され、
+    backtest.finished の集計フィールドに反映される。"""
+    bars = [
+        # bar 0: minute=0 → hour=0 (session close) — open_long を出すと drop
+        make_bar(0, bid_close="154.100", ask_close="154.110"),
+        # bar 1: minute=1 → hour=0 (session close) — open_short を出すと drop
+        make_bar(1, bid_close="154.110", ask_close="154.120"),
+        # bar 2: minute=120 → hour=2 (non-session) — drop されない
+        make_bar(120, bid_close="154.120", ask_close="154.130"),
+    ]
+    strat = _ScriptedStrategy({
+        0: [OrderSignal(kind="open_long", units=10000)],
+        1: [OrderSignal(kind="open_short", units=10000)],
+    })
+    broker = MockBroker(instrument_meta=usd_jpy_meta())
+    config = _backtest_config_with_session_close_at_hour_zero()
+
+    with capture_logs() as logs:
+        run_backtest(bars, strat, broker, config)
+
+    finished_logs = [log for log in logs if log.get("event") == "backtest.finished"]
+    assert len(finished_logs) == 1
+    finished = finished_logs[0]
+    assert finished["session_close_drop_open_count"] == 2
+    # 最初の drop は bar 0 で発生
+    assert finished["first_drop_open_bar_time"] == bars[0].bar_time.isoformat()
+
+
+def test_run_backtest_first_drop_open_bar_time_records_first_event() -> None:
+    """drop_open が発生しないとき first_drop_open_bar_time は None。"""
+    bars = [
+        make_bar(120, bid_close="154.100", ask_close="154.110"),  # hour=2
+        make_bar(121, bid_close="154.110", ask_close="154.120"),  # hour=2
+    ]
+    strat = _ScriptedStrategy({})
+    broker = MockBroker(instrument_meta=usd_jpy_meta())
+    config = _backtest_config_with_session_close_at_hour_zero()
+
+    with capture_logs() as logs:
+        run_backtest(bars, strat, broker, config)
+
+    finished = next(log for log in logs if log.get("event") == "backtest.finished")
+    assert finished["session_close_drop_open_count"] == 0
+    assert finished["first_drop_open_bar_time"] is None
+
+
+def test_run_backtest_session_close_drop_pending_count_in_summary() -> None:
+    """non-session bar で submit された pending が、続く session close bar で drop され
+    backtest.finished の session_close_drop_pending_count に集計される。"""
+    bars = [
+        # bar 0: minute=120 → hour=2 (non-session) — open_long を出して pending に入る
+        make_bar(120, bid_close="154.100", ask_close="154.110"),
+        # bar 1: minute=0 day=2 → hour=0 (session close) — pending が drop される
+        make_bar(0, bid_close="154.110", ask_close="154.120", day=2),
+        # bar 2: minute=120 day=2 → hour=2 — 走査継続
+        make_bar(120, bid_close="154.120", ask_close="154.130", day=2),
+    ]
+    strat = _ScriptedStrategy({0: [OrderSignal(kind="open_long", units=10000)]})
+    broker = MockBroker(instrument_meta=usd_jpy_meta())
+    config = _backtest_config_with_session_close_at_hour_zero()
+
+    with capture_logs() as logs:
+        run_backtest(bars, strat, broker, config)
+
+    finished = next(log for log in logs if log.get("event") == "backtest.finished")
+    assert finished["session_close_drop_pending_count"] == 1
+
+
+def test_run_backtest_no_per_bar_drop_log_emitted() -> None:
+    """T055: per-bar drop 系の logger.info 呼び出しが完全削除されていること。"""
+    bars = [
+        make_bar(0, bid_close="154.100", ask_close="154.110"),  # session close, drop_open
+        make_bar(120, bid_close="154.110", ask_close="154.120"),  # non-session, submit ok
+        make_bar(0, bid_close="154.120", ask_close="154.130", day=2),  # session close, drop_pending
+        make_bar(120, bid_close="154.130", ask_close="154.140", day=2),
+    ]
+    strat = _ScriptedStrategy({
+        0: [OrderSignal(kind="open_long", units=10000)],
+        1: [OrderSignal(kind="open_short", units=10000)],
+    })
+    broker = MockBroker(instrument_meta=usd_jpy_meta())
+    config = _backtest_config_with_session_close_at_hour_zero()
+
+    with capture_logs() as logs:
+        run_backtest(bars, strat, broker, config)
+
+    forbidden_events = {
+        "backtest.session_close.drop_open_from_strategy",
+        "backtest.session_close.drop_pending",
+        "broker.drop_pending_open",
+    }
+    emitted_events = {log.get("event") for log in logs}
+    assert forbidden_events.isdisjoint(emitted_events), (
+        f"per-bar drop log が削除されていない: emitted={emitted_events & forbidden_events}"
+    )
+
+
+def test_run_backtest_finished_summary_smoke_consumer_compat() -> None:
+    """V7(c): consumer 互換 smoke — backtest.finished に既存 fields が維持され、
+    新規 fields が ignore されても KeyError 等を引き起こさないことを simulate する。"""
+    bars = [
+        make_bar(0, bid_close="154.100", ask_close="154.110"),
+        make_bar(120, bid_close="154.110", ask_close="154.120"),
+    ]
+    strat = _ScriptedStrategy({})
+    broker = MockBroker(instrument_meta=usd_jpy_meta())
+    config = _backtest_config_with_session_close_at_hour_zero()
+
+    with capture_logs() as logs:
+        run_backtest(bars, strat, broker, config)
+
+    finished = next(log for log in logs if log.get("event") == "backtest.finished")
+    # 既存 fields が維持されていること（consumer 後方互換性）
+    for required_key in ("instrument", "bars", "trades", "final_equity"):
+        assert required_key in finished, f"既存 field が消えている: {required_key}"
+    # 追加 fields は consumer が ignore しても問題ない（dict なので不要 key は無視可能）
+    consumer_view = {
+        "instrument": finished["instrument"],
+        "bars": finished["bars"],
+        "trades": finished["trades"],
+        "final_equity": finished["final_equity"],
+    }
+    assert consumer_view["instrument"] == "USD_JPY"
+    assert consumer_view["bars"] == 2

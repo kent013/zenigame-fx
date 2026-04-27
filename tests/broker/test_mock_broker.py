@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from structlog.testing import capture_logs
 
 from src.broker import MockBroker, OrderSignal
 from tests._helpers import make_bar, usd_jpy_meta
@@ -161,3 +162,24 @@ def test_same_bar_multiple_fills_share_pre_fill_equity(broker: MockBroker) -> No
     assert positions[0].equity_at_entry == Decimal("1000000")
     assert positions[1].equity_at_entry == Decimal("1000000")
     assert positions[0].equity_at_entry == positions[1].equity_at_entry
+
+
+def test_drop_pending_open_returns_count_without_logging(broker: MockBroker) -> None:
+    """T055: drop_pending_open は件数を返し、log を出さない (per-bar hot path コスト削減)."""
+    broker.submit(OrderSignal(kind="open_long", units=10000), leverage=1)
+    broker.submit(OrderSignal(kind="open_short", units=5000), leverage=1)
+
+    with capture_logs() as logs:
+        dropped = broker.drop_pending_open()
+
+    assert dropped == 2
+    # broker.drop_pending_open イベントが発行されていないこと
+    assert all(log.get("event") != "broker.drop_pending_open" for log in logs)
+
+
+def test_drop_pending_open_returns_zero_when_no_pending_open(broker: MockBroker) -> None:
+    """pending に open 系がない場合は 0 を返し log も出さない。"""
+    with capture_logs() as logs:
+        dropped = broker.drop_pending_open()
+    assert dropped == 0
+    assert all(log.get("event") != "broker.drop_pending_open" for log in logs)
