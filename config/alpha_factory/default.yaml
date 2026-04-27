@@ -13,7 +13,7 @@ dataset:
 
 backtest:
   initial_cash: "1000000"
-  leverage: 25
+  leverage: 3                    # 25→3: 25x はリスク過多 (1 RUN で破産経路に入りやすく equity_at_entry < 0 連発の遠因)。3x で 1 trade あたり notional 振れ幅を 1/8 程度に縮小。validate_leverage の max_project_leverage=25 は業者上限として維持し、個別 user override 余地は残す。
   units: 10000
   # T041 Phase 0 / Stage C unblock:
   # @why: max_spread_bps 未設定のとき stage_gate.evaluate_stage_c は
