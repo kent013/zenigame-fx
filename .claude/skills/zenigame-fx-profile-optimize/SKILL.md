@@ -8,7 +8,12 @@ argument-hint: "[--mode auto|confirm|repeat] [--baseline_profile run_id] [--skip
 
 プロファイル RUN → ボトルネック分析 → 設計 → TODO 登録 → 実装 → マージ → 再プロファイルの改善ループを実行する。
 
-**FX 固有**: `run_ga.py` は `--profile` フラグを持たないため `python -m cProfile` で間接計測する。`--workers` も存在しない（実装上常に単一プロセス）。
+**FX 固有**: `run_ga.py` は `--profile` フラグを持たないため `python -m cProfile` で間接計測する。
+
+**⚠ 必須: プロファイル RUN は `--max-workers 1` を必ず付ける** (T052 で並列化が入った後)。理由:
+- `cProfile` は main process のみ計測する。worker プロセス側の評価時間は **観測できない** ため、並列モード (default 2) で実行すると Stage A/B/C 評価コストが計測値から消えて、IPC overhead だけが残る歪んだ profile になる
+- 速度改善のループは「メインの per-genome 評価コスト」を最適化対象とするため、worker 並列を切って単一プロセスで全コストを cProfile に集約するのが必須前提
+- 並列化の効果検証は本機能 (T052) の同値性テスト + wall-time 計測で別途実施 (cProfile の責務外)
 
 ## 引数
 
@@ -100,7 +105,9 @@ FX 固有の絶対制約（イントラデイ / ロング・ショート両方�
 
 ### 1-2. 起動コマンド
 
-**重要: `--no-report` を必ず付ける。** プロファイル RUN の `reports/run-reports/run-{N}/` 成果物は本番 report を汚染するため出力禁止。archive Parquet と `.cache/alpha_factory/runs/` は引き続き書かれる（ephemeral）。
+**重要 (必ず付ける)**:
+- `--no-report`: プロファイル RUN の `reports/run-reports/run-{N}/` 成果物は本番 report を汚染するため出力禁止。archive Parquet と `.cache/alpha_factory/runs/` は引き続き書かれる (ephemeral)。
+- `--max-workers 1`: cProfile は main process のみ計測するため、並列モードでは worker 側の評価コストが**観測できなくなる**。速度改善ループは単一プロセスで全コストを cProfile に集約するのが必須前提 (default が 2 になった後も明示で 1 に上書き)。
 
 ```bash
 mkdir -p .cache/alpha_factory/runs/profile
@@ -113,13 +120,14 @@ nohup uv run python -m cProfile -o "${prof_out}" \
   scripts/alpha_factory/run_ga.py \
   --run-id "${run_id}" \
   --no-report \
+  --max-workers 1 \
   --population-size 8 --generations 1 --seed 42 \
   --instrument EUR_JPY \
   --start 2026-03-01T00:00:00Z --end 2026-03-15T00:00:00Z \
   > "${log_out}" 2>&1 &
 ```
 
-`--profile-args "..."` が指定された場合は GA 設定・データ窓を override する（`--no-report` は skill 側で常に付与）。
+`--profile-args "..."` が指定された場合は GA 設定・データ窓を override する (ただし `--no-report` と `--max-workers 1` は skill 側で常に強制付与。ユーザー指定の `--max-workers N` (N>1) は profile 整合性のため上書きされる)。
 
 ### 1-3. 完了待機
 

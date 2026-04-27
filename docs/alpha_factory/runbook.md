@@ -135,6 +135,13 @@ ga:
 - `--strict-memory-guard` 指定時は `available_mem` ベースの推奨値を超えると起動時 fail-fast (autopilot 等で OOM 防止)
 - multi-pair 化で 1 worker 試算が 2.1GB を超える時点で SharedBarStore (mmap 共有) タスクを起票
 
+**⚠ プロファイル / 速度改善ループでは `--max-workers 1` を必ず指定**:
+
+- `cProfile` は main process しか計測しないため、並列モード (default 2) で実行すると **worker 側の Stage A/B/C 評価コストが計測値から消える** (歪んだ profile になる)
+- 速度改善ループ (`zenigame-fx-profile-optimize`) は per-genome 評価コストを最適化対象とするため、worker 並列を明示的に切って単一プロセスで全コストを cProfile に集約するのが必須前提
+- 並列化の効果検証は本機能 (T052) の同値性テスト + wall-time 計測で別途実施 (cProfile の責務外)
+- 同 skill は内部で `--max-workers 1` を強制付与する (ユーザー指定の `--max-workers N>1` は profile 整合性のため上書きされる)
+
 **summary.json schema** (T052 で `1.0 → 1.1`):
 
 - 既存 field は全て保持 (`run_id` / `dataset` / `best` / `live_criteria` 等)
