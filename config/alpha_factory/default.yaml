@@ -86,7 +86,7 @@ stage_gate:
     window_days: 60
     target_pass_rate: 0.15      # 探索圧の代理指標 (calibrate-gate T027 で使用)
     alpha: 0.03
-    threshold: 0.0              # cycle 11 diagnostic reset: T045/T046 撤回 + gate=0 (Run-20 v2 状態に近似) で Stage B 復活可否確認。本 cycle は calibrate-gate skip。
+    threshold: 0.15             # 初期値: 過去 calibrate-gate 履歴 (run_20260426_183119 で 0.1778) を踏まえ、初回 RUN から Stage A 通過率を target_pass_rate=0.15 近辺に寄せる。T054 後は state file 経由で history 値が次 RUN に自動伝搬するため、本 yaml 値は「history 不在時の seed」として機能する。
     # T034: trade_count<min_exposure_trade_count の個体は no_exposure reason +
     # NO_EXPOSURE_FITNESS sentinel で淘汰する (selection_score tie-break で
     # 「無取引優位」を構造的に解消)。default 1 = 「1 trade 未満 = 取引未成立」。
