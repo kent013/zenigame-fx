@@ -36,6 +36,23 @@ lane_id 規約:
 - Graduation: 固定文字列 `"graduation"`
 - `LaneManager.__init__` は `tier1: dict[str, Tier1Lane]` の dict キーに `lane_id` を採用し、`lane.instrument == lane_id.removeprefix("tier1_")` を検証する
 
+### 並列評価 (T052)
+
+`LaneManager.__init__` は keyword-only 引数 `genome_evaluator: GenomeEvaluator | None = None` を受け取る:
+
+- `None` (default): 直列ループ (legacy 経路、後方互換)
+- non-None: `GenomeEvaluator` 経由で評価 (`max_workers=1` で in-process / `>1` で `multiprocessing.Pool`)
+
+並列モード時の決定論性契約 (詳細は [runbook.md §5-1](./runbook.md#5-1-ga-並列実行-t052)):
+
+- L1 selection determinism: `best_name` / `fitness_pen` / `live_criteria_passed` が worker 数に依存しない
+- L2 row-order determinism: archive Parquet の数値 column が `(lane_id, generation, individual_name)` ソート下で一致
+- L3 artifact bit equivalence は **保証外**
+
+副作用 (`archive.collect_*` / `diagnostics.record_*` / graduation 判定) は **main process が population 順に実施** するため、worker 完了順に依存しない。`_run_tier1_generation_via_evaluator` は冒頭で `generation_index = lane.generation_count` をスナップショット固定し、collect ループ中に `lane.generation_count` を直接参照しない。
+
+設計詳細: `devnotes/20260427-1114-ga-parallel-workers/`
+
 ### Tier 1 — per-instrument GA
 
 - 1 instrument につき 1 lane

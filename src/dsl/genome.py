@@ -49,6 +49,20 @@ class SignalConfig:
             self, "params", MappingProxyType(dict(self.params))
         )
 
+    # T052: multiprocessing.Pool で worker process に Genome を配布する際、
+    # mappingproxy は ForkingPickler で pickle 不可 (Python 3.11) なため
+    # __getstate__/__setstate__ で dict ↔ mappingproxy 変換を行う。
+    # __post_init__ と同等の deep immutability を unpickle 後にも復元する。
+    def __getstate__(self) -> dict:
+        return {"name": self.name, "weight": self.weight, "params": dict(self.params)}
+
+    def __setstate__(self, state: dict) -> None:
+        object.__setattr__(self, "name", state["name"])
+        object.__setattr__(self, "weight", state["weight"])
+        object.__setattr__(
+            self, "params", MappingProxyType(dict(state["params"]))
+        )
+
 
 @dataclass(frozen=True)
 class ClauseConfig:

@@ -41,6 +41,9 @@ from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from src.alpha_factory.diagnostics_collector import DiagnosticsCollector
+    from src.alpha_factory.parallel_eval import (
+        GenomeEvaluator,
+    )
 
 import structlog
 
@@ -217,6 +220,7 @@ class LaneManager:
         *,
         deferred_promotion: bool = False,
         diagnostics_collector: DiagnosticsCollector | None = None,
+        genome_evaluator: GenomeEvaluator | None = None,
     ) -> None:
         if not tier1:
             raise ValueError(
@@ -285,6 +289,9 @@ class LaneManager:
         self._diagnostics: DiagnosticsCollector | None = diagnostics_collector
         # 冪等性ガード: 二重昇格を in-memory set で抑止
         self._promoted_keys: set[tuple[str, int, str]] = set()
+        # T052: GenomeEvaluator (シーケンシャル/並列共通 API)。
+        # None なら legacy 直列ループを使用 (後方互換、既存テスト通過)。
+        self._genome_evaluator: GenomeEvaluator | None = genome_evaluator
         # health-check: factory が intraday 制約を満たすか確認
         self._validate_intraday_constraint(backtest_config_factory)
 
@@ -455,29 +462,19 @@ class LaneManager:
                 f"holding_cost_per_day_bps < 0: {cfg.holding_cost_per_day_bps}"
             )
 
-    def _run_tier1_generation(self, lane: Tier1Lane) -> dict[str, Any]:
-        """Tier 1 lane の 1 世代を実行し、集計サマリーを返す。
-
-        Args:
-            lane: 評価対象 Tier1Lane (``state == "active"`` 前提)。
+    def _compute_preflight(self, lane: Tier1Lane) -> tuple[int, int, int, int, bool]:
+        """T035 + T044 の preflight 値を返す共通関数 (legacy / evaluator 共通)。
 
         Returns:
-            集計サマリー (``wall_time_seconds`` は呼び出し側で埋める)。
+            ``(lane_n_unique_dates, wf_min_dates, lane_max_folds,
+              wf_min_folds, preflight_underfilled)``
         """
-        assert lane.meta is not None  # constructor で validate 済み
-        bt_cfg = self._bt_factory(lane.instrument)
-        stage_a_pass = 0
-        stage_b_pass = 0
-        stage_c_pass = 0
-        graduation_count = 0
-        # T035: Stage B 入力窓充足契約 (lane 単位で 1 回のみ計算)
         lane_n_unique_dates = n_unique_dates(lane.bars_18m)
         wf_min_dates = wf_min_unique_dates(
             self._stage_gate_config.wf_train_days,
             self._stage_gate_config.wf_embargo_days,
             self._stage_gate_config.wf_test_days,
         )
-        # T044: pre-flight feasibility (max_folds < min なら全 lane 全個体 skip)
         lane_max_folds = compute_max_folds(
             lane_n_unique_dates,
             self._stage_gate_config.wf_train_days,
@@ -486,7 +483,89 @@ class LaneManager:
             self._stage_gate_config.wf_step_days,
         )
         wf_min_folds = self._stage_gate_config.wf_min_folds_required
-        preflight_underfilled = lane_max_folds < wf_min_folds
+        return (
+            lane_n_unique_dates,
+            wf_min_dates,
+            lane_max_folds,
+            wf_min_folds,
+            lane_max_folds < wf_min_folds,
+        )
+
+    def _build_preflight_b_result(
+        self,
+        genome: Genome,
+        lane_n_unique_dates: int,
+        wf_min_dates: int,
+        lane_max_folds: int,
+        wf_min_folds: int,
+        n_bars: int,
+    ) -> StageResult:
+        """preflight_underfilled 時の偽 Stage B StageResult を組み立てる共通ファクトリ。
+
+        legacy / evaluator 経路で重複実装を避けるため private method として集約。
+        (T052 detailed-design §2 反映)
+        """
+        return StageResult(
+            stage="B",
+            passed=False,
+            metrics={
+                "stage": "B",
+                "genome_name": genome.name,
+                "n_bars": n_bars,
+                "wall_time_seconds": 0.0,
+                "payload": {
+                    "n_unique_dates": lane_n_unique_dates,
+                    "wf_min_unique_dates": wf_min_dates,
+                    "max_folds": lane_max_folds,
+                    "wf_min_folds_required": wf_min_folds,
+                    "n_fold": 0,
+                    "n_fold_unavailable": 0,
+                    "n_fold_effective": 0,
+                    "oos_sharpes": (),
+                    "median_oos_sharpe": None,
+                    "positive_fold_ratio": None,
+                    "positive_fold_ratio_effective": None,
+                    "dsr": None,
+                    "is_full_sharpe": None,
+                    "is_full_total_pnl": None,
+                    "is_full_trade_count": None,
+                },
+            },
+            reason_codes=("stage_b_pre_flight_underfilled",),
+        )
+
+    def _run_tier1_generation(self, lane: Tier1Lane) -> dict[str, Any]:
+        """Tier 1 lane の 1 世代を実行し、集計サマリーを返す。
+
+        T052: ``self._genome_evaluator`` が None なら legacy 直列ループ
+        (後方互換)、non-None なら evaluator 経由 (in-process or 並列)。
+
+        Args:
+            lane: 評価対象 Tier1Lane (``state == "active"`` 前提)。
+
+        Returns:
+            集計サマリー (``wall_time_seconds`` は呼び出し側で埋める)。
+        """
+        if self._genome_evaluator is not None:
+            return self._run_tier1_generation_via_evaluator(lane)
+        return self._run_tier1_generation_legacy(lane)
+
+    def _run_tier1_generation_legacy(self, lane: Tier1Lane) -> dict[str, Any]:
+        """legacy 直列ループ (genome_evaluator=None 経路)。"""
+        assert lane.meta is not None  # constructor で validate 済み
+        bt_cfg = self._bt_factory(lane.instrument)
+        stage_a_pass = 0
+        stage_b_pass = 0
+        stage_c_pass = 0
+        graduation_count = 0
+        # T035 + T044: preflight feasibility (lane 単位で 1 回のみ計算)
+        (
+            lane_n_unique_dates,
+            wf_min_dates,
+            lane_max_folds,
+            wf_min_folds,
+            preflight_underfilled,
+        ) = self._compute_preflight(lane)
         for genome in lane.population:
             # Stage A
             a_result = evaluate_stage_a(
@@ -525,33 +604,13 @@ class LaneManager:
             # 場合は必ず lane_max_folds = 0 < min となり pre_flight が成立する。
             # T035 の wf_min_unique_dates 単独経路は dead branch のため削除。
             if preflight_underfilled:
-                b_result = StageResult(
-                    stage="B",
-                    passed=False,
-                    metrics={
-                        "stage": "B",
-                        "genome_name": genome.name,
-                        "n_bars": len(lane.bars_18m),
-                        "wall_time_seconds": 0.0,
-                        "payload": {
-                            "n_unique_dates": lane_n_unique_dates,
-                            "wf_min_unique_dates": wf_min_dates,
-                            "max_folds": lane_max_folds,
-                            "wf_min_folds_required": wf_min_folds,
-                            "n_fold": 0,
-                            "n_fold_unavailable": 0,
-                            "n_fold_effective": 0,
-                            "oos_sharpes": (),
-                            "median_oos_sharpe": None,
-                            "positive_fold_ratio": None,
-                            "positive_fold_ratio_effective": None,
-                            "dsr": None,
-                            "is_full_sharpe": None,
-                            "is_full_total_pnl": None,
-                            "is_full_trade_count": None,
-                        },
-                    },
-                    reason_codes=("stage_b_pre_flight_underfilled",),
+                b_result = self._build_preflight_b_result(
+                    genome,
+                    lane_n_unique_dates,
+                    wf_min_dates,
+                    lane_max_folds,
+                    wf_min_folds,
+                    n_bars=len(lane.bars_18m),
                 )
             else:
                 b_result = evaluate_stage_b(
@@ -622,6 +681,197 @@ class LaneManager:
             "stage_b_pass": stage_b_pass,
             "stage_c_pass": stage_c_pass,
             "graduation_count": graduation_count,
+        }
+
+    def _run_tier1_generation_via_evaluator(
+        self, lane: Tier1Lane
+    ) -> dict[str, Any]:
+        """T052: GenomeEvaluator 経由の評価 + main 側 collect 経路。
+
+        worker は副作用なしの純粋関数 evaluate_genome のみ実行。
+        archive.collect_* / diagnostics.record_* / graduation 判定は main で
+        **population 順に** 実施 (L2 row-order 決定論性保証)。
+
+        世代番号スナップショットを冒頭で固定 (Round 1 detailed-review §3 反映)。
+        """
+        assert lane.meta is not None
+        assert self._genome_evaluator is not None
+        # Round 1 detailed-review §3: 世代番号スナップショット固定
+        # collect ループ中に lane.generation_count を直接参照しない
+        generation_index = lane.generation_count
+
+        stage_a_pass = 0
+        stage_b_pass = 0
+        stage_c_pass = 0
+        graduation_count = 0
+        stage_a_seconds: list[float] = []
+        stage_b_seconds: list[float] = []
+        stage_c_seconds: list[float] = []
+
+        (
+            lane_n_unique_dates,
+            wf_min_dates,
+            lane_max_folds,
+            wf_min_folds,
+            preflight_underfilled,
+        ) = self._compute_preflight(lane)
+
+        # 評価実行 (GenomeEvaluator が in-process / pool を抽象化)
+        results = self._genome_evaluator.evaluate_population(
+            lane.lane_id, generation_index, lane.population
+        )
+
+        # main 側で population 順に collect (L2 row-order 保証)
+        for genome, r in zip(lane.population, results, strict=True):
+            # Stage A 結果 (worker 例外時は fail-closed StageResult を組み立て)
+            if r.error is not None and r.stage_a is None:
+                a_result = StageResult(
+                    stage="A",
+                    passed=False,
+                    metrics={
+                        "stage": "A",
+                        "genome_name": genome.name,
+                        "n_bars": len(lane.bars_60d),
+                        "wall_time_seconds": 0.0,
+                        "payload": {
+                            "worker_error_code": r.error.error_code,
+                            "worker_error_message": r.error.fixed_message,
+                        },
+                    },
+                    reason_codes=("worker_error",),
+                )
+            else:
+                assert r.stage_a is not None  # 例外なしなら必ず stage_a あり
+                a_result = r.stage_a
+            parent_a, parent_b = lane.provenance.get(genome.name, (None, None))
+            self._archive.collect_stage_a(
+                genome,
+                lane.lane_id,
+                generation_index,
+                a_result,
+                instrument=lane.instrument,
+                parent_a=parent_a,
+                parent_b=parent_b,
+            )
+            if self._diagnostics is not None:
+                self._diagnostics.record_stage_a(
+                    lane.lane_id, generation_index, genome.name, a_result
+                )
+            wts = a_result.metrics.get("wall_time_seconds")
+            if isinstance(wts, (int, float)):
+                stage_a_seconds.append(float(wts))
+            if not a_result.passed:
+                continue
+            stage_a_pass += 1
+
+            # Stage B: preflight_underfilled なら main 側で偽結果生成
+            if preflight_underfilled:
+                b_result = self._build_preflight_b_result(
+                    genome,
+                    lane_n_unique_dates,
+                    wf_min_dates,
+                    lane_max_folds,
+                    wf_min_folds,
+                    n_bars=len(lane.bars_18m),
+                )
+            elif r.error is not None and r.stage_b is None:
+                # Stage B で worker 例外 → fail-closed
+                b_result = StageResult(
+                    stage="B",
+                    passed=False,
+                    metrics={
+                        "stage": "B",
+                        "genome_name": genome.name,
+                        "n_bars": len(lane.bars_18m),
+                        "wall_time_seconds": 0.0,
+                        "payload": {
+                            "worker_error_code": r.error.error_code,
+                            "worker_error_message": r.error.fixed_message,
+                        },
+                    },
+                    reason_codes=("worker_error",),
+                )
+            elif r.stage_b is None:
+                # Stage A pass / preflight OK / stage_b なし = 想定外
+                # (起こり得るのは worker error のみで上で処理済)
+                continue
+            else:
+                b_result = r.stage_b
+            self._archive.collect_stage_b(
+                genome, lane.lane_id, generation_index, b_result
+            )
+            if self._diagnostics is not None:
+                self._diagnostics.record_stage_b(
+                    lane.lane_id,
+                    generation_index,
+                    genome.name,
+                    bool(b_result.passed),
+                )
+            wts_b = b_result.metrics.get("wall_time_seconds")
+            if isinstance(wts_b, (int, float)):
+                stage_b_seconds.append(float(wts_b))
+            if not b_result.passed:
+                continue
+            stage_b_pass += 1
+
+            # Stage C
+            if r.error is not None and r.stage_c is None:
+                c_result = StageResult(
+                    stage="C",
+                    passed=False,
+                    metrics={
+                        "stage": "C",
+                        "genome_name": genome.name,
+                        "n_bars": len(lane.bars_holdout),
+                        "wall_time_seconds": 0.0,
+                        "payload": {
+                            "worker_error_code": r.error.error_code,
+                            "worker_error_message": r.error.fixed_message,
+                        },
+                    },
+                    reason_codes=("worker_error",),
+                )
+            elif r.stage_c is None:
+                continue
+            else:
+                c_result = r.stage_c
+            self._archive.collect_stage_c(
+                genome, lane.lane_id, generation_index, c_result
+            )
+            if self._diagnostics is not None:
+                self._diagnostics.record_stage_c(
+                    lane.lane_id,
+                    generation_index,
+                    genome.name,
+                    bool(c_result.passed),
+                )
+            wts_c = c_result.metrics.get("wall_time_seconds")
+            if isinstance(wts_c, (int, float)):
+                stage_c_seconds.append(float(wts_c))
+            if c_result.passed:
+                stage_c_pass += 1
+            # Graduation 判定
+            cp_result = self._extract_cross_pair_result(c_result)
+            if self.graduation_criteria(genome, c_result, cp_result):
+                promoted = self._mark_for_graduation(lane, genome)
+                if promoted:
+                    graduation_count += 1
+        lane.generation_count += 1
+        return {
+            "lane_id": lane.lane_id,
+            "state": lane.state,
+            "n_evaluated": len(lane.population),
+            "stage_a_pass": stage_a_pass,
+            "stage_b_pass": stage_b_pass,
+            "stage_c_pass": stage_c_pass,
+            "graduation_count": graduation_count,
+            # T052: stage 別 timing 集計 (sum + max 併記)
+            "stage_a_seconds_total": sum(stage_a_seconds),
+            "stage_a_seconds_max": max(stage_a_seconds, default=0.0),
+            "stage_b_seconds_total": sum(stage_b_seconds),
+            "stage_b_seconds_max": max(stage_b_seconds, default=0.0),
+            "stage_c_seconds_total": sum(stage_c_seconds),
+            "stage_c_seconds_max": max(stage_c_seconds, default=0.0),
         }
 
     def _build_cross_pair_args(

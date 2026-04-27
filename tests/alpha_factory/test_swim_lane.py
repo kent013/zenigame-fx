@@ -21,8 +21,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock
+
+if TYPE_CHECKING:
+    from src.alpha_factory.parallel_eval import GenomeStageResult
 
 import pytest
 
@@ -1010,3 +1013,245 @@ def test_stage_b_evaluated_when_max_folds_meets_min(
     mgr.run_generation("tier1_EUR_JPY")
     assert counts["a"] == 2
     assert counts["b"] == 2
+
+
+# ---------------------------------------------------------------------------
+# T052: evaluator 経由化 (genome_evaluator non-None) テスト
+# ---------------------------------------------------------------------------
+
+
+class _StubGenomeEvaluator:
+    """LaneManager._run_tier1_generation_via_evaluator のテスト用 stub.
+
+    実際の evaluate_genome は呼ばず、事前設定した GenomeStageResult を
+    population 順に返す (L2 row-order の inversion 検証用に shuffle も可能)。
+    """
+
+    def __init__(
+        self,
+        result_factory: Callable[[Genome], GenomeStageResult],
+    ) -> None:
+        self._factory = result_factory
+        self.call_log: list[tuple[str, int, int]] = []
+
+    def evaluate_population(
+        self,
+        lane_id: str,
+        generation: int,
+        population: Any,
+    ) -> list[GenomeStageResult]:
+        pop_list = list(population)
+        self.call_log.append((lane_id, generation, len(pop_list)))
+        return [self._factory(g) for g in pop_list]
+
+
+def _gsr(
+    genome: Genome,
+    *,
+    a_passed: bool = True,
+    b_passed: bool | None = True,
+    c_passed: bool | None = True,
+    cp_passed: bool | None = None,
+    error_code: str | None = None,
+) -> GenomeStageResult:
+    """GenomeStageResult を組み立てる helper (test_swim_lane 用)。"""
+    from src.alpha_factory.parallel_eval import (
+        GenomeEvalError,
+        GenomeStageResult,
+    )
+
+    if error_code is not None:
+        return GenomeStageResult(
+            genome_name=genome.name,
+            stage_a=None,
+            stage_b=None,
+            stage_c=None,
+            cross_pair=None,
+            error=GenomeEvalError(stage="A", error_code=error_code, fixed_message="x"),
+        )
+    a = _stage_a_result(passed=a_passed, name=genome.name)
+    if not a_passed:
+        return GenomeStageResult(
+            genome_name=genome.name,
+            stage_a=a,
+            stage_b=None,
+            stage_c=None,
+            cross_pair=None,
+        )
+    b = _stage_b_result(passed=bool(b_passed), name=genome.name) if b_passed is not None else None
+    if b is not None and not b.passed:
+        return GenomeStageResult(
+            genome_name=genome.name, stage_a=a, stage_b=b, stage_c=None, cross_pair=None,
+        )
+    c = (
+        _stage_c_result(passed=bool(c_passed), name=genome.name)
+        if c_passed is not None
+        else None
+    )
+    cp = None
+    if c is not None and cp_passed is not None:
+        # _stage_c_result の cp_skipped を上書きするのは煩雑なので Stage C 側で別途構築
+        c = _stage_c_result(
+            passed=bool(c_passed),
+            cp_skipped=False,
+            cp_passed=cp_passed,
+            name=genome.name,
+        )
+        from src.alpha_factory.stage_gate import CrossPairResult
+
+        # cp 抽出は LaneManager._extract_cross_pair_result が payload から取り出すため
+        # GenomeStageResult.cross_pair も同期して埋める
+        cp_obj = c.metrics["payload"]["cross_pair"]["result"]
+        if isinstance(cp_obj, CrossPairResult):
+            cp = cp_obj
+    return GenomeStageResult(
+        genome_name=genome.name,
+        stage_a=a,
+        stage_b=b,
+        stage_c=c,
+        cross_pair=cp,
+    )
+
+
+def test_run_generation_via_evaluator_collects_results_in_population_order() -> None:
+    """L2 row-order: archive.collect_stage_a が population 順に呼ばれる."""
+    archive = MagicMock(spec=GenomeArchive)
+    lane = _make_tier1_lane(pop_size=4)
+    # 全員 Stage A のみ pass で B 失敗 (C/graduation 経路は別テスト)
+    evaluator = _StubGenomeEvaluator(
+        result_factory=lambda g: _gsr(g, a_passed=True, b_passed=False),
+    )
+    mgr = LaneManager(
+        tier1={"tier1_EUR_JPY": lane},
+        graduation=_make_graduation_lane(),
+        stage_gate_config=StageGateConfig(
+            wf_train_days=2, wf_test_days=1, wf_step_days=1, wf_embargo_days=0,
+        ),
+        cross_pair_config=CrossPairConfig(),
+        primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
+        archive=archive,
+        backtest_config_factory=_stub_bt_factory_intraday(),
+        genome_evaluator=cast(Any, evaluator),
+    )
+    mgr.run_generation("tier1_EUR_JPY")
+
+    # collect_stage_a が population 順に呼ばれたか
+    a_calls = [c.args[0].name for c in archive.collect_stage_a.call_args_list]
+    assert a_calls == [g.name for g in lane.population]
+    # evaluator の generation_index は collect 前にスナップショット
+    assert evaluator.call_log == [("tier1_EUR_JPY", 0, 4)]
+
+
+def test_run_generation_via_evaluator_snapshots_generation_index() -> None:
+    """世代番号スナップショット固定: collect 後に lane.generation_count が 1 増えるが
+    collect 内では evaluator に渡したスナップショット値 (=0) が使われる."""
+    archive = MagicMock(spec=GenomeArchive)
+    lane = _make_tier1_lane(pop_size=2)
+    evaluator = _StubGenomeEvaluator(
+        result_factory=lambda g: _gsr(g, a_passed=False),
+    )
+    mgr = LaneManager(
+        tier1={"tier1_EUR_JPY": lane},
+        graduation=_make_graduation_lane(),
+        stage_gate_config=StageGateConfig(
+            wf_train_days=2, wf_test_days=1, wf_step_days=1, wf_embargo_days=0,
+        ),
+        cross_pair_config=CrossPairConfig(),
+        primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
+        archive=archive,
+        backtest_config_factory=_stub_bt_factory_intraday(),
+        genome_evaluator=cast(Any, evaluator),
+    )
+    assert lane.generation_count == 0
+    mgr.run_generation("tier1_EUR_JPY")
+    # collect_stage_a の generation 引数は全て 0 (snapshot 値)
+    for call in archive.collect_stage_a.call_args_list:
+        assert call.args[2] == 0
+    # ループ末尾で +1
+    assert lane.generation_count == 1
+
+
+def test_run_generation_via_evaluator_normalizes_worker_error_to_failclosed() -> None:
+    """worker 例外 → fail-closed StageResult (reason_codes=('worker_error',))."""
+    archive = MagicMock(spec=GenomeArchive)
+    lane = _make_tier1_lane(pop_size=1)
+    evaluator = _StubGenomeEvaluator(
+        result_factory=lambda g: _gsr(g, error_code="WORKER_OOM"),
+    )
+    mgr = LaneManager(
+        tier1={"tier1_EUR_JPY": lane},
+        graduation=_make_graduation_lane(),
+        stage_gate_config=StageGateConfig(
+            wf_train_days=2, wf_test_days=1, wf_step_days=1, wf_embargo_days=0,
+        ),
+        cross_pair_config=CrossPairConfig(),
+        primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
+        archive=archive,
+        backtest_config_factory=_stub_bt_factory_intraday(),
+        genome_evaluator=cast(Any, evaluator),
+    )
+    summary = mgr.run_generation("tier1_EUR_JPY")
+    assert archive.collect_stage_a.call_count == 1
+    sr = archive.collect_stage_a.call_args_list[0].args[3]
+    assert sr.reason_codes == ("worker_error",)
+    assert sr.passed is False
+    assert summary["stage_a_pass"] == 0
+
+
+def test_run_generation_via_evaluator_synthesizes_preflight_b_result() -> None:
+    """preflight_underfilled: worker は Stage B 短絡、main で偽 StageResult 生成."""
+    archive = MagicMock(spec=GenomeArchive)
+    lane = _make_tier1_lane(pop_size=2)
+    # preflight underfilled になる stage_gate_config (wf_train_days=200 で fold 不足)
+    evaluator = _StubGenomeEvaluator(
+        result_factory=lambda g: _gsr(g, a_passed=True, b_passed=None, c_passed=None),
+    )
+    mgr = LaneManager(
+        tier1={"tier1_EUR_JPY": lane},
+        graduation=_make_graduation_lane(),
+        stage_gate_config=StageGateConfig(
+            wf_train_days=200, wf_test_days=20, wf_step_days=20, wf_embargo_days=1,
+        ),
+        cross_pair_config=CrossPairConfig(),
+        primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
+        archive=archive,
+        backtest_config_factory=_stub_bt_factory_intraday(),
+        genome_evaluator=cast(Any, evaluator),
+    )
+    mgr.run_generation("tier1_EUR_JPY")
+    assert archive.collect_stage_b.call_count == 2
+    for call in archive.collect_stage_b.call_args_list:
+        sr = call.args[3]
+        assert sr.reason_codes == ("stage_b_pre_flight_underfilled",)
+        assert sr.passed is False
+
+
+def test_run_generation_via_evaluator_returns_stage_timing_metrics() -> None:
+    """summary に stage_*_seconds_total / _max が含まれる."""
+    archive = MagicMock(spec=GenomeArchive)
+    lane = _make_tier1_lane(pop_size=2)
+    evaluator = _StubGenomeEvaluator(
+        result_factory=lambda g: _gsr(g, a_passed=True, b_passed=True, c_passed=True),
+    )
+    mgr = LaneManager(
+        tier1={"tier1_EUR_JPY": lane},
+        graduation=_make_graduation_lane(),
+        stage_gate_config=StageGateConfig(
+            wf_train_days=2, wf_test_days=1, wf_step_days=1, wf_embargo_days=0,
+        ),
+        cross_pair_config=CrossPairConfig(),
+        primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
+        archive=archive,
+        backtest_config_factory=_stub_bt_factory_intraday(),
+        genome_evaluator=cast(Any, evaluator),
+    )
+    summary = mgr.run_generation("tier1_EUR_JPY")
+    for key in (
+        "stage_a_seconds_total", "stage_a_seconds_max",
+        "stage_b_seconds_total", "stage_b_seconds_max",
+        "stage_c_seconds_total", "stage_c_seconds_max",
+    ):
+        assert key in summary, f"missing key: {key}"
+    # _stage_*_result の wall_time_seconds=0.01 × 2 (pop=2) = 0.02 sum, 0.01 max
+    assert summary["stage_a_seconds_total"] == pytest.approx(0.02)
+    assert summary["stage_a_seconds_max"] == pytest.approx(0.01)

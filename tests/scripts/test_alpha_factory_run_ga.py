@@ -229,6 +229,116 @@ def test_load_config_default_yaml_loads() -> None:
     assert float(cfg.live_criteria["sharpe_min"]) == 1.0
 
 
+def test_parse_args_max_workers_canonical_flag() -> None:
+    """T052: --max-workers が args.max_workers に反映される。"""
+    from scripts.alpha_factory.run_ga import _parse_args
+
+    args = _parse_args(["--max-workers", "4"])
+    assert args.max_workers == 4
+
+
+def test_parse_args_workers_alias_flag() -> None:
+    """T052: --workers エイリアスが args.max_workers に統合される。"""
+    from scripts.alpha_factory.run_ga import _parse_args
+
+    args = _parse_args(["--workers", "6"])
+    assert args.max_workers == 6
+
+
+def test_parse_args_workers_default_none() -> None:
+    """T052: 未指定時は None (YAML config の値が使われる)。"""
+    from scripts.alpha_factory.run_ga import _parse_args
+
+    args = _parse_args([])
+    assert args.max_workers is None
+
+
+def test_parse_args_conflict_between_max_workers_and_workers_raises() -> None:
+    """T052: --max-workers と --workers が異なる値だと SystemExit (argparse error)."""
+    from scripts.alpha_factory.run_ga import _parse_args
+
+    with pytest.raises(SystemExit):
+        _parse_args(["--max-workers", "4", "--workers", "8"])
+
+
+def test_parse_args_strict_memory_guard_flag() -> None:
+    """T052: --strict-memory-guard で args.strict_memory_guard=True。"""
+    from scripts.alpha_factory.run_ga import _parse_args
+
+    args = _parse_args(["--strict-memory-guard"])
+    assert args.strict_memory_guard is True
+
+
+def test_args_to_overrides_propagates_max_workers() -> None:
+    """T052: --max-workers が ga.max_workers override に伝搬。"""
+    from scripts.alpha_factory.run_ga import _args_to_overrides, _parse_args
+
+    args = _parse_args(["--max-workers", "4"])
+    overrides = _args_to_overrides(args)
+    assert overrides["ga"]["max_workers"] == 4
+
+
+def test_main_constructs_lane_eval_context_with_preflight_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T052 Codex impl-review §1 Critical 反映: run_ga.main() が
+    LaneEvalContext を構築する際に preflight 値を埋め込み、worker 側短絡が
+    本番経路で発火することを保証する (LaneEvalContext.preflight_underfilled
+    を後から外部から確認するため、GenomeEvaluator を spy する).
+
+    Codex impl-review-round-2 Warning 反映: 固定 /tmp パス回避、tmp_path 使用。
+    """
+    from src.alpha_factory.parallel_eval import GenomeEvaluator as _OrigEvaluator
+
+    captured: dict[str, Any] = {}
+
+    class _SpyEvaluator(_OrigEvaluator):
+        def __init__(
+            self, max_workers, stage_gate_cfg, cross_pair_cfg,
+            prim_evaluator, lane_contexts,
+        ):
+            captured["lane_contexts"] = dict(lane_contexts)
+            super().__init__(
+                max_workers, stage_gate_cfg, cross_pair_cfg,
+                prim_evaluator, lane_contexts,
+            )
+
+    monkeypatch.setattr(run_ga_module, "GenomeEvaluator", _SpyEvaluator)
+    pair, stage_b_rows, holdout_rows = _prepare_smoke_inputs(fallback_holdout=False)
+    _install_mock_session(
+        monkeypatch, pair, stage_b_rows, holdout_rows,
+        datetime(2026, 1, 8, tzinfo=UTC),
+    )
+    monkeypatch.setattr(run_ga_module, "RUN_REPORTS_DIR", tmp_path / "reports")
+    monkeypatch.setattr(run_ga_module, "RUN_CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(run_ga_module, "get_latest_run_number", lambda: 0)
+    from src.alpha_factory.archive import GenomeArchive as _Archive
+
+    monkeypatch.setattr(_Archive, "DEFAULT_OUTPUT_DIR", tmp_path / "archive")
+    rc = run_ga_module.main(
+        [
+            "--config", str(CONFIG_PATH),
+            "--run-id", "preflight_test",
+            "--population-size", "2",
+            "--generations", "0",
+            "--seed", "42",
+            "--no-report",
+        ]
+    )
+    assert rc == 0
+    # captured lane_contexts に LaneEvalContext が入っており、preflight_payload が
+    # non-None であることを確認 (preflight_underfilled は値次第だが payload は必ず生成)
+    assert "lane_contexts" in captured
+    lane_ctx = next(iter(captured["lane_contexts"].values()))
+    assert lane_ctx.preflight_payload is not None, (
+        "LaneEvalContext.preflight_payload must be set in main() "
+        "(Codex impl-review §1 Critical)"
+    )
+    # 7 日 × 24 時間 = 168 bars / 60 分 = 168 bars (test fixture step_minutes=60)
+    assert lane_ctx.preflight_payload.n_bars == len(stage_b_rows)
+
+
 def test_load_config_with_cli_overrides() -> None:
     overrides = {
         "dataset": {"instrument": "USD_JPY"},

@@ -1,0 +1,3100 @@
+diff --git a/config/alpha_factory/default.yaml b/config/alpha_factory/default.yaml
+index 7ddf4e4..698b289 100644
+--- a/config/alpha_factory/default.yaml
++++ b/config/alpha_factory/default.yaml
+@@ -39,6 +39,13 @@ ga:
+   elite_count: 2
+   max_depth: 4
+   fitness_metric: sharpe
++  # T052: GA 評価並列ワーカー数 (1 = sequential, 2 以上で multiprocessing.Pool)。
++  # @why: GA 評価の wall-time 短縮 (副次目標)。L1 selection / L2 row-order
++  #       決定論性は worker 数に依存しない契約 (L3 artifact bit equivalence は非保証)。
++  # @default: 1 (CI / local 既定)。autopilot/improve-cycle は default を変更しない。
++  # @upper_bound: 物理コア数 / (24GB ÷ 1worker_3GB) の min。
++  # @ref: devnotes/20260427-1114-ga-parallel-workers/
++  max_workers: 1
+   # T-sharpe Phase 1A: trade-level Sharpe のサンプルサイズ最小値。
+   # @why: trade_count<N で trade_sharpe_raw を None にして GA fitness の選抜から外す。
+   # 30 は Andrew W. Lo (2002) "The Statistics of Sharpe Ratios" の経験則。
+diff --git a/docs/alpha_factory/runbook.md b/docs/alpha_factory/runbook.md
+index 2548f33..ef34ec3 100644
+--- a/docs/alpha_factory/runbook.md
++++ b/docs/alpha_factory/runbook.md
+@@ -99,6 +99,51 @@ post-run-review 由来の TODO は `--summary` 先頭に **`[r:{code}]`** prefix
+ | `uv run python scripts/alpha_factory/todo_manager.py {add,close,list,...}` | TODO 操作 |
+ | `uv run python scripts/fetch_fred.py --series ... --from ... --to ...` | FRED 日足マクロ指標取得 |
+ 
++### 5-1. GA 並列実行 (T052)
++
++`run_ga.py` の per-genome Stage A/B/C 評価を `multiprocessing.Pool` (spawn) で並列化できる。
++
++**CLI**:
++
++```bash
++# canonical: --max-workers
++uv run python scripts/alpha_factory/run_ga.py --max-workers 4
++
++# alias: --workers (zenigame との表記互換)
++uv run python scripts/alpha_factory/run_ga.py --workers 4
++
++# 起動時 memory budget チェック (autopilot 推奨)
++uv run python scripts/alpha_factory/run_ga.py --max-workers 4 --strict-memory-guard
++```
++
++**YAML** (`config/alpha_factory/default.yaml`):
++
++```yaml
++ga:
++  max_workers: 1   # default. autopilot/improve-cycle は変更しない
++```
++
++**決定論性契約**:
++
++- L1 selection: `best_name` / `fitness_pen` / `live_criteria_passed` が worker 数に依存しない
++- L2 row-order: archive Parquet の数値 column が `(lane_id, generation, individual_name)` ソート下で完全一致
++- L3 artifact bit equivalence は **保証外** (timestamp / wall_time_seconds 等を含むため)
++
++**運用ガード** (1 worker = 約 400MB 保守的試算):
++
++- `summary.json.max_rss_mb_per_worker` が **2.1GB (3GB の 70%)** を超えたら次回 RUN で `max_workers` を引き下げる
++- `--strict-memory-guard` 指定時は `available_mem` ベースの推奨値を超えると起動時 fail-fast (autopilot 等で OOM 防止)
++- multi-pair 化で 1 worker 試算が 2.1GB を超える時点で SharedBarStore (mmap 共有) タスクを起票
++
++**summary.json schema** (T052 で `1.0 → 1.1`):
++
++- 既存 field は全て保持 (`run_id` / `dataset` / `best` / `live_criteria` 等)
++- 追加 field (consumer は未知 field を無視する義務、`additionalProperties: true`):
++  - top-level: `schema_version`, `parallel_config.{max_workers,mode}`, `max_rss_mb_per_worker`
++  - `per_generation[*]`: `stage_{a,b,c}_seconds_total`, `stage_{a,b,c}_seconds_max`, `peak_main_rss_mb`, `peak_rss_mb_per_worker`, `peak_total_rss_mb`
++
++設計詳細: `devnotes/20260427-1114-ga-parallel-workers/`
++
+ ### 6. FRED 取得手順（macro_index_daily 補充）
+ 
+ [FRED](terminology.md#fred) の日足マクロ指標（VIX / DXY / Treasury yields / breakeven）を `macro_index_daily` テーブルへ取り込む。primitive M5 / P7 等の前提データ。
+diff --git a/docs/alpha_factory/swim-lane.md b/docs/alpha_factory/swim-lane.md
+index d467a1a..4162ebc 100644
+--- a/docs/alpha_factory/swim-lane.md
++++ b/docs/alpha_factory/swim-lane.md
+@@ -36,6 +36,23 @@ lane_id 規約:
+ - Graduation: 固定文字列 `"graduation"`
+ - `LaneManager.__init__` は `tier1: dict[str, Tier1Lane]` の dict キーに `lane_id` を採用し、`lane.instrument == lane_id.removeprefix("tier1_")` を検証する
+ 
++### 並列評価 (T052)
++
++`LaneManager.__init__` は keyword-only 引数 `genome_evaluator: GenomeEvaluator | None = None` を受け取る:
++
++- `None` (default): 直列ループ (legacy 経路、後方互換)
++- non-None: `GenomeEvaluator` 経由で評価 (`max_workers=1` で in-process / `>1` で `multiprocessing.Pool`)
++
++並列モード時の決定論性契約 (詳細は [runbook.md §5-1](./runbook.md#5-1-ga-並列実行-t052)):
++
++- L1 selection determinism: `best_name` / `fitness_pen` / `live_criteria_passed` が worker 数に依存しない
++- L2 row-order determinism: archive Parquet の数値 column が `(lane_id, generation, individual_name)` ソート下で一致
++- L3 artifact bit equivalence は **保証外**
++
++副作用 (`archive.collect_*` / `diagnostics.record_*` / graduation 判定) は **main process が population 順に実施** するため、worker 完了順に依存しない。`_run_tier1_generation_via_evaluator` は冒頭で `generation_index = lane.generation_count` をスナップショット固定し、collect ループ中に `lane.generation_count` を直接参照しない。
++
++設計詳細: `devnotes/20260427-1114-ga-parallel-workers/`
++
+ ### Tier 1 — per-instrument GA
+ 
+ - 1 instrument につき 1 lane
+diff --git a/pyproject.toml b/pyproject.toml
+index a0a808d..05e75b9 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -19,6 +19,7 @@ dependencies = [
+     "pandas>=2.2",
+     "pyarrow>=24.0.0",
+     "ruamel-yaml>=0.19.1",
++    "psutil>=5.9",
+ ]
+ 
+ [dependency-groups]
+diff --git a/scripts/alpha_factory/run_ga.py b/scripts/alpha_factory/run_ga.py
+index 5f5f502..66beb5e 100644
+--- a/scripts/alpha_factory/run_ga.py
++++ b/scripts/alpha_factory/run_ga.py
+@@ -32,6 +32,7 @@ from __future__ import annotations
+ import argparse
+ import json
+ import math
++import os
+ import random
+ import sys
+ from collections.abc import Callable, Iterable, Mapping
+@@ -60,6 +61,11 @@ from src.alpha_factory.diagnostics_sidecar import (
+     sidecar_relative_path,
+     write_stage_a_provenance,
+ )
++from src.alpha_factory.parallel_eval import (
++    GenomeEvaluator,
++    LaneEvalContext,
++    measure_peak_rss_mb,
++)
+ from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
+ from src.alpha_factory.swim_lane import (
+     GRADUATION_LANE_ID,
+@@ -257,7 +263,45 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+             "archive Parquet と RUN_CACHE_DIR state (.cache/) は常に書く。"
+         ),
+     )
+-    return p.parse_args(argv)
++    # T052: GA 評価並列ワーカー数 (canonical: --max-workers, alias: --workers)
++    p.add_argument(
++        "--max-workers",
++        type=int,
++        default=None,
++        help=(
++            "GA 評価並列ワーカー数 (1 = sequential, 2 以上で multiprocessing.Pool)。"
++            "未指定時は YAML config の値を使用 (default 1)。"
++        ),
++    )
++    p.add_argument(
++        "--workers",
++        type=int,
++        default=None,
++        dest="workers_alias",
++        help="--max-workers のエイリアス (zenigame との表記互換)",
++    )
++    p.add_argument(
++        "--strict-memory-guard",
++        action="store_true",
++        help=(
++            "max_workers が available_memory ベースの推奨値を超えたら "
++            "起動時 fail-fast (autopilot 等で OOM を未然防止)。"
++        ),
++    )
++    args = p.parse_args(argv)
++    # alias 統合 (両方指定時は同値でなければエラー)
++    if args.max_workers is None and args.workers_alias is not None:
++        args.max_workers = args.workers_alias
++    elif (
++        args.max_workers is not None
++        and args.workers_alias is not None
++        and args.max_workers != args.workers_alias
++    ):
++        p.error(
++            f"--max-workers ({args.max_workers}) と "
++            f"--workers ({args.workers_alias}) が異なる値で指定されました"
++        )
++    return args
+ 
+ 
+ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
+@@ -277,6 +321,7 @@ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
+             "max_depth": args.max_depth,
+             "fitness_metric": args.fitness_metric,
+             "seed": args.seed,
++            "max_workers": args.max_workers,
+         },
+     }
+ 
+@@ -726,6 +771,7 @@ def _write_reports(
+     cross_pair_mode: str,
+     now: datetime,
+     diagnostics_sidecar_path: Path | None = None,
++    peak_rss_per_generation: list[dict[str, float]] | None = None,
+ ) -> None:
+     run_dir.mkdir(parents=True, exist_ok=True)
+ 
+@@ -737,9 +783,23 @@ def _write_reports(
+     # per_generation.best_fitness_pen を非有限値から保護する
+     # (R1 impl-review B1: summary.json に -inf/nan が漏れる経路遮断)
+     sanitized_per_generation: list[dict[str, Any]] = []
+-    for pg in per_generation:
++    for idx, pg in enumerate(per_generation):
+         raw_fp = float(pg["best_fitness_pen"])
+         finite_val, finite_flag = _safe_finite(raw_fp)
++        # T052: 世代毎 RSS ピーク (測定された世代のみ追加 field として記録)
++        rss_for_gen: dict[str, float] = {}
++        if peak_rss_per_generation is not None and idx < len(peak_rss_per_generation):
++            rss = peak_rss_per_generation[idx]
++            rss_for_gen = {
++                "peak_main_rss_mb": float(rss.get("main_rss_mb", 0.0)),
++                "peak_rss_mb_per_worker": float(
++                    rss.get("ga_worker_max_rss_mb", 0.0)
++                ),
++                "peak_total_rss_mb": float(
++                    rss.get("main_rss_mb", 0.0)
++                    + rss.get("ga_worker_total_rss_mb", 0.0)
++                ),
++            }
+         sanitized_per_generation.append(
+             {
+                 "generation": pg["generation"],
+@@ -751,10 +811,24 @@ def _write_reports(
+                 "best_fitness_pen": finite_val,
+                 "best_fitness_pen_finite": bool(finite_flag),
+                 "feasible_count": int(pg.get("feasible_count", 0)),
++                # T052: stage 別 timing (sum + max 併記、legacy path では 0.0)
++                "stage_a_seconds_total": float(pg.get("stage_a_seconds_total", 0.0)),
++                "stage_a_seconds_max": float(pg.get("stage_a_seconds_max", 0.0)),
++                "stage_b_seconds_total": float(pg.get("stage_b_seconds_total", 0.0)),
++                "stage_b_seconds_max": float(pg.get("stage_b_seconds_max", 0.0)),
++                "stage_c_seconds_total": float(pg.get("stage_c_seconds_total", 0.0)),
++                "stage_c_seconds_max": float(pg.get("stage_c_seconds_max", 0.0)),
++                **rss_for_gen,
+             }
+         )
+ 
++    # T052: schema_version bump (1.0 → 1.1)
++    # 1.1 で追加: per_generation[*].stage_*_seconds_total/_max,
++    #            per_generation[*].peak_*_rss_mb, top-level parallel_config,
++    #            top-level max_rss_mb_per_worker
++    # 後方互換: consumer は未知 field を無視する義務 (additionalProperties: true)
+     summary: dict[str, Any] = {
++        "schema_version": "1.1",
+         "run_id": run_id,
+         "run_number": run_number,
+         "generated_at": now.isoformat(),
+@@ -830,6 +904,20 @@ def _write_reports(
+         "population_size": len(final_population),
+         "graduation_count": lane_manager.promote_graduates(),
+         "archive_parquet": str(archive_path),
++        # T052: 並列実行設定と RSS ピーク (RUN 全体最大)
++        "parallel_config": {
++            "max_workers": cfg.ga.max_workers,
++            "mode": "parallel" if cfg.ga.max_workers > 1 else "sequential",
++        },
++        "max_rss_mb_per_worker": float(
++            max(
++                (
++                    rss.get("ga_worker_max_rss_mb", 0.0)
++                    for rss in (peak_rss_per_generation or [])
++                ),
++                default=0.0,
++            )
++        ),
+     }
+     # T033: 書き込み成功時のみ summary に sidecar path を追加
+     # (consumer は missing field を無視できる契約)
+@@ -887,6 +975,34 @@ def _write_reports(
+ # ---------------------------------------------------------------------------
+ 
+ 
++def _check_memory_budget(max_workers: int, strict: bool) -> None:
++    """T052: max_workers が available memory budget を超えたら warning。
++
++    `--strict-memory-guard` 指定時は SystemExit (autopilot 等で OOM 防止)。
++    1 worker あたり 約 400MB (保守的試算) + main 400MB + OS マージン 4GB を仮定。
++    """
++    try:
++        import psutil
++    except ImportError:
++        return  # psutil 不在ならスキップ
++    available_mb = psutil.virtual_memory().available / 1024 / 1024
++    worker_budget_mb = available_mb - 4096
++    recommended_max = max(1, int(worker_budget_mb // 400))
++    if max_workers > recommended_max:
++        logger.warning(
++            "run_ga.max_workers_exceeds_memory_budget",
++            requested=max_workers,
++            recommended=recommended_max,
++            available_mb=int(available_mb),
++        )
++        if strict:
++            raise SystemExit(
++                f"strict-memory-guard: max_workers={max_workers} > "
++                f"recommended {recommended_max} "
++                f"(available_mb={int(available_mb)})"
++            )
++
++
+ def main(argv: list[str] | None = None) -> int:
+     args = _parse_args(argv)
+     cfg = load_config(args.config, overrides=_args_to_overrides(args))
+@@ -946,89 +1062,150 @@ def main(argv: list[str] | None = None) -> int:
+         pair_bars={},
+         pair_meta={},
+     )
+-    lane_manager = LaneManager(
+-        tier1={lane_id: tier1_lane},
+-        graduation=graduation_lane,
+-        stage_gate_config=cfg.stage_gate,
+-        cross_pair_config=cfg.cross_pair,
+-        primitive_evaluator=primitive_evaluator,
+-        archive=archive,
+-        backtest_config_factory=bt_factory,
+-        diagnostics_collector=diagnostics_collector,
+-    )
+     cross_pair_mode = (
+         "enabled" if graduation_lane.pair_bars
+         else "skipped_single_instrument"
+     )
+ 
+-    rng = random.Random(cfg.ga.seed)
+-    cache: dict[str, IndividualCacheEntry] = {}
++    # T052: GenomeEvaluator を構築 (max_workers=1 で in-process / >1 で Pool)。
++    # LaneEvalContext は RUN 中 immutable (Pool initializer で 1 度だけ broadcast)。
++    lane_ctx = LaneEvalContext(
++        lane_id=lane_id,
++        bars_a=tuple(bundle.bars_stage_a),
++        bars_b=tuple(bundle.bars_stage_b),
++        bars_holdout=tuple(bundle.bars_holdout),
++        meta=bundle.meta,
++        bt_cfg=bt_factory(cfg.dataset.instrument),
++        cp_inputs=None,  # Phase 2: graduation.pair_bars が空のため None
++    )
++    # T052: max_workers が available memory budget を超えたら warning
++    # (--strict-memory-guard 指定時のみ fail-fast)
++    _check_memory_budget(cfg.ga.max_workers, args.strict_memory_guard)
++    if cfg.ga.max_workers > os.cpu_count() if os.cpu_count() else False:
++        logger.warning(
++            "run_ga.max_workers_exceeds_cpu_count",
++            requested=cfg.ga.max_workers,
++            cpu_count=os.cpu_count(),
++        )
++    logger.info(
++        "run_ga.parallel_mode",
++        max_workers=cfg.ga.max_workers,
++        mode="parallel" if cfg.ga.max_workers > 1 else "sequential",
++    )
++
++    # GA loop は GenomeEvaluator の `with` 文内で実行 (close 漏れ防止)
+     per_generation: list[dict[str, Any]] = []
+     prev_population: list[Genome] = []
+     genomes_by_name: dict[str, Genome] = {}
++    cache: dict[str, IndividualCacheEntry] = {}
++    rng = random.Random(cfg.ga.seed)
++    peak_rss_per_generation: list[dict[str, float]] = []
++
++    with GenomeEvaluator(
++        max_workers=cfg.ga.max_workers,
++        stage_gate_cfg=cfg.stage_gate,
++        cross_pair_cfg=cfg.cross_pair,
++        prim_evaluator=primitive_evaluator,
++        lane_contexts={lane_id: lane_ctx},
++    ) as genome_evaluator:
++        lane_manager = LaneManager(
++            tier1={lane_id: tier1_lane},
++            graduation=graduation_lane,
++            stage_gate_config=cfg.stage_gate,
++            cross_pair_config=cfg.cross_pair,
++            primitive_evaluator=primitive_evaluator,
++            archive=archive,
++            backtest_config_factory=bt_factory,
++            diagnostics_collector=diagnostics_collector,
++            genome_evaluator=genome_evaluator,
++        )
+ 
+-    for gen in range(cfg.ga.generations + 1):
+-        if gen == 0:
+-            population = [
+-                random_genome(
+-                    rng,
+-                    name=f"g0_i{i}",
+-                    units=cfg.backtest.units,
+-                    max_clause=cfg.ga.max_clause,
+-                    max_depth=cfg.ga.max_depth,
+-                    registry=rg_registry,
++        for gen in range(cfg.ga.generations + 1):
++            if gen == 0:
++                population = [
++                    random_genome(
++                        rng,
++                        name=f"g0_i{i}",
++                        units=cfg.backtest.units,
++                        max_clause=cfg.ga.max_clause,
++                        max_depth=cfg.ga.max_depth,
++                        registry=rg_registry,
++                    )
++                    for i in range(cfg.ga.population_size)
++                ]
++                provenance: dict[str, tuple[str | None, str | None]] = {
++                    g.name: (None, None) for g in population
++                }
++            else:
++                population, provenance = _breed_next_gen(
++                    prev_population, cache, cfg.ga, rg_registry, rng, gen
+                 )
+-                for i in range(cfg.ga.population_size)
+-            ]
+-            provenance: dict[str, tuple[str | None, str | None]] = {
+-                g.name: (None, None) for g in population
+-            }
+-        else:
+-            population, provenance = _breed_next_gen(
+-                prev_population, cache, cfg.ga, rg_registry, rng, gen
+-            )
+ 
+-        for g in population:
+-            genomes_by_name[g.name] = g
+-
+-        # lane.generation_count は run_generation で +1 される。ここで使う
+-        # "この世代 ID" は呼び出し前の generation_count をキャプチャする。
+-        current_generation = tier1_lane.generation_count
+-        tier1_lane.population = population
+-        tier1_lane.provenance = provenance
+-        summary_out = lane_manager.run_generation(lane_id)
+-        _update_cache(
+-            cache,
+-            population,
+-            archive,
+-            lane_id,
+-            current_generation,
+-            cfg.ga.feasibility,
+-            stage_c_feasibility_apply=cfg.stage_gate.stage_c_feasibility_apply,
+-        )
++            for g in population:
++                genomes_by_name[g.name] = g
++
++            # lane.generation_count は run_generation で +1 される。ここで使う
++            # "この世代 ID" は呼び出し前の generation_count をキャプチャする。
++            current_generation = tier1_lane.generation_count
++            tier1_lane.population = population
++            tier1_lane.provenance = provenance
++            summary_out = lane_manager.run_generation(lane_id)
++            _update_cache(
++                cache,
++                population,
++                archive,
++                lane_id,
++                current_generation,
++                cfg.ga.feasibility,
++                stage_c_feasibility_apply=cfg.stage_gate.stage_c_feasibility_apply,
++            )
+ 
+-        best_fp = max(
+-            (cache[g.name].fitness_pen for g in population),
+-            default=-math.inf,
+-        )
+-        feasible_count = sum(
+-            1
+-            for g in population
+-            if g.name in cache and cache[g.name].feasible
+-        )
+-        per_generation.append(
+-            {
+-                "generation": gen,
+-                "n_evaluated": int(summary_out["n_evaluated"]),
+-                "stage_a_pass": int(summary_out["stage_a_pass"]),
+-                "stage_b_pass": int(summary_out["stage_b_pass"]),
+-                "stage_c_pass": int(summary_out["stage_c_pass"]),
+-                "graduation_count": int(summary_out["graduation_count"]),
+-                "best_fitness_pen": best_fp,
+-                "feasible_count": feasible_count,
+-            }
+-        )
+-        prev_population = population
++            best_fp = max(
++                (cache[g.name].fitness_pen for g in population),
++                default=-math.inf,
++            )
++            feasible_count = sum(
++                1
++                for g in population
++                if g.name in cache and cache[g.name].feasible
++            )
++            # T052: stage 別 timing を per_generation に伝搬
++            per_generation.append(
++                {
++                    "generation": gen,
++                    "n_evaluated": int(summary_out["n_evaluated"]),
++                    "stage_a_pass": int(summary_out["stage_a_pass"]),
++                    "stage_b_pass": int(summary_out["stage_b_pass"]),
++                    "stage_c_pass": int(summary_out["stage_c_pass"]),
++                    "graduation_count": int(summary_out["graduation_count"]),
++                    "best_fitness_pen": best_fp,
++                    "feasible_count": feasible_count,
++                    # T052: stage 別 timing (legacy path で未提供時は 0.0)
++                    "stage_a_seconds_total": float(
++                        summary_out.get("stage_a_seconds_total", 0.0)
++                    ),
++                    "stage_a_seconds_max": float(
++                        summary_out.get("stage_a_seconds_max", 0.0)
++                    ),
++                    "stage_b_seconds_total": float(
++                        summary_out.get("stage_b_seconds_total", 0.0)
++                    ),
++                    "stage_b_seconds_max": float(
++                        summary_out.get("stage_b_seconds_max", 0.0)
++                    ),
++                    "stage_c_seconds_total": float(
++                        summary_out.get("stage_c_seconds_total", 0.0)
++                    ),
++                    "stage_c_seconds_max": float(
++                        summary_out.get("stage_c_seconds_max", 0.0)
++                    ),
++                }
++            )
++            # T052: 世代終了時 RSS ピーク測定
++            peak_rss_per_generation.append(
++                measure_peak_rss_mb(pool_pids=genome_evaluator.pool_pids)
++            )
++            prev_population = population
+ 
+     archive_path = archive.flush()
+ 
+@@ -1067,6 +1244,7 @@ def main(argv: list[str] | None = None) -> int:
+             cross_pair_mode=cross_pair_mode,
+             now=now,
+             diagnostics_sidecar_path=sidecar_path_written,
++            peak_rss_per_generation=peak_rss_per_generation,
+         )
+     else:
+         logger.info(
+diff --git a/src/alpha_factory/config.py b/src/alpha_factory/config.py
+index 1107917..628d8cb 100644
+--- a/src/alpha_factory/config.py
++++ b/src/alpha_factory/config.py
+@@ -141,10 +141,18 @@ class GAConfig:
+     complexity_size_ref: float = 10.0
+     n_edit_max: int = 3
+     feasibility: GAFeasibilityConfig = field(default_factory=GAFeasibilityConfig)
++    # T052: GA 評価並列ワーカー数 (1 = sequential)。
++    # L1 selection / L2 row-order 決定論性は worker 数に依存しない契約。
++    # autopilot/improve-cycle は default 1 を維持し、明示指定時のみ並列化する。
++    max_workers: int = 1
+ 
+     def __post_init__(self) -> None:
+         if self.population_size < 1:
+             raise ValueError("ga.population_size must be >= 1")
++        if self.max_workers < 1:
++            raise ValueError(
++                f"ga.max_workers must be >= 1: {self.max_workers}"
++            )
+         if self.generations < 0:
+             raise ValueError("ga.generations must be >= 0")
+         if self.elite_count < 0:
+@@ -348,6 +356,7 @@ def _build_ga(raw: Mapping[str, Any]) -> GAConfig:
+         complexity_size_ref=float(raw.get("complexity_size_ref", 10.0)),
+         n_edit_max=int(raw.get("n_edit_max", 3)),
+         feasibility=_build_feasibility(raw.get("feasibility")),
++        max_workers=int(raw.get("max_workers", 1)),
+     )
+ 
+ 
+diff --git a/src/alpha_factory/parallel_eval.py b/src/alpha_factory/parallel_eval.py
+new file mode 100644
+index 0000000..1f7dd2e
+--- /dev/null
++++ b/src/alpha_factory/parallel_eval.py
+@@ -0,0 +1,652 @@
++"""GA 評価の並列化レイヤ (T052)。
++
++二層構造:
++- evaluation 層: ``evaluate_genome`` (genome → :class:`GenomeStageResult`,
++  純粋関数、副作用なし)
++- task transport 層: :class:`GenomeEvaluator` (Pool 起動・寿命管理、
++  in-process / multiprocessing.Pool 切替)
++
++決定論性契約:
++- L1 selection: ``cache[name].fitness_pen`` / ``best_name`` /
++  ``live_criteria_passed`` が worker 数に依存しない
++- L2 row-order: archive Parquet の数値 column が
++  ``(lane_id, generation, genome_name)`` ソート下で一致
++- L3 artifact bit equivalence: 非保証 (timestamp 系 field を含むため)
++
++設計根拠: devnotes/20260427-1114-ga-parallel-workers/
++"""
++
++from __future__ import annotations
++
++import logging
++import multiprocessing
++import multiprocessing.pool
++from collections.abc import Mapping, Sequence
++from dataclasses import dataclass, field
++from types import MappingProxyType
++from typing import Any, Literal
++
++from src.alpha_factory.cross_pair import (
++    CrossPairConfig,
++    StageCRunCrossPairEvaluator,
++)
++from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
++from src.alpha_factory.stage_gate import (
++    CrossPairResult,
++    StageGateConfig,
++    StageResult,
++    evaluate_stage_a,
++    evaluate_stage_b,
++    evaluate_stage_c,
++)
++from src.backtest.engine import BacktestConfig
++from src.broker import InstrumentMeta
++from src.domain.price import PriceBar
++from src.dsl.genome import Genome
++
++__all__ = [
++    "CrossPairLaneInputs",
++    "GenomeEvalError",
++    "GenomeEvaluator",
++    "GenomeStageResult",
++    "LaneEvalContext",
++    "PreflightPayload",
++    "evaluate_genome",
++    "measure_peak_rss_mb",
++]
++
++logger = logging.getLogger(__name__)
++
++
++# ---------------------------------------------------------------------------
++# Dataclass hierarchy (worker ↔ main 間で送受される pickle 可能型)
++# ---------------------------------------------------------------------------
++
++
++@dataclass(frozen=True)
++class PreflightPayload:
++    """Stage B preflight (fold 不足) 時の偽 StageResult 用 snapshot 値。
++
++    RUN 中 immutable (フィールドは int のみで深い不変性は自然に成立)。
++    """
++
++    n_unique_dates: int
++    wf_min_unique_dates: int
++    max_folds: int
++    wf_min_folds_required: int
++    n_bars: int
++
++
++@dataclass(frozen=True)
++class CrossPairLaneInputs:
++    """cross-pair (ii-lite) 評価用入力。Phase 2 default では None で常に skip。
++
++    深い不変性確保:
++        - 入力 dict を defensive copy
++        - pair_bars_map の value (list[PriceBar]) を tuple 化
++        - MappingProxyType wrap (キー追加/削除を防ぐ)
++        - MappingProxyType は Python 3.13 で pickle 非互換のため
++          ``__getstate__`` / ``__setstate__`` で dict ↔ mappingproxy 変換
++    """
++
++    target_pair: str
++    pair_bars_map: Mapping[str, tuple[PriceBar, ...]]
++    meta_map: Mapping[str, InstrumentMeta]
++
++    def __post_init__(self) -> None:
++        frozen_pair_bars = MappingProxyType(
++            {k: tuple(v) for k, v in self.pair_bars_map.items()}
++        )
++        frozen_meta = MappingProxyType(dict(self.meta_map))
++        object.__setattr__(self, "pair_bars_map", frozen_pair_bars)
++        object.__setattr__(self, "meta_map", frozen_meta)
++
++    def __getstate__(self) -> dict[str, Any]:
++        return {
++            "target_pair": self.target_pair,
++            "pair_bars_map": dict(self.pair_bars_map),
++            "meta_map": dict(self.meta_map),
++        }
++
++    def __setstate__(self, state: Mapping[str, Any]) -> None:
++        object.__setattr__(self, "target_pair", state["target_pair"])
++        object.__setattr__(
++            self,
++            "pair_bars_map",
++            MappingProxyType(
++                {k: tuple(v) for k, v in state["pair_bars_map"].items()}
++            ),
++        )
++        object.__setattr__(
++            self,
++            "meta_map",
++            MappingProxyType(dict(state["meta_map"])),
++        )
++
++
++@dataclass(frozen=True)
++class LaneEvalContext:
++    """RUN 中 immutable な lane 評価用コンテキスト。
++
++    Pool initializer 経由で worker に配布。Pool 寿命中は不変。
++
++    深い不変性:
++        - bars_* は tuple 化 (PriceBar 自体も frozen dataclass)
++        - cp_inputs / preflight_payload は専用 frozen dataclass
++        - ``__post_init__`` では assert ではなく ``raise TypeError`` で
++          型を強制 (``python -O`` で無効化されない)
++    """
++
++    lane_id: str
++    bars_a: tuple[PriceBar, ...]
++    bars_b: tuple[PriceBar, ...]
++    bars_holdout: tuple[PriceBar, ...]
++    meta: InstrumentMeta
++    bt_cfg: BacktestConfig
++    cp_inputs: CrossPairLaneInputs | None = None
++    preflight_underfilled: bool = False
++    preflight_payload: PreflightPayload | None = None
++
++    def __post_init__(self) -> None:
++        if not isinstance(self.bars_a, tuple):
++            raise TypeError(
++                f"LaneEvalContext.bars_a must be tuple: "
++                f"got {type(self.bars_a).__name__}"
++            )
++        if not isinstance(self.bars_b, tuple):
++            raise TypeError(
++                f"LaneEvalContext.bars_b must be tuple: "
++                f"got {type(self.bars_b).__name__}"
++            )
++        if not isinstance(self.bars_holdout, tuple):
++            raise TypeError(
++                f"LaneEvalContext.bars_holdout must be tuple: "
++                f"got {type(self.bars_holdout).__name__}"
++            )
++        if self.cp_inputs is not None and not isinstance(
++            self.cp_inputs, CrossPairLaneInputs
++        ):
++            raise TypeError(
++                "LaneEvalContext.cp_inputs must be CrossPairLaneInputs or None: "
++                f"got {type(self.cp_inputs).__name__}"
++            )
++        if self.preflight_underfilled and self.preflight_payload is None:
++            raise ValueError(
++                "preflight_payload must be set when preflight_underfilled=True"
++            )
++        if self.preflight_payload is not None and not isinstance(
++            self.preflight_payload, PreflightPayload
++        ):
++            raise TypeError(
++                "LaneEvalContext.preflight_payload must be PreflightPayload: "
++                f"got {type(self.preflight_payload).__name__}"
++            )
++
++
++@dataclass(frozen=True)
++class GenomeEvalError:
++    """worker 例外を deterministic な構造体に正規化する。
++
++    生 traceback は worker logger 専用。artifact には含めない (L1/L2 維持)。
++    """
++
++    stage: Literal["A", "B", "C"]
++    error_code: str
++    fixed_message: str
++
++
++@dataclass(frozen=True)
++class GenomeStageResult:
++    """1 個体の Stage A/B/C 評価結果。
++
++    早期 return:
++        - Stage A fail → stage_b/c は None
++        - preflight_underfilled → stage_b/c は None (main 側で偽結果生成)
++        - Stage B fail → stage_c は None
++        - 例外 → ``error`` non-None、stage_a 以降は呼ばれた段階まで保持
++    """
++
++    genome_name: str
++    stage_a: StageResult | None
++    stage_b: StageResult | None
++    stage_c: StageResult | None
++    cross_pair: CrossPairResult | None
++    error: GenomeEvalError | None = None
++
++
++# ---------------------------------------------------------------------------
++# Evaluation 層 (純粋関数)
++# ---------------------------------------------------------------------------
++
++
++def evaluate_genome(
++    genome: Genome,
++    ctx: LaneEvalContext,
++    stage_gate_cfg: StageGateConfig,
++    cross_pair_cfg: CrossPairConfig,
++    primitive_evaluator: RegistryEvaluator,
++) -> GenomeStageResult:
++    """1 個体の Stage A → B → C 評価を実行する純粋関数。
++
++    副作用なし。``archive.collect_*`` / ``diagnostics.record_*`` は main
++    process 側で行う。
++
++    短絡条件:
++        - Stage A fail → 早期 return
++        - preflight_underfilled → 早期 return (main 側で偽 Stage B 生成)
++        - Stage B fail → 早期 return
++    """
++    try:
++        a_result = evaluate_stage_a(
++            genome,
++            list(ctx.bars_a),
++            ctx.meta,
++            ctx.bt_cfg,
++            primitive_evaluator,
++            stage_gate_cfg,
++        )
++    except Exception as exc:
++        return _to_error_result(genome.name, "A", exc)
++    if not a_result.passed:
++        return GenomeStageResult(
++            genome_name=genome.name,
++            stage_a=a_result,
++            stage_b=None,
++            stage_c=None,
++            cross_pair=None,
++        )
++
++    if ctx.preflight_underfilled:
++        return GenomeStageResult(
++            genome_name=genome.name,
++            stage_a=a_result,
++            stage_b=None,
++            stage_c=None,
++            cross_pair=None,
++        )
++
++    try:
++        b_result = evaluate_stage_b(
++            genome,
++            list(ctx.bars_b),
++            ctx.meta,
++            ctx.bt_cfg,
++            primitive_evaluator,
++            stage_gate_cfg,
++        )
++    except Exception as exc:
++        return _to_error_result(genome.name, "B", exc, stage_a=a_result)
++    if not b_result.passed:
++        return GenomeStageResult(
++            genome_name=genome.name,
++            stage_a=a_result,
++            stage_b=b_result,
++            stage_c=None,
++            cross_pair=None,
++        )
++
++    cp_evaluator: StageCRunCrossPairEvaluator | None = None
++    cp_inputs_dict: dict[str, Any] | None = None
++    if ctx.cp_inputs is not None:
++        cp_evaluator = StageCRunCrossPairEvaluator(
++            primitive_evaluator=primitive_evaluator,
++            cross_pair_config=cross_pair_cfg,
++        )
++        cp_inputs_dict = {
++            "target_pair": ctx.cp_inputs.target_pair,
++            "pair_bars_map": {
++                k: list(v) for k, v in ctx.cp_inputs.pair_bars_map.items()
++            },
++            "meta_map": dict(ctx.cp_inputs.meta_map),
++        }
++    try:
++        c_result = evaluate_stage_c(
++            genome,
++            list(ctx.bars_holdout),
++            ctx.meta,
++            ctx.bt_cfg,
++            primitive_evaluator,
++            stage_gate_cfg,
++            cross_pair_evaluator=cp_evaluator,
++            cross_pair_inputs=cp_inputs_dict,
++        )
++    except Exception as exc:
++        return _to_error_result(
++            genome.name, "C", exc, stage_a=a_result, stage_b=b_result
++        )
++
++    cp_result = _extract_cross_pair_result(c_result)
++    return GenomeStageResult(
++        genome_name=genome.name,
++        stage_a=a_result,
++        stage_b=b_result,
++        stage_c=c_result,
++        cross_pair=cp_result,
++    )
++
++
++def _extract_cross_pair_result(stage_c: StageResult) -> CrossPairResult | None:
++    """Stage C payload から CrossPairResult を取り出す。
++
++    skipped / 型不一致なら None。``swim_lane.LaneManager._extract_cross_pair_result``
++    と同等のロジック (重複は許容、公開 API 化は別 TODO)。
++    """
++    payload_obj = stage_c.metrics.get("payload")
++    if not isinstance(payload_obj, Mapping):
++        return None
++    cp_obj = payload_obj.get("cross_pair")
++    if not isinstance(cp_obj, Mapping):
++        return None
++    if bool(cp_obj.get("skipped", True)):
++        return None
++    result_obj = cp_obj.get("result")
++    if isinstance(result_obj, CrossPairResult):
++        return result_obj
++    return None
++
++
++# ---------------------------------------------------------------------------
++# 例外正規化決定表
++# ---------------------------------------------------------------------------
++
++
++def _classify_exception(
++    exc: BaseException, stage: Literal["A", "B", "C"]
++) -> GenomeEvalError:
++    """例外を (error_code, fixed_message) に正規化する。
++
++    型ベース判定を優先し、文字列 substring 判定は最終フォールバック。
++    KeyboardInterrupt / SystemExit は正規化せず再 raise (caller 責務)。
++
++    Worker で発生しうる例外集合:
++        - 数値計算系: numpy.linalg.LinAlgError, MemoryError
++        - DSL/primitive 系: RuntimeError ("primitive" in msg)
++        - Stage B fold 系: ValueError ("stage_b" / "wf" in msg)
++        - 制御系: KeyboardInterrupt / SystemExit (再 raise)
++        - その他 → WORKER_UNCLASSIFIED
++
++    到達不能と想定する例外 (worker 責務外):
++        - pyarrow.lib.ArrowInvalid: archive Parquet 書込は main 専用
++        - pandas.errors.EmptyDataError: bars は main で DB ロード済
++        - sqlalchemy.exc.*: DB 接続も main 専用
++        万一発生時は WORKER_UNCLASSIFIED に集約され、test で fallback 確認。
++    """
++    import numpy as np
++
++    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
++        raise exc
++    if isinstance(exc, np.linalg.LinAlgError):
++        return GenomeEvalError(
++            stage, "BACKTEST_LINALG_ERROR", "linalg numerical error"
++        )
++    if isinstance(exc, MemoryError):
++        return GenomeEvalError(stage, "WORKER_OOM", "worker out of memory")
++    msg = str(exc).lower()
++    if isinstance(exc, RuntimeError) and "primitive" in msg:
++        return GenomeEvalError(
++            stage, "PRIMITIVE_LOOKUP_FAIL", "primitive registry lookup failed"
++        )
++    if (
++        isinstance(exc, ValueError)
++        and stage == "B"
++        and ("stage_b" in msg or "wf" in msg)
++    ):
++        return GenomeEvalError(
++            stage, "STAGE_B_FOLD_INVALID", "walk-forward fold invalid"
++        )
++    return GenomeEvalError(
++        stage, "WORKER_UNCLASSIFIED", "unclassified worker exception"
++    )
++
++
++def _to_error_result(
++    genome_name: str,
++    stage: Literal["A", "B", "C"],
++    exc: BaseException,
++    *,
++    stage_a: StageResult | None = None,
++    stage_b: StageResult | None = None,
++) -> GenomeStageResult:
++    """例外を GenomeStageResult.error に格納。生 traceback は logger に WARNING."""
++    err = _classify_exception(exc, stage)
++    logger.warning(
++        "parallel_eval.worker_exception stage=%s genome=%s code=%s err=%s",
++        stage,
++        genome_name,
++        err.error_code,
++        type(exc).__name__,
++    )
++    return GenomeStageResult(
++        genome_name=genome_name,
++        stage_a=stage_a,
++        stage_b=stage_b,
++        stage_c=None,
++        cross_pair=None,
++        error=err,
++    )
++
++
++# ---------------------------------------------------------------------------
++# Task transport 層
++# ---------------------------------------------------------------------------
++
++
++# Worker module-global (Pool initializer で 1 度だけ書込、以後 immutable 扱い)
++_WORKER_STAGE_GATE_CFG: StageGateConfig | None = None
++_WORKER_CROSS_PAIR_CFG: CrossPairConfig | None = None
++_WORKER_PRIM_EVALUATOR: RegistryEvaluator | None = None
++_WORKER_LANE_CONTEXTS: dict[str, LaneEvalContext] = {}
++
++
++def _init_worker(
++    stage_gate_cfg: StageGateConfig,
++    cross_pair_cfg: CrossPairConfig,
++    prim_evaluator: RegistryEvaluator,
++    lane_contexts: dict[str, LaneEvalContext],
++) -> None:
++    """Pool initializer。spawn された worker process で 1 度だけ呼ばれる。
++
++    primitive registry を ``ensure_registered()`` で再構築 (spawn 経由で
++    module-global が空のため必須)。
++    """
++    global _WORKER_STAGE_GATE_CFG, _WORKER_CROSS_PAIR_CFG
++    global _WORKER_PRIM_EVALUATOR, _WORKER_LANE_CONTEXTS
++    ensure_registered()
++    _WORKER_STAGE_GATE_CFG = stage_gate_cfg
++    _WORKER_CROSS_PAIR_CFG = cross_pair_cfg
++    _WORKER_PRIM_EVALUATOR = prim_evaluator
++    _WORKER_LANE_CONTEXTS = lane_contexts
++
++
++def _eval_genome_worker(
++    args: tuple[str, int, Genome],
++) -> GenomeStageResult:
++    """worker entrypoint。args = (lane_id, generation, genome)."""
++    lane_id, _generation, genome = args
++    if (
++        _WORKER_STAGE_GATE_CFG is None
++        or _WORKER_CROSS_PAIR_CFG is None
++        or _WORKER_PRIM_EVALUATOR is None
++    ):
++        raise RuntimeError(
++            "_eval_genome_worker called before _init_worker (invariant violation)"
++        )
++    ctx = _WORKER_LANE_CONTEXTS[lane_id]
++    return evaluate_genome(
++        genome,
++        ctx,
++        _WORKER_STAGE_GATE_CFG,
++        _WORKER_CROSS_PAIR_CFG,
++        _WORKER_PRIM_EVALUATOR,
++    )
++
++
++class GenomeEvaluator:
++    """LaneManager から呼ばれる evaluator API (シーケンシャル/並列共通)。
++
++    寿命管理は context manager (``with`` 文) で行う:
++        - 正常終了: ``pool.close()`` + ``pool.join()`` (graceful)
++        - 異常終了 (例外伝播): ``pool.terminate()`` + ``pool.join()``
++    """
++
++    def __init__(
++        self,
++        max_workers: int,
++        stage_gate_cfg: StageGateConfig,
++        cross_pair_cfg: CrossPairConfig,
++        prim_evaluator: RegistryEvaluator,
++        lane_contexts: Mapping[str, LaneEvalContext],
++    ) -> None:
++        if max_workers < 1:
++            raise ValueError(f"max_workers must be >= 1: {max_workers}")
++        self._max_workers = max_workers
++        self._stage_gate_cfg = stage_gate_cfg
++        self._cross_pair_cfg = cross_pair_cfg
++        self._prim_evaluator = prim_evaluator
++        # 内部 storage は plain dict (defensive copy 済)。
++        # 外部公開しないため MappingProxyType wrap は不要 (pickle 互換優先)。
++        self._lane_contexts: dict[str, LaneEvalContext] = dict(lane_contexts)
++        self._pool: multiprocessing.pool.Pool | None = None
++        self._closed = False
++
++        if max_workers > 1:
++            mp_ctx = multiprocessing.get_context("spawn")
++            self._pool = mp_ctx.Pool(
++                processes=max_workers,
++                initializer=_init_worker,
++                initargs=(
++                    stage_gate_cfg,
++                    cross_pair_cfg,
++                    prim_evaluator,
++                    dict(self._lane_contexts),
++                ),
++            )
++
++    @property
++    def max_workers(self) -> int:
++        return self._max_workers
++
++    @property
++    def pool_pids(self) -> set[int]:
++        """worker process pid を **getter 呼び出し時点で動的取得**。
++
++        ``multiprocessing.pool.Pool._pool`` は CPython private API。
++        将来変更されるリスクに備え、AttributeError 捕捉で空集合返却 + warning。
++        """
++        if self._pool is None:
++            return set()
++        try:
++            internal = self._pool._pool  # type: ignore[attr-defined]
++            return {p.pid for p in internal if p.pid is not None}
++        except AttributeError:
++            logger.warning(
++                "parallel_eval.pool_pids_unavailable: "
++                "multiprocessing.pool.Pool._pool not accessible, "
++                "falling back to all_children_* metrics"
++            )
++            return set()
++
++    def evaluate_population(
++        self,
++        lane_id: str,
++        generation: int,
++        population: Sequence[Genome],
++    ) -> list[GenomeStageResult]:
++        """評価結果を **population 順** で返す (L2 row-order の根拠)."""
++        if self._closed:
++            raise RuntimeError("GenomeEvaluator is already closed")
++        args = [(lane_id, generation, g) for g in population]
++        if self._pool is None:
++            ctx = self._lane_contexts[lane_id]
++            return [
++                evaluate_genome(
++                    g,
++                    ctx,
++                    self._stage_gate_cfg,
++                    self._cross_pair_cfg,
++                    self._prim_evaluator,
++                )
++                for g in population
++            ]
++        return self._pool.map(_eval_genome_worker, args)
++
++    def __enter__(self) -> GenomeEvaluator:
++        return self
++
++    def __exit__(
++        self,
++        exc_type: type[BaseException] | None,
++        exc: BaseException | None,
++        tb: Any,
++    ) -> None:
++        self.close(errored=exc_type is not None)
++
++    def close(self, errored: bool = False) -> None:
++        if self._closed:
++            return
++        self._closed = True
++        if self._pool is None:
++            return
++        if errored:
++            self._pool.terminate()
++        else:
++            self._pool.close()
++        self._pool.join()
++
++
++# ---------------------------------------------------------------------------
++# Memory observability
++# ---------------------------------------------------------------------------
++
++
++def measure_peak_rss_mb(pool_pids: set[int] | None = None) -> dict[str, float]:
++    """main + (指定 pool worker のみの) RSS を記録。
++
++    ``pool_pids`` を指定すると ``ga_worker_*`` 指標として絞り込める。
++    指定なしなら ``all_children_*`` 指標として全 children を集計
++    (worker 以外の子プロセスも含む)。
++
++    Returns:
++        ``main_rss_mb`` / ``ga_worker_max_rss_mb`` / ``ga_worker_total_rss_mb``
++        / ``n_ga_workers`` / ``all_children_max_rss_mb`` /
++        ``all_children_total_rss_mb`` / ``n_all_children``
++    """
++    try:
++        import psutil
++    except ImportError:
++        logger.warning("parallel_eval.psutil_unavailable")
++        return {
++            "main_rss_mb": 0.0,
++            "ga_worker_max_rss_mb": 0.0,
++            "ga_worker_total_rss_mb": 0.0,
++            "n_ga_workers": 0.0,
++            "all_children_max_rss_mb": 0.0,
++            "all_children_total_rss_mb": 0.0,
++            "n_all_children": 0.0,
++        }
++    process = psutil.Process()
++    main_rss_mb = process.memory_info().rss / 1024 / 1024
++    ga_worker_rss: list[float] = []
++    all_child_rss: list[float] = []
++    for child in process.children(recursive=True):
++        try:
++            rss_mb = child.memory_info().rss / 1024 / 1024
++        except psutil.NoSuchProcess:
++            continue
++        if pool_pids is not None and child.pid in pool_pids:
++            ga_worker_rss.append(rss_mb)
++        elif pool_pids is None:
++            all_child_rss.append(rss_mb)
++    return {
++        "main_rss_mb": main_rss_mb,
++        "ga_worker_max_rss_mb": max(ga_worker_rss, default=0.0),
++        "ga_worker_total_rss_mb": sum(ga_worker_rss),
++        "n_ga_workers": float(len(ga_worker_rss)),
++        "all_children_max_rss_mb": max(all_child_rss, default=0.0),
++        "all_children_total_rss_mb": sum(all_child_rss),
++        "n_all_children": float(len(all_child_rss)),
++    }
++
++
++# Suppress unused field warning for future extension hook
++_ = field
+diff --git a/src/alpha_factory/stage_gate.py b/src/alpha_factory/stage_gate.py
+index b0ca9cf..3116cf6 100644
+--- a/src/alpha_factory/stage_gate.py
++++ b/src/alpha_factory/stage_gate.py
+@@ -219,6 +219,24 @@ class StageGateConfig:
+             MappingProxyType(dict(self.live_criteria)),
+         )
+ 
++    # T052: multiprocessing.Pool initargs で worker process に配布する際、
++    # mappingproxy は ForkingPickler で pickle 不可 (Python 3.11) なため
++    # __getstate__/__setstate__ で dict ↔ mappingproxy 変換を行う。
++    # 通常の copy.deepcopy / pickle.dumps の両方に作用する。
++    def __getstate__(self) -> dict:
++        state = self.__dict__.copy()
++        # live_criteria を plain dict に変換 (pickle 互換)
++        state["live_criteria"] = dict(self.live_criteria)
++        return state
++
++    def __setstate__(self, state: dict) -> None:
++        # restore: live_criteria を MappingProxyType に再 wrap (深い不変性復元)
++        for k, v in state.items():
++            object.__setattr__(self, k, v)
++        object.__setattr__(
++            self, "live_criteria", MappingProxyType(dict(state["live_criteria"]))
++        )
++
+ 
+ @dataclass(frozen=True)
+ class StageResult:
+diff --git a/src/alpha_factory/swim_lane.py b/src/alpha_factory/swim_lane.py
+index 6d91c84..7ca717b 100644
+--- a/src/alpha_factory/swim_lane.py
++++ b/src/alpha_factory/swim_lane.py
+@@ -41,6 +41,9 @@ from typing import TYPE_CHECKING, Any, Literal
+ 
+ if TYPE_CHECKING:
+     from src.alpha_factory.diagnostics_collector import DiagnosticsCollector
++    from src.alpha_factory.parallel_eval import (
++        GenomeEvaluator,
++    )
+ 
+ import structlog
+ 
+@@ -217,6 +220,7 @@ class LaneManager:
+         *,
+         deferred_promotion: bool = False,
+         diagnostics_collector: DiagnosticsCollector | None = None,
++        genome_evaluator: GenomeEvaluator | None = None,
+     ) -> None:
+         if not tier1:
+             raise ValueError(
+@@ -285,6 +289,9 @@ class LaneManager:
+         self._diagnostics: DiagnosticsCollector | None = diagnostics_collector
+         # 冪等性ガード: 二重昇格を in-memory set で抑止
+         self._promoted_keys: set[tuple[str, int, str]] = set()
++        # T052: GenomeEvaluator (シーケンシャル/並列共通 API)。
++        # None なら legacy 直列ループを使用 (後方互換、既存テスト通過)。
++        self._genome_evaluator: GenomeEvaluator | None = genome_evaluator
+         # health-check: factory が intraday 制約を満たすか確認
+         self._validate_intraday_constraint(backtest_config_factory)
+ 
+@@ -455,29 +462,19 @@ class LaneManager:
+                 f"holding_cost_per_day_bps < 0: {cfg.holding_cost_per_day_bps}"
+             )
+ 
+-    def _run_tier1_generation(self, lane: Tier1Lane) -> dict[str, Any]:
+-        """Tier 1 lane の 1 世代を実行し、集計サマリーを返す。
+-
+-        Args:
+-            lane: 評価対象 Tier1Lane (``state == "active"`` 前提)。
++    def _compute_preflight(self, lane: Tier1Lane) -> tuple[int, int, int, int, bool]:
++        """T035 + T044 の preflight 値を返す共通関数 (legacy / evaluator 共通)。
+ 
+         Returns:
+-            集計サマリー (``wall_time_seconds`` は呼び出し側で埋める)。
++            ``(lane_n_unique_dates, wf_min_dates, lane_max_folds,
++              wf_min_folds, preflight_underfilled)``
+         """
+-        assert lane.meta is not None  # constructor で validate 済み
+-        bt_cfg = self._bt_factory(lane.instrument)
+-        stage_a_pass = 0
+-        stage_b_pass = 0
+-        stage_c_pass = 0
+-        graduation_count = 0
+-        # T035: Stage B 入力窓充足契約 (lane 単位で 1 回のみ計算)
+         lane_n_unique_dates = n_unique_dates(lane.bars_18m)
+         wf_min_dates = wf_min_unique_dates(
+             self._stage_gate_config.wf_train_days,
+             self._stage_gate_config.wf_embargo_days,
+             self._stage_gate_config.wf_test_days,
+         )
+-        # T044: pre-flight feasibility (max_folds < min なら全 lane 全個体 skip)
+         lane_max_folds = compute_max_folds(
+             lane_n_unique_dates,
+             self._stage_gate_config.wf_train_days,
+@@ -486,7 +483,89 @@ class LaneManager:
+             self._stage_gate_config.wf_step_days,
+         )
+         wf_min_folds = self._stage_gate_config.wf_min_folds_required
+-        preflight_underfilled = lane_max_folds < wf_min_folds
++        return (
++            lane_n_unique_dates,
++            wf_min_dates,
++            lane_max_folds,
++            wf_min_folds,
++            lane_max_folds < wf_min_folds,
++        )
++
++    def _build_preflight_b_result(
++        self,
++        genome: Genome,
++        lane_n_unique_dates: int,
++        wf_min_dates: int,
++        lane_max_folds: int,
++        wf_min_folds: int,
++        n_bars: int,
++    ) -> StageResult:
++        """preflight_underfilled 時の偽 Stage B StageResult を組み立てる共通ファクトリ。
++
++        legacy / evaluator 経路で重複実装を避けるため private method として集約。
++        (T052 detailed-design §2 反映)
++        """
++        return StageResult(
++            stage="B",
++            passed=False,
++            metrics={
++                "stage": "B",
++                "genome_name": genome.name,
++                "n_bars": n_bars,
++                "wall_time_seconds": 0.0,
++                "payload": {
++                    "n_unique_dates": lane_n_unique_dates,
++                    "wf_min_unique_dates": wf_min_dates,
++                    "max_folds": lane_max_folds,
++                    "wf_min_folds_required": wf_min_folds,
++                    "n_fold": 0,
++                    "n_fold_unavailable": 0,
++                    "n_fold_effective": 0,
++                    "oos_sharpes": (),
++                    "median_oos_sharpe": None,
++                    "positive_fold_ratio": None,
++                    "positive_fold_ratio_effective": None,
++                    "dsr": None,
++                    "is_full_sharpe": None,
++                    "is_full_total_pnl": None,
++                    "is_full_trade_count": None,
++                },
++            },
++            reason_codes=("stage_b_pre_flight_underfilled",),
++        )
++
++    def _run_tier1_generation(self, lane: Tier1Lane) -> dict[str, Any]:
++        """Tier 1 lane の 1 世代を実行し、集計サマリーを返す。
++
++        T052: ``self._genome_evaluator`` が None なら legacy 直列ループ
++        (後方互換)、non-None なら evaluator 経由 (in-process or 並列)。
++
++        Args:
++            lane: 評価対象 Tier1Lane (``state == "active"`` 前提)。
++
++        Returns:
++            集計サマリー (``wall_time_seconds`` は呼び出し側で埋める)。
++        """
++        if self._genome_evaluator is not None:
++            return self._run_tier1_generation_via_evaluator(lane)
++        return self._run_tier1_generation_legacy(lane)
++
++    def _run_tier1_generation_legacy(self, lane: Tier1Lane) -> dict[str, Any]:
++        """legacy 直列ループ (genome_evaluator=None 経路)。"""
++        assert lane.meta is not None  # constructor で validate 済み
++        bt_cfg = self._bt_factory(lane.instrument)
++        stage_a_pass = 0
++        stage_b_pass = 0
++        stage_c_pass = 0
++        graduation_count = 0
++        # T035 + T044: preflight feasibility (lane 単位で 1 回のみ計算)
++        (
++            lane_n_unique_dates,
++            wf_min_dates,
++            lane_max_folds,
++            wf_min_folds,
++            preflight_underfilled,
++        ) = self._compute_preflight(lane)
+         for genome in lane.population:
+             # Stage A
+             a_result = evaluate_stage_a(
+@@ -525,33 +604,13 @@ class LaneManager:
+             # 場合は必ず lane_max_folds = 0 < min となり pre_flight が成立する。
+             # T035 の wf_min_unique_dates 単独経路は dead branch のため削除。
+             if preflight_underfilled:
+-                b_result = StageResult(
+-                    stage="B",
+-                    passed=False,
+-                    metrics={
+-                        "stage": "B",
+-                        "genome_name": genome.name,
+-                        "n_bars": len(lane.bars_18m),
+-                        "wall_time_seconds": 0.0,
+-                        "payload": {
+-                            "n_unique_dates": lane_n_unique_dates,
+-                            "wf_min_unique_dates": wf_min_dates,
+-                            "max_folds": lane_max_folds,
+-                            "wf_min_folds_required": wf_min_folds,
+-                            "n_fold": 0,
+-                            "n_fold_unavailable": 0,
+-                            "n_fold_effective": 0,
+-                            "oos_sharpes": (),
+-                            "median_oos_sharpe": None,
+-                            "positive_fold_ratio": None,
+-                            "positive_fold_ratio_effective": None,
+-                            "dsr": None,
+-                            "is_full_sharpe": None,
+-                            "is_full_total_pnl": None,
+-                            "is_full_trade_count": None,
+-                        },
+-                    },
+-                    reason_codes=("stage_b_pre_flight_underfilled",),
++                b_result = self._build_preflight_b_result(
++                    genome,
++                    lane_n_unique_dates,
++                    wf_min_dates,
++                    lane_max_folds,
++                    wf_min_folds,
++                    n_bars=len(lane.bars_18m),
+                 )
+             else:
+                 b_result = evaluate_stage_b(
+@@ -624,6 +683,197 @@ class LaneManager:
+             "graduation_count": graduation_count,
+         }
+ 
++    def _run_tier1_generation_via_evaluator(
++        self, lane: Tier1Lane
++    ) -> dict[str, Any]:
++        """T052: GenomeEvaluator 経由の評価 + main 側 collect 経路。
++
++        worker は副作用なしの純粋関数 evaluate_genome のみ実行。
++        archive.collect_* / diagnostics.record_* / graduation 判定は main で
++        **population 順に** 実施 (L2 row-order 決定論性保証)。
++
++        世代番号スナップショットを冒頭で固定 (Round 1 detailed-review §3 反映)。
++        """
++        assert lane.meta is not None
++        assert self._genome_evaluator is not None
++        # Round 1 detailed-review §3: 世代番号スナップショット固定
++        # collect ループ中に lane.generation_count を直接参照しない
++        generation_index = lane.generation_count
++
++        stage_a_pass = 0
++        stage_b_pass = 0
++        stage_c_pass = 0
++        graduation_count = 0
++        stage_a_seconds: list[float] = []
++        stage_b_seconds: list[float] = []
++        stage_c_seconds: list[float] = []
++
++        (
++            lane_n_unique_dates,
++            wf_min_dates,
++            lane_max_folds,
++            wf_min_folds,
++            preflight_underfilled,
++        ) = self._compute_preflight(lane)
++
++        # 評価実行 (GenomeEvaluator が in-process / pool を抽象化)
++        results = self._genome_evaluator.evaluate_population(
++            lane.lane_id, generation_index, lane.population
++        )
++
++        # main 側で population 順に collect (L2 row-order 保証)
++        for genome, r in zip(lane.population, results, strict=True):
++            # Stage A 結果 (worker 例外時は fail-closed StageResult を組み立て)
++            if r.error is not None and r.stage_a is None:
++                a_result = StageResult(
++                    stage="A",
++                    passed=False,
++                    metrics={
++                        "stage": "A",
++                        "genome_name": genome.name,
++                        "n_bars": len(lane.bars_60d),
++                        "wall_time_seconds": 0.0,
++                        "payload": {
++                            "worker_error_code": r.error.error_code,
++                            "worker_error_message": r.error.fixed_message,
++                        },
++                    },
++                    reason_codes=("worker_error",),
++                )
++            else:
++                assert r.stage_a is not None  # 例外なしなら必ず stage_a あり
++                a_result = r.stage_a
++            parent_a, parent_b = lane.provenance.get(genome.name, (None, None))
++            self._archive.collect_stage_a(
++                genome,
++                lane.lane_id,
++                generation_index,
++                a_result,
++                instrument=lane.instrument,
++                parent_a=parent_a,
++                parent_b=parent_b,
++            )
++            if self._diagnostics is not None:
++                self._diagnostics.record_stage_a(
++                    lane.lane_id, generation_index, genome.name, a_result
++                )
++            wts = a_result.metrics.get("wall_time_seconds")
++            if isinstance(wts, (int, float)):
++                stage_a_seconds.append(float(wts))
++            if not a_result.passed:
++                continue
++            stage_a_pass += 1
++
++            # Stage B: preflight_underfilled なら main 側で偽結果生成
++            if preflight_underfilled:
++                b_result = self._build_preflight_b_result(
++                    genome,
++                    lane_n_unique_dates,
++                    wf_min_dates,
++                    lane_max_folds,
++                    wf_min_folds,
++                    n_bars=len(lane.bars_18m),
++                )
++            elif r.error is not None and r.stage_b is None:
++                # Stage B で worker 例外 → fail-closed
++                b_result = StageResult(
++                    stage="B",
++                    passed=False,
++                    metrics={
++                        "stage": "B",
++                        "genome_name": genome.name,
++                        "n_bars": len(lane.bars_18m),
++                        "wall_time_seconds": 0.0,
++                        "payload": {
++                            "worker_error_code": r.error.error_code,
++                            "worker_error_message": r.error.fixed_message,
++                        },
++                    },
++                    reason_codes=("worker_error",),
++                )
++            elif r.stage_b is None:
++                # Stage A pass / preflight OK / stage_b なし = 想定外
++                # (起こり得るのは worker error のみで上で処理済)
++                continue
++            else:
++                b_result = r.stage_b
++            self._archive.collect_stage_b(
++                genome, lane.lane_id, generation_index, b_result
++            )
++            if self._diagnostics is not None:
++                self._diagnostics.record_stage_b(
++                    lane.lane_id,
++                    generation_index,
++                    genome.name,
++                    bool(b_result.passed),
++                )
++            wts_b = b_result.metrics.get("wall_time_seconds")
++            if isinstance(wts_b, (int, float)):
++                stage_b_seconds.append(float(wts_b))
++            if not b_result.passed:
++                continue
++            stage_b_pass += 1
++
++            # Stage C
++            if r.error is not None and r.stage_c is None:
++                c_result = StageResult(
++                    stage="C",
++                    passed=False,
++                    metrics={
++                        "stage": "C",
++                        "genome_name": genome.name,
++                        "n_bars": len(lane.bars_holdout),
++                        "wall_time_seconds": 0.0,
++                        "payload": {
++                            "worker_error_code": r.error.error_code,
++                            "worker_error_message": r.error.fixed_message,
++                        },
++                    },
++                    reason_codes=("worker_error",),
++                )
++            elif r.stage_c is None:
++                continue
++            else:
++                c_result = r.stage_c
++            self._archive.collect_stage_c(
++                genome, lane.lane_id, generation_index, c_result
++            )
++            if self._diagnostics is not None:
++                self._diagnostics.record_stage_c(
++                    lane.lane_id,
++                    generation_index,
++                    genome.name,
++                    bool(c_result.passed),
++                )
++            wts_c = c_result.metrics.get("wall_time_seconds")
++            if isinstance(wts_c, (int, float)):
++                stage_c_seconds.append(float(wts_c))
++            if c_result.passed:
++                stage_c_pass += 1
++            # Graduation 判定
++            cp_result = self._extract_cross_pair_result(c_result)
++            if self.graduation_criteria(genome, c_result, cp_result):
++                promoted = self._mark_for_graduation(lane, genome)
++                if promoted:
++                    graduation_count += 1
++        lane.generation_count += 1
++        return {
++            "lane_id": lane.lane_id,
++            "state": lane.state,
++            "n_evaluated": len(lane.population),
++            "stage_a_pass": stage_a_pass,
++            "stage_b_pass": stage_b_pass,
++            "stage_c_pass": stage_c_pass,
++            "graduation_count": graduation_count,
++            # T052: stage 別 timing 集計 (sum + max 併記)
++            "stage_a_seconds_total": sum(stage_a_seconds),
++            "stage_a_seconds_max": max(stage_a_seconds, default=0.0),
++            "stage_b_seconds_total": sum(stage_b_seconds),
++            "stage_b_seconds_max": max(stage_b_seconds, default=0.0),
++            "stage_c_seconds_total": sum(stage_c_seconds),
++            "stage_c_seconds_max": max(stage_c_seconds, default=0.0),
++        }
++
+     def _build_cross_pair_args(
+         self, lane: SwimLane, genome: Genome
+     ) -> tuple[StageCRunCrossPairEvaluator | None, dict[str, Any] | None]:
+diff --git a/src/dsl/genome.py b/src/dsl/genome.py
+index 2b0741c..e751a7f 100644
+--- a/src/dsl/genome.py
++++ b/src/dsl/genome.py
+@@ -49,6 +49,20 @@ class SignalConfig:
+             self, "params", MappingProxyType(dict(self.params))
+         )
+ 
++    # T052: multiprocessing.Pool で worker process に Genome を配布する際、
++    # mappingproxy は ForkingPickler で pickle 不可 (Python 3.11) なため
++    # __getstate__/__setstate__ で dict ↔ mappingproxy 変換を行う。
++    # __post_init__ と同等の deep immutability を unpickle 後にも復元する。
++    def __getstate__(self) -> dict:
++        return {"name": self.name, "weight": self.weight, "params": dict(self.params)}
++
++    def __setstate__(self, state: dict) -> None:
++        object.__setattr__(self, "name", state["name"])
++        object.__setattr__(self, "weight", state["weight"])
++        object.__setattr__(
++            self, "params", MappingProxyType(dict(state["params"]))
++        )
++
+ 
+ @dataclass(frozen=True)
+ class ClauseConfig:
+diff --git a/tests/alpha_factory/test_config.py b/tests/alpha_factory/test_config.py
+index 2a0e0fe..6a28dd1 100644
+--- a/tests/alpha_factory/test_config.py
++++ b/tests/alpha_factory/test_config.py
+@@ -52,6 +52,49 @@ def test_ga_config_default_includes_feasibility() -> None:
+     assert ga.feasibility.apply_from_generation == 0
+ 
+ 
++def test_ga_config_default_max_workers_is_one() -> None:
++    """GAConfig の default で max_workers=1 (sequential)。"""
++    ga = GAConfig(
++        population_size=10,
++        generations=5,
++        crossover_rate=0.7,
++        mutation_rate=0.3,
++        tournament_size=3,
++        elite_count=2,
++        max_depth=4,
++    )
++    assert ga.max_workers == 1
++
++
++def test_ga_config_max_workers_zero_raises() -> None:
++    """max_workers < 1 は ValueError。"""
++    with pytest.raises(ValueError, match=r"ga\.max_workers must be >= 1"):
++        GAConfig(
++            population_size=10,
++            generations=5,
++            crossover_rate=0.7,
++            mutation_rate=0.3,
++            tournament_size=3,
++            elite_count=2,
++            max_depth=4,
++            max_workers=0,
++        )
++
++
++def test_ga_config_max_workers_eight_accepted() -> None:
++    ga = GAConfig(
++        population_size=10,
++        generations=5,
++        crossover_rate=0.7,
++        mutation_rate=0.3,
++        tournament_size=3,
++        elite_count=2,
++        max_depth=4,
++        max_workers=8,
++    )
++    assert ga.max_workers == 8
++
++
+ def test_ga_config_apply_from_generation_must_be_le_generations() -> None:
+     """apply_from_generation > generations は ValueError."""
+     with pytest.raises(
+@@ -207,6 +250,71 @@ def test_default_yaml_loads_max_spread_bps_for_stage_c(tmp_path: Path) -> None:
+     assert cfg.backtest.holding_cost_per_day_bps == Decimal("0")
+ 
+ 
++def test_default_yaml_loads_ga_max_workers(tmp_path: Path) -> None:
++    """T052: default.yaml の ga.max_workers が GAConfig に伝搬する。
++
++    default 値は 1 (sequential)。値変更時は本 assertion と
++    devnotes/20260427-1114-ga-parallel-workers/ を同時更新すること。
++    """
++    repo_yaml = (
++        Path(__file__).resolve().parents[2]
++        / "config"
++        / "alpha_factory"
++        / "default.yaml"
++    )
++    cfg = load_config(repo_yaml)
++    assert cfg.ga.max_workers == 1
++
++
++def test_load_config_yaml_overrides_max_workers(tmp_path: Path) -> None:
++    """yaml overrides で ga.max_workers を上書きできる。"""
++    yaml_text = textwrap.dedent(
++        """
++        dataset:
++          instrument: EUR_JPY
++          start: "2025-10-01T00:00:00Z"
++          end: "2026-04-01T00:00:00Z"
++        backtest:
++          initial_cash: "1000000"
++          leverage: 25
++          units: 10000
++          max_spread_bps: "10"
++        ga:
++          population_size: 8
++          generations: 2
++          crossover_rate: 0.7
++          mutation_rate: 0.3
++          tournament_size: 3
++          elite_count: 2
++          max_depth: 4
++          max_workers: 4
++        live_criteria:
++          sharpe_min: 1.0
++          total_pnl_min: 50000
++          max_drawdown_max: 0.2
++          trade_count_min: 50
++          trade_count_max: 5000
++        stage_gate:
++          stage_a:
++            window_days: 60
++            target_pass_rate: 0.15
++            alpha: 0.03
++            threshold: 0.0
++          stage_b:
++            window_months: 18
++          stage_c:
++            holdout_days: 60
++            spread_stress_multiplier: 1.5
++        cross_pair:
++          mode: shadow
++        """
++    )
++    p = tmp_path / "test.yaml"
++    p.write_text(yaml_text, encoding="utf-8")
++    cfg = load_config(p)
++    assert cfg.ga.max_workers == 4
++
++
+ def test_strict_bool_string_false_is_false() -> None:
+     """`bool("false")` の罠を回避."""
+     from src.alpha_factory.config import _strict_bool
+diff --git a/tests/alpha_factory/test_parallel_eval.py b/tests/alpha_factory/test_parallel_eval.py
+new file mode 100644
+index 0000000..0039c72
+--- /dev/null
++++ b/tests/alpha_factory/test_parallel_eval.py
+@@ -0,0 +1,711 @@
++"""``src/alpha_factory/parallel_eval.py`` のテスト (T052).
++
++設計根拠:
++- devnotes/20260427-1114-ga-parallel-workers/conceptual-design.md
++- devnotes/20260427-1114-ga-parallel-workers/detailed-design.md
++
++テスト戦略:
++- 評価関数 ``evaluate_genome`` は monkeypatch で
++  ``evaluate_stage_a/b/c`` を差し替え、純粋関数としての契約を検証
++- ``GenomeEvaluator(max_workers=1)`` の in-process 経路は単純ループで検証
++- ``multiprocessing.Pool`` 起動を伴うテストは spawn 経由で時間がかかるため
++  最小本数に絞る (``test_genome_evaluator_pool_runs_population_in_order``)
++"""
++
++from __future__ import annotations
++
++import logging
++import pickle
++from collections.abc import Mapping
++from datetime import UTC, datetime
++from decimal import Decimal
++from typing import Any
++from unittest.mock import MagicMock
++
++import numpy as np
++import pytest
++
++from src.alpha_factory.cross_pair import CrossPairConfig
++from src.alpha_factory.parallel_eval import (
++    CrossPairLaneInputs,
++    GenomeEvaluator,
++    GenomeStageResult,
++    LaneEvalContext,
++    PreflightPayload,
++    _classify_exception,
++    _to_error_result,
++    evaluate_genome,
++    measure_peak_rss_mb,
++)
++from src.alpha_factory.stage_gate import StageGateConfig, StageResult
++from src.backtest.engine import BacktestConfig
++from src.broker.mock import InstrumentMeta
++from src.domain.price import Ohlc, PriceBar
++from src.dsl.genome import (
++    ClauseConfig,
++    Genome,
++    PositionConfig,
++    RiskConfig,
++    SignalConfig,
++)
++
++# ---------------------------------------------------------------------------
++# Fixtures / helpers
++# ---------------------------------------------------------------------------
++
++
++def _make_genome(name: str = "g0") -> Genome:
++    sig = SignalConfig(name="ConstSignal", weight=1.0, params={})
++    clause = ClauseConfig(directional=(sig,), local_gate=(), weight=1.0)
++    return Genome(
++        name=name,
++        units=10000,
++        clauses=(clause,),
++        position=PositionConfig(
++            entry_threshold=0.5, exit_threshold=0.1, max_pos=1, time_stop_min=0
++        ),
++        risk=RiskConfig(stop_atr=2.0, take_atr=2.0),
++    )
++
++
++def _make_meta(pair: str = "EUR_JPY") -> InstrumentMeta:
++    return InstrumentMeta(
++        oanda_name=pair,
++        base_currency=pair.split("_")[0],
++        quote_currency="JPY",
++        margin_rate=Decimal("0.04"),
++        pip_size=Decimal("0.01"),
++        display_precision=3,
++    )
++
++
++def _make_bars(n: int = 4, pair: str = "EUR_JPY") -> list[PriceBar]:
++    bid = Decimal("154.00")
++    ask = Decimal("154.01")
++    return [
++        PriceBar(
++            pair_name=pair,
++            bar_time=datetime(2026, 1, (i % 28) + 1, 12, 0, tzinfo=UTC),
++            bid=Ohlc(bid, bid, bid, bid),
++            ask=Ohlc(ask, ask, ask, ask),
++            volume=10,
++            complete=True,
++        )
++        for i in range(n)
++    ]
++
++
++def _make_bt_cfg(instrument: str = "EUR_JPY") -> BacktestConfig:
++    return BacktestConfig(
++        instrument=instrument,
++        start=datetime(2026, 1, 1, tzinfo=UTC),
++        end=datetime(2026, 1, 5, tzinfo=UTC),
++        initial_cash=Decimal("1000000"),
++        leverage=25,
++        session_close_utc_hours=frozenset({23}),
++        bar_minutes=1,
++    )
++
++
++def _make_ctx(
++    *,
++    preflight_underfilled: bool = False,
++    preflight_payload: PreflightPayload | None = None,
++    cp_inputs: CrossPairLaneInputs | None = None,
++) -> LaneEvalContext:
++    return LaneEvalContext(
++        lane_id="tier1_EUR_JPY",
++        bars_a=tuple(_make_bars(4)),
++        bars_b=tuple(_make_bars(8)),
++        bars_holdout=tuple(_make_bars(4)),
++        meta=_make_meta(),
++        bt_cfg=_make_bt_cfg(),
++        cp_inputs=cp_inputs,
++        preflight_underfilled=preflight_underfilled,
++        preflight_payload=preflight_payload,
++    )
++
++
++def _stage_result(
++    stage: str, passed: bool, *, payload: Mapping[str, Any] | None = None
++) -> StageResult:
++    return StageResult(
++        stage=stage,  # type: ignore[arg-type]
++        passed=passed,
++        metrics={
++            "stage": stage,
++            "genome_name": "g0",
++            "n_bars": 4,
++            "wall_time_seconds": 0.001,
++            "payload": dict(payload or {}),
++        },
++        reason_codes=() if passed else ("test_fail",),
++    )
++
++
++# ---------------------------------------------------------------------------
++# LaneEvalContext / CrossPairLaneInputs / PreflightPayload (深い不変性)
++# ---------------------------------------------------------------------------
++
++
++class TestLaneEvalContextInvariants:
++    def test_rejects_list_bars_a(self) -> None:
++        with pytest.raises(TypeError, match="bars_a must be tuple"):
++            LaneEvalContext(
++                lane_id="x",
++                bars_a=[],  # type: ignore[arg-type]
++                bars_b=tuple(),
++                bars_holdout=tuple(),
++                meta=_make_meta(),
++                bt_cfg=_make_bt_cfg(),
++            )
++
++    def test_rejects_list_bars_b(self) -> None:
++        with pytest.raises(TypeError, match="bars_b must be tuple"):
++            LaneEvalContext(
++                lane_id="x",
++                bars_a=tuple(),
++                bars_b=[],  # type: ignore[arg-type]
++                bars_holdout=tuple(),
++                meta=_make_meta(),
++                bt_cfg=_make_bt_cfg(),
++            )
++
++    def test_rejects_dict_cp_inputs(self) -> None:
++        with pytest.raises(TypeError, match="cp_inputs must be CrossPairLaneInputs"):
++            LaneEvalContext(
++                lane_id="x",
++                bars_a=tuple(),
++                bars_b=tuple(),
++                bars_holdout=tuple(),
++                meta=_make_meta(),
++                bt_cfg=_make_bt_cfg(),
++                cp_inputs={"target_pair": "EUR_JPY"},  # type: ignore[arg-type]
++            )
++
++    def test_preflight_payload_required_when_underfilled(self) -> None:
++        with pytest.raises(ValueError, match="preflight_payload must be set"):
++            LaneEvalContext(
++                lane_id="x",
++                bars_a=tuple(),
++                bars_b=tuple(),
++                bars_holdout=tuple(),
++                meta=_make_meta(),
++                bt_cfg=_make_bt_cfg(),
++                preflight_underfilled=True,
++            )
++
++
++class TestCrossPairLaneInputsImmutability:
++    def test_immutable_against_external_dict_mutation(self) -> None:
++        bar = _make_bars(1)[0]
++        src_pair_bars: dict[str, list[PriceBar]] = {"USD_JPY": list(_make_bars(2))}
++        src_meta: dict[str, InstrumentMeta] = {"USD_JPY": _make_meta("USD_JPY")}
++        cp = CrossPairLaneInputs(
++            target_pair="EUR_JPY",
++            pair_bars_map=src_pair_bars,
++            meta_map=src_meta,
++        )
++        # 外部 dict を変更
++        src_pair_bars["EUR_USD"] = []
++        src_pair_bars["USD_JPY"].append(bar)
++        src_meta["NEW"] = _make_meta("NEW_XX")
++        # cp は影響を受けない
++        assert "EUR_USD" not in cp.pair_bars_map
++        assert len(cp.pair_bars_map["USD_JPY"]) == 2
++        assert "NEW" not in cp.meta_map
++
++    def test_pair_bars_map_is_mappingproxy(self) -> None:
++        cp = CrossPairLaneInputs(
++            target_pair="EUR_JPY",
++            pair_bars_map={"USD_JPY": (_make_bars(1)[0],)},
++            meta_map={"USD_JPY": _make_meta("USD_JPY")},
++        )
++        with pytest.raises(TypeError):
++            cp.pair_bars_map["XXX"] = ()  # type: ignore[index]
++        with pytest.raises(TypeError):
++            cp.meta_map["XXX"] = _make_meta()  # type: ignore[index]
++
++    def test_picklable_directly(self) -> None:
++        cp = CrossPairLaneInputs(
++            target_pair="EUR_JPY",
++            pair_bars_map={"USD_JPY": (_make_bars(1)[0],)},
++            meta_map={"USD_JPY": _make_meta("USD_JPY")},
++        )
++        restored = pickle.loads(pickle.dumps(cp))
++        assert restored == cp
++
++    def test_pickle_round_trip_preserves_immutability(self) -> None:
++        cp = CrossPairLaneInputs(
++            target_pair="EUR_JPY",
++            pair_bars_map={"USD_JPY": (_make_bars(1)[0],)},
++            meta_map={"USD_JPY": _make_meta("USD_JPY")},
++        )
++        ctx = _make_ctx(cp_inputs=cp)
++        restored = pickle.loads(pickle.dumps(ctx))
++        assert restored == ctx
++        from types import MappingProxyType
++
++        assert isinstance(restored.cp_inputs.pair_bars_map, MappingProxyType)
++        assert isinstance(restored.cp_inputs.meta_map, MappingProxyType)
++        with pytest.raises(TypeError):
++            restored.cp_inputs.pair_bars_map["X"] = ()  # type: ignore[index]
++
++
++# ---------------------------------------------------------------------------
++# _classify_exception 決定表
++# ---------------------------------------------------------------------------
++
++
++class TestClassifyException:
++    def test_maps_linalg_to_fixed_code(self) -> None:
++        err = _classify_exception(np.linalg.LinAlgError("foo"), "A")
++        assert err.error_code == "BACKTEST_LINALG_ERROR"
++        assert err.fixed_message == "linalg numerical error"
++        assert err.stage == "A"
++
++    def test_maps_memory_error_to_oom(self) -> None:
++        err = _classify_exception(MemoryError(), "C")
++        assert err.error_code == "WORKER_OOM"
++
++    def test_maps_runtime_primitive_to_lookup_fail(self) -> None:
++        err = _classify_exception(RuntimeError("primitive xyz not found"), "A")
++        assert err.error_code == "PRIMITIVE_LOOKUP_FAIL"
++
++    def test_maps_value_stage_b_to_fold_invalid(self) -> None:
++        err = _classify_exception(ValueError("stage_b fold issue"), "B")
++        assert err.error_code == "STAGE_B_FOLD_INVALID"
++
++    def test_maps_value_wf_to_fold_invalid(self) -> None:
++        err = _classify_exception(ValueError("wf train days too small"), "B")
++        assert err.error_code == "STAGE_B_FOLD_INVALID"
++
++    def test_unclassified_default_for_typeerror(self) -> None:
++        err = _classify_exception(TypeError("random"), "A")
++        assert err.error_code == "WORKER_UNCLASSIFIED"
++
++    def test_unclassified_for_arrow_invalid_fallback(self) -> None:
++        try:
++            from pyarrow.lib import ArrowInvalid  # type: ignore[import-not-found]
++        except ImportError:
++            pytest.skip("pyarrow not installed")
++        err = _classify_exception(ArrowInvalid("test"), "A")
++        assert err.error_code == "WORKER_UNCLASSIFIED"
++
++    def test_unclassified_for_pandas_empty_data(self) -> None:
++        from pandas.errors import EmptyDataError
++
++        err = _classify_exception(EmptyDataError("test"), "B")
++        assert err.error_code == "WORKER_UNCLASSIFIED"
++
++    def test_does_not_swallow_keyboard_interrupt(self) -> None:
++        with pytest.raises(KeyboardInterrupt):
++            _classify_exception(KeyboardInterrupt(), "A")
++
++    def test_does_not_swallow_system_exit(self) -> None:
++        with pytest.raises(SystemExit):
++            _classify_exception(SystemExit(1), "A")
++
++
++class TestToErrorResult:
++    def test_to_error_result_logs_warning_and_returns_error_result(
++        self, caplog: pytest.LogCaptureFixture
++    ) -> None:
++        with caplog.at_level(logging.WARNING):
++            res = _to_error_result("g0", "A", RuntimeError("primitive missing"))
++        assert isinstance(res, GenomeStageResult)
++        assert res.error is not None
++        assert res.error.error_code == "PRIMITIVE_LOOKUP_FAIL"
++        assert res.stage_a is None
++        assert res.stage_b is None
++        assert res.stage_c is None
++        assert "parallel_eval.worker_exception" in caplog.text
++
++
++# ---------------------------------------------------------------------------
++# evaluate_genome (純粋関数)
++# ---------------------------------------------------------------------------
++
++
++class TestEvaluateGenomeShortCircuits:
++    """Stage A fail / preflight_underfilled / Stage B fail での短絡経路."""
++
++    def _setup_evaluators(
++        self,
++        monkeypatch: pytest.MonkeyPatch,
++        *,
++        a: StageResult,
++        b: StageResult | None = None,
++        c: StageResult | None = None,
++    ) -> tuple[MagicMock, MagicMock, MagicMock]:
++        spy_a = MagicMock(return_value=a)
++        spy_b = MagicMock(return_value=b)
++        spy_c = MagicMock(return_value=c)
++        monkeypatch.setattr(
++            "src.alpha_factory.parallel_eval.evaluate_stage_a", spy_a
++        )
++        monkeypatch.setattr(
++            "src.alpha_factory.parallel_eval.evaluate_stage_b", spy_b
++        )
++        monkeypatch.setattr(
++            "src.alpha_factory.parallel_eval.evaluate_stage_c", spy_c
++        )
++        return spy_a, spy_b, spy_c
++
++    def test_short_circuits_when_stage_a_fails(
++        self, monkeypatch: pytest.MonkeyPatch
++    ) -> None:
++        spy_a, spy_b, spy_c = self._setup_evaluators(
++            monkeypatch, a=_stage_result("A", passed=False)
++        )
++        ctx = _make_ctx()
++        result = evaluate_genome(
++            _make_genome(),
++            ctx,
++            StageGateConfig(),
++            CrossPairConfig(),
++            MagicMock(),
++        )
++        spy_a.assert_called_once()
++        spy_b.assert_not_called()
++        spy_c.assert_not_called()
++        assert result.stage_a is not None and not result.stage_a.passed
++        assert result.stage_b is None
++        assert result.stage_c is None
++
++    def test_does_not_call_stage_b_when_preflight_underfilled(
++        self, monkeypatch: pytest.MonkeyPatch
++    ) -> None:
++        spy_a, spy_b, spy_c = self._setup_evaluators(
++            monkeypatch, a=_stage_result("A", passed=True)
++        )
++        ctx = _make_ctx(
++            preflight_underfilled=True,
++            preflight_payload=PreflightPayload(
++                n_unique_dates=5,
++                wf_min_unique_dates=120,
++                max_folds=0,
++                wf_min_folds_required=2,
++                n_bars=8,
++            ),
++        )
++        result = evaluate_genome(
++            _make_genome(),
++            ctx,
++            StageGateConfig(),
++            CrossPairConfig(),
++            MagicMock(),
++        )
++        spy_a.assert_called_once()
++        spy_b.assert_not_called()
++        spy_c.assert_not_called()
++        assert result.stage_a is not None and result.stage_a.passed
++        assert result.stage_b is None  # main 側で偽結果生成
++        assert result.stage_c is None
++
++    def test_short_circuits_when_stage_b_fails(
++        self, monkeypatch: pytest.MonkeyPatch
++    ) -> None:
++        spy_a, spy_b, spy_c = self._setup_evaluators(
++            monkeypatch,
++            a=_stage_result("A", passed=True),
++            b=_stage_result("B", passed=False),
++        )
++        ctx = _make_ctx()
++        result = evaluate_genome(
++            _make_genome(),
++            ctx,
++            StageGateConfig(),
++            CrossPairConfig(),
++            MagicMock(),
++        )
++        spy_a.assert_called_once()
++        spy_b.assert_called_once()
++        spy_c.assert_not_called()
++        assert result.stage_b is not None and not result.stage_b.passed
++
++    def test_runs_all_three_stages_on_full_pass(
++        self, monkeypatch: pytest.MonkeyPatch
++    ) -> None:
++        spy_a, spy_b, spy_c = self._setup_evaluators(
++            monkeypatch,
++            a=_stage_result("A", passed=True),
++            b=_stage_result("B", passed=True),
++            c=_stage_result("C", passed=True),
++        )
++        ctx = _make_ctx()
++        result = evaluate_genome(
++            _make_genome(),
++            ctx,
++            StageGateConfig(),
++            CrossPairConfig(),
++            MagicMock(),
++        )
++        spy_a.assert_called_once()
++        spy_b.assert_called_once()
++        spy_c.assert_called_once()
++        assert result.stage_c is not None and result.stage_c.passed
++
++    def test_normalizes_stage_a_exception_to_genome_eval_error(
++        self, monkeypatch: pytest.MonkeyPatch
++    ) -> None:
++        def boom(*args: Any, **kwargs: Any) -> StageResult:
++            raise RuntimeError("primitive missing")
++
++        monkeypatch.setattr(
++            "src.alpha_factory.parallel_eval.evaluate_stage_a", boom
++        )
++        ctx = _make_ctx()
++        result = evaluate_genome(
++            _make_genome(),
++            ctx,
++            StageGateConfig(),
++            CrossPairConfig(),
++            MagicMock(),
++        )
++        assert result.error is not None
++        assert result.error.error_code == "PRIMITIVE_LOOKUP_FAIL"
++        assert result.error.stage == "A"
++
++
++# ---------------------------------------------------------------------------
++# GenomeEvaluator
++# ---------------------------------------------------------------------------
++
++
++class TestGenomeEvaluatorInProcess:
++    """max_workers=1: Pool は起動しない (in-process 経路)."""
++
++    def test_max_workers_1_does_not_create_pool(self) -> None:
++        ev = GenomeEvaluator(
++            max_workers=1,
++            stage_gate_cfg=StageGateConfig(),
++            cross_pair_cfg=CrossPairConfig(),
++            prim_evaluator=MagicMock(),
++            lane_contexts={"tier1_EUR_JPY": _make_ctx()},
++        )
++        assert ev._pool is None
++        assert ev.pool_pids == set()
++        ev.close()
++
++    def test_max_workers_below_one_raises(self) -> None:
++        with pytest.raises(ValueError, match="max_workers must be >= 1"):
++            GenomeEvaluator(
++                max_workers=0,
++                stage_gate_cfg=StageGateConfig(),
++                cross_pair_cfg=CrossPairConfig(),
++                prim_evaluator=MagicMock(),
++                lane_contexts={},
++            )
++
++    def test_evaluate_population_returns_results_in_population_order(
++        self, monkeypatch: pytest.MonkeyPatch
++    ) -> None:
++        monkeypatch.setattr(
++            "src.alpha_factory.parallel_eval.evaluate_stage_a",
++            lambda g, *args, **kw: _stage_result("A", passed=False),
++        )
++        ctx = _make_ctx()
++        population = [_make_genome(f"g{i}") for i in range(5)]
++        with GenomeEvaluator(
++            max_workers=1,
++            stage_gate_cfg=StageGateConfig(),
++            cross_pair_cfg=CrossPairConfig(),
++            prim_evaluator=MagicMock(),
++            lane_contexts={ctx.lane_id: ctx},
++        ) as ev:
++            results = ev.evaluate_population(ctx.lane_id, 0, population)
++        assert [r.genome_name for r in results] == [g.name for g in population]
++
++    def test_close_is_idempotent(self) -> None:
++        ev = GenomeEvaluator(
++            max_workers=1,
++            stage_gate_cfg=StageGateConfig(),
++            cross_pair_cfg=CrossPairConfig(),
++            prim_evaluator=MagicMock(),
++            lane_contexts={},
++        )
++        ev.close()
++        ev.close()  # 二度呼んでも例外なし
++
++    def test_evaluate_after_close_raises(self) -> None:
++        ev = GenomeEvaluator(
++            max_workers=1,
++            stage_gate_cfg=StageGateConfig(),
++            cross_pair_cfg=CrossPairConfig(),
++            prim_evaluator=MagicMock(),
++            lane_contexts={"tier1_EUR_JPY": _make_ctx()},
++        )
++        ev.close()
++        with pytest.raises(RuntimeError, match="already closed"):
++            ev.evaluate_population("tier1_EUR_JPY", 0, [])
++
++    def test_context_manager_normal_exit_closes_pool(self) -> None:
++        mock_pool = MagicMock()
++        ev = GenomeEvaluator(
++            max_workers=1,
++            stage_gate_cfg=StageGateConfig(),
++            cross_pair_cfg=CrossPairConfig(),
++            prim_evaluator=MagicMock(),
++            lane_contexts={},
++        )
++        ev._pool = mock_pool  # 注入
++        with ev:
++            pass
++        mock_pool.close.assert_called_once()
++        mock_pool.terminate.assert_not_called()
++        mock_pool.join.assert_called_once()
++
++    def test_context_manager_exception_terminates_pool(self) -> None:
++        mock_pool = MagicMock()
++        ev = GenomeEvaluator(
++            max_workers=1,
++            stage_gate_cfg=StageGateConfig(),
++            cross_pair_cfg=CrossPairConfig(),
++            prim_evaluator=MagicMock(),
++            lane_contexts={},
++        )
++        ev._pool = mock_pool
++        with pytest.raises(ValueError), ev:
++            raise ValueError("boom")
++        mock_pool.terminate.assert_called_once()
++        mock_pool.close.assert_not_called()
++        mock_pool.join.assert_called_once()
++
++
++class TestGenomeEvaluatorPoolPidsFallback:
++    def test_pool_pids_returns_empty_set_when_no_pool(self) -> None:
++        ev = GenomeEvaluator(
++            max_workers=1,
++            stage_gate_cfg=StageGateConfig(),
++            cross_pair_cfg=CrossPairConfig(),
++            prim_evaluator=MagicMock(),
++            lane_contexts={},
++        )
++        assert ev.pool_pids == set()
++        ev.close()
++
++    def test_pool_pids_fallbacks_when_internal_attr_missing(
++        self, caplog: pytest.LogCaptureFixture
++    ) -> None:
++        ev = GenomeEvaluator(
++            max_workers=1,
++            stage_gate_cfg=StageGateConfig(),
++            cross_pair_cfg=CrossPairConfig(),
++            prim_evaluator=MagicMock(),
++            lane_contexts={},
++        )
++        # attribute-free pool stub を注入 (AttributeError 経路を強制)
++        class _StubPool:
++            pass
++
++        ev._pool = _StubPool()  # type: ignore[assignment]
++        with caplog.at_level(logging.WARNING):
++            pids = ev.pool_pids
++        assert pids == set()
++        assert "pool_pids_unavailable" in caplog.text
++        ev._pool = None  # close で触らないように
++        ev.close()
++
++
++# ---------------------------------------------------------------------------
++# multiprocessing.Pool 経路 (実 spawn を伴う最小ケース)
++# ---------------------------------------------------------------------------
++
++
++def _stage_a_const_pass(*args: Any, **kwargs: Any) -> StageResult:
++    """worker process でも import されるためモジュールトップに置く。"""
++    genome = args[0]
++    return StageResult(
++        stage="A",
++        passed=False,  # Stage B/C を呼ばずに済むよう fail
++        metrics={
++            "stage": "A",
++            "genome_name": genome.name,
++            "n_bars": 4,
++            "wall_time_seconds": 0.0,
++            "payload": {"fitness_pen": 0.0},
++        },
++        reason_codes=("test_const_fail",),
++    )
++
++
++@pytest.fixture
++def _patch_stage_a_for_pool(monkeypatch: pytest.MonkeyPatch) -> None:
++    monkeypatch.setattr(
++        "src.alpha_factory.parallel_eval.evaluate_stage_a",
++        _stage_a_const_pass,
++    )
++
++
++class TestGenomeEvaluatorMultiprocessing:
++    """spawn を伴う実テスト (slow)."""
++
++    def test_pool_runs_population_in_order(self) -> None:
++        # NOTE: spawn では module-global を pickle 経由で再構築するため、
++        # monkeypatch で差し替えた evaluate_stage_a は worker に届かない。
++        # ここでは「pool が起動し、population 順 list が返る」契約のみ確認。
++        ctx = _make_ctx()
++        # Stage A 関数は worker 内で実 evaluate_stage_a が走るが、bars 4 本
++        # では即座に system_failure 等になり Stage A の結果が返ってくる
++        # (passed=False)。順序保証だけ確認すれば十分。
++        from src.alpha_factory.primitives import (
++            RegistryEvaluator,
++            ensure_registered,
++        )
++
++        ensure_registered()
++        prim = RegistryEvaluator(pair="EUR_JPY")
++        population = [_make_genome(f"g{i}") for i in range(3)]
++        with GenomeEvaluator(
++            max_workers=2,
++            stage_gate_cfg=StageGateConfig(),
++            cross_pair_cfg=CrossPairConfig(),
++            prim_evaluator=prim,
++            lane_contexts={ctx.lane_id: ctx},
++        ) as ev:
++            results = ev.evaluate_population(ctx.lane_id, 0, population)
++        assert [r.genome_name for r in results] == [g.name for g in population]
++
++
++# ---------------------------------------------------------------------------
++# RegistryEvaluator picklability
++# ---------------------------------------------------------------------------
++
++
++class TestRegistryEvaluatorPicklability:
++    def test_picklable_with_empty_aux(self) -> None:
++        from src.alpha_factory.primitives import RegistryEvaluator
++
++        ev = RegistryEvaluator(pair="EUR_JPY")
++        restored = pickle.loads(pickle.dumps(ev))
++        assert restored._pair == "EUR_JPY"
++
++    def test_picklable_with_aux_pair_bars(self) -> None:
++        from src.alpha_factory.primitives import RegistryEvaluator
++
++        aux = {"USD_JPY": [_make_bars(2)[0]]}
++        ev = RegistryEvaluator(pair="EUR_JPY", aux_pair_bars=aux)
++        restored = pickle.loads(pickle.dumps(ev))
++        assert "USD_JPY" in restored._aux_pair_bars
++
++
++# ---------------------------------------------------------------------------
++# measure_peak_rss_mb
++# ---------------------------------------------------------------------------
++
++
++class TestMeasurePeakRss:
++    def test_returns_main_and_children_keys(self) -> None:
++        result = measure_peak_rss_mb()
++        assert "main_rss_mb" in result
++        assert "ga_worker_max_rss_mb" in result
++        assert "all_children_max_rss_mb" in result
++        assert result["main_rss_mb"] > 0
++
++    def test_pool_pids_specified_uses_ga_worker_buckets(self) -> None:
++        # pool_pids=set() (空) を渡すと all_children も ga_worker も 0 に
++        # (空 set は「指定あり」扱いで all_children 経路は走らない)
++        result = measure_peak_rss_mb(pool_pids=set())
++        assert result["n_ga_workers"] == 0.0
++        assert result["n_all_children"] == 0.0
+diff --git a/tests/alpha_factory/test_swim_lane.py b/tests/alpha_factory/test_swim_lane.py
+index 5d84ac7..3060407 100644
+--- a/tests/alpha_factory/test_swim_lane.py
++++ b/tests/alpha_factory/test_swim_lane.py
+@@ -21,9 +21,12 @@ from __future__ import annotations
+ from collections.abc import Callable
+ from datetime import UTC, datetime
+ from decimal import Decimal
+-from typing import Any, cast
++from typing import TYPE_CHECKING, Any, cast
+ from unittest.mock import MagicMock
+ 
++if TYPE_CHECKING:
++    from src.alpha_factory.parallel_eval import GenomeStageResult
++
+ import pytest
+ 
+ from src.alpha_factory.archive import GenomeArchive
+@@ -1010,3 +1013,245 @@ def test_stage_b_evaluated_when_max_folds_meets_min(
+     mgr.run_generation("tier1_EUR_JPY")
+     assert counts["a"] == 2
+     assert counts["b"] == 2
++
++
++# ---------------------------------------------------------------------------
++# T052: evaluator 経由化 (genome_evaluator non-None) テスト
++# ---------------------------------------------------------------------------
++
++
++class _StubGenomeEvaluator:
++    """LaneManager._run_tier1_generation_via_evaluator のテスト用 stub.
++
++    実際の evaluate_genome は呼ばず、事前設定した GenomeStageResult を
++    population 順に返す (L2 row-order の inversion 検証用に shuffle も可能)。
++    """
++
++    def __init__(
++        self,
++        result_factory: Callable[[Genome], GenomeStageResult],
++    ) -> None:
++        self._factory = result_factory
++        self.call_log: list[tuple[str, int, int]] = []
++
++    def evaluate_population(
++        self,
++        lane_id: str,
++        generation: int,
++        population: Any,
++    ) -> list[GenomeStageResult]:
++        pop_list = list(population)
++        self.call_log.append((lane_id, generation, len(pop_list)))
++        return [self._factory(g) for g in pop_list]
++
++
++def _gsr(
++    genome: Genome,
++    *,
++    a_passed: bool = True,
++    b_passed: bool | None = True,
++    c_passed: bool | None = True,
++    cp_passed: bool | None = None,
++    error_code: str | None = None,
++) -> GenomeStageResult:
++    """GenomeStageResult を組み立てる helper (test_swim_lane 用)。"""
++    from src.alpha_factory.parallel_eval import (
++        GenomeEvalError,
++        GenomeStageResult,
++    )
++
++    if error_code is not None:
++        return GenomeStageResult(
++            genome_name=genome.name,
++            stage_a=None,
++            stage_b=None,
++            stage_c=None,
++            cross_pair=None,
++            error=GenomeEvalError(stage="A", error_code=error_code, fixed_message="x"),
++        )
++    a = _stage_a_result(passed=a_passed, name=genome.name)
++    if not a_passed:
++        return GenomeStageResult(
++            genome_name=genome.name,
++            stage_a=a,
++            stage_b=None,
++            stage_c=None,
++            cross_pair=None,
++        )
++    b = _stage_b_result(passed=bool(b_passed), name=genome.name) if b_passed is not None else None
++    if b is not None and not b.passed:
++        return GenomeStageResult(
++            genome_name=genome.name, stage_a=a, stage_b=b, stage_c=None, cross_pair=None,
++        )
++    c = (
++        _stage_c_result(passed=bool(c_passed), name=genome.name)
++        if c_passed is not None
++        else None
++    )
++    cp = None
++    if c is not None and cp_passed is not None:
++        # _stage_c_result の cp_skipped を上書きするのは煩雑なので Stage C 側で別途構築
++        c = _stage_c_result(
++            passed=bool(c_passed),
++            cp_skipped=False,
++            cp_passed=cp_passed,
++            name=genome.name,
++        )
++        from src.alpha_factory.stage_gate import CrossPairResult
++
++        # cp 抽出は LaneManager._extract_cross_pair_result が payload から取り出すため
++        # GenomeStageResult.cross_pair も同期して埋める
++        cp_obj = c.metrics["payload"]["cross_pair"]["result"]
++        if isinstance(cp_obj, CrossPairResult):
++            cp = cp_obj
++    return GenomeStageResult(
++        genome_name=genome.name,
++        stage_a=a,
++        stage_b=b,
++        stage_c=c,
++        cross_pair=cp,
++    )
++
++
++def test_run_generation_via_evaluator_collects_results_in_population_order() -> None:
++    """L2 row-order: archive.collect_stage_a が population 順に呼ばれる."""
++    archive = MagicMock(spec=GenomeArchive)
++    lane = _make_tier1_lane(pop_size=4)
++    # 全員 Stage A のみ pass で B 失敗 (C/graduation 経路は別テスト)
++    evaluator = _StubGenomeEvaluator(
++        result_factory=lambda g: _gsr(g, a_passed=True, b_passed=False),
++    )
++    mgr = LaneManager(
++        tier1={"tier1_EUR_JPY": lane},
++        graduation=_make_graduation_lane(),
++        stage_gate_config=StageGateConfig(
++            wf_train_days=2, wf_test_days=1, wf_step_days=1, wf_embargo_days=0,
++        ),
++        cross_pair_config=CrossPairConfig(),
++        primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
++        archive=archive,
++        backtest_config_factory=_stub_bt_factory_intraday(),
++        genome_evaluator=cast(Any, evaluator),
++    )
++    mgr.run_generation("tier1_EUR_JPY")
++
++    # collect_stage_a が population 順に呼ばれたか
++    a_calls = [c.args[0].name for c in archive.collect_stage_a.call_args_list]
++    assert a_calls == [g.name for g in lane.population]
++    # evaluator の generation_index は collect 前にスナップショット
++    assert evaluator.call_log == [("tier1_EUR_JPY", 0, 4)]
++
++
++def test_run_generation_via_evaluator_snapshots_generation_index() -> None:
++    """世代番号スナップショット固定: collect 後に lane.generation_count が 1 増えるが
++    collect 内では evaluator に渡したスナップショット値 (=0) が使われる."""
++    archive = MagicMock(spec=GenomeArchive)
++    lane = _make_tier1_lane(pop_size=2)
++    evaluator = _StubGenomeEvaluator(
++        result_factory=lambda g: _gsr(g, a_passed=False),
++    )
++    mgr = LaneManager(
++        tier1={"tier1_EUR_JPY": lane},
++        graduation=_make_graduation_lane(),
++        stage_gate_config=StageGateConfig(
++            wf_train_days=2, wf_test_days=1, wf_step_days=1, wf_embargo_days=0,
++        ),
++        cross_pair_config=CrossPairConfig(),
++        primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
++        archive=archive,
++        backtest_config_factory=_stub_bt_factory_intraday(),
++        genome_evaluator=cast(Any, evaluator),
++    )
++    assert lane.generation_count == 0
++    mgr.run_generation("tier1_EUR_JPY")
++    # collect_stage_a の generation 引数は全て 0 (snapshot 値)
++    for call in archive.collect_stage_a.call_args_list:
++        assert call.args[2] == 0
++    # ループ末尾で +1
++    assert lane.generation_count == 1
++
++
++def test_run_generation_via_evaluator_normalizes_worker_error_to_failclosed() -> None:
++    """worker 例外 → fail-closed StageResult (reason_codes=('worker_error',))."""
++    archive = MagicMock(spec=GenomeArchive)
++    lane = _make_tier1_lane(pop_size=1)
++    evaluator = _StubGenomeEvaluator(
++        result_factory=lambda g: _gsr(g, error_code="WORKER_OOM"),
++    )
++    mgr = LaneManager(
++        tier1={"tier1_EUR_JPY": lane},
++        graduation=_make_graduation_lane(),
++        stage_gate_config=StageGateConfig(
++            wf_train_days=2, wf_test_days=1, wf_step_days=1, wf_embargo_days=0,
++        ),
++        cross_pair_config=CrossPairConfig(),
++        primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
++        archive=archive,
++        backtest_config_factory=_stub_bt_factory_intraday(),
++        genome_evaluator=cast(Any, evaluator),
++    )
++    summary = mgr.run_generation("tier1_EUR_JPY")
++    assert archive.collect_stage_a.call_count == 1
++    sr = archive.collect_stage_a.call_args_list[0].args[3]
++    assert sr.reason_codes == ("worker_error",)
++    assert sr.passed is False
++    assert summary["stage_a_pass"] == 0
++
++
++def test_run_generation_via_evaluator_synthesizes_preflight_b_result() -> None:
++    """preflight_underfilled: worker は Stage B 短絡、main で偽 StageResult 生成."""
++    archive = MagicMock(spec=GenomeArchive)
++    lane = _make_tier1_lane(pop_size=2)
++    # preflight underfilled になる stage_gate_config (wf_train_days=200 で fold 不足)
++    evaluator = _StubGenomeEvaluator(
++        result_factory=lambda g: _gsr(g, a_passed=True, b_passed=None, c_passed=None),
++    )
++    mgr = LaneManager(
++        tier1={"tier1_EUR_JPY": lane},
++        graduation=_make_graduation_lane(),
++        stage_gate_config=StageGateConfig(
++            wf_train_days=200, wf_test_days=20, wf_step_days=20, wf_embargo_days=1,
++        ),
++        cross_pair_config=CrossPairConfig(),
++        primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
++        archive=archive,
++        backtest_config_factory=_stub_bt_factory_intraday(),
++        genome_evaluator=cast(Any, evaluator),
++    )
++    mgr.run_generation("tier1_EUR_JPY")
++    assert archive.collect_stage_b.call_count == 2
++    for call in archive.collect_stage_b.call_args_list:
++        sr = call.args[3]
++        assert sr.reason_codes == ("stage_b_pre_flight_underfilled",)
++        assert sr.passed is False
++
++
++def test_run_generation_via_evaluator_returns_stage_timing_metrics() -> None:
++    """summary に stage_*_seconds_total / _max が含まれる."""
++    archive = MagicMock(spec=GenomeArchive)
++    lane = _make_tier1_lane(pop_size=2)
++    evaluator = _StubGenomeEvaluator(
++        result_factory=lambda g: _gsr(g, a_passed=True, b_passed=True, c_passed=True),
++    )
++    mgr = LaneManager(
++        tier1={"tier1_EUR_JPY": lane},
++        graduation=_make_graduation_lane(),
++        stage_gate_config=StageGateConfig(
++            wf_train_days=2, wf_test_days=1, wf_step_days=1, wf_embargo_days=0,
++        ),
++        cross_pair_config=CrossPairConfig(),
++        primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
++        archive=archive,
++        backtest_config_factory=_stub_bt_factory_intraday(),
++        genome_evaluator=cast(Any, evaluator),
++    )
++    summary = mgr.run_generation("tier1_EUR_JPY")
++    for key in (
++        "stage_a_seconds_total", "stage_a_seconds_max",
++        "stage_b_seconds_total", "stage_b_seconds_max",
++        "stage_c_seconds_total", "stage_c_seconds_max",
++    ):
++        assert key in summary, f"missing key: {key}"
++    # _stage_*_result の wall_time_seconds=0.01 × 2 (pop=2) = 0.02 sum, 0.01 max
++    assert summary["stage_a_seconds_total"] == pytest.approx(0.02)
++    assert summary["stage_a_seconds_max"] == pytest.approx(0.01)
+diff --git a/tests/scripts/test_alpha_factory_run_ga.py b/tests/scripts/test_alpha_factory_run_ga.py
+index 04b55b6..d50a110 100644
+--- a/tests/scripts/test_alpha_factory_run_ga.py
++++ b/tests/scripts/test_alpha_factory_run_ga.py
+@@ -229,6 +229,55 @@ def test_load_config_default_yaml_loads() -> None:
+     assert float(cfg.live_criteria["sharpe_min"]) == 1.0
+ 
+ 
++def test_parse_args_max_workers_canonical_flag() -> None:
++    """T052: --max-workers が args.max_workers に反映される。"""
++    from scripts.alpha_factory.run_ga import _parse_args
++
++    args = _parse_args(["--max-workers", "4"])
++    assert args.max_workers == 4
++
++
++def test_parse_args_workers_alias_flag() -> None:
++    """T052: --workers エイリアスが args.max_workers に統合される。"""
++    from scripts.alpha_factory.run_ga import _parse_args
++
++    args = _parse_args(["--workers", "6"])
++    assert args.max_workers == 6
++
++
++def test_parse_args_workers_default_none() -> None:
++    """T052: 未指定時は None (YAML config の値が使われる)。"""
++    from scripts.alpha_factory.run_ga import _parse_args
++
++    args = _parse_args([])
++    assert args.max_workers is None
++
++
++def test_parse_args_conflict_between_max_workers_and_workers_raises() -> None:
++    """T052: --max-workers と --workers が異なる値だと SystemExit (argparse error)."""
++    from scripts.alpha_factory.run_ga import _parse_args
++
++    with pytest.raises(SystemExit):
++        _parse_args(["--max-workers", "4", "--workers", "8"])
++
++
++def test_parse_args_strict_memory_guard_flag() -> None:
++    """T052: --strict-memory-guard で args.strict_memory_guard=True。"""
++    from scripts.alpha_factory.run_ga import _parse_args
++
++    args = _parse_args(["--strict-memory-guard"])
++    assert args.strict_memory_guard is True
++
++
++def test_args_to_overrides_propagates_max_workers() -> None:
++    """T052: --max-workers が ga.max_workers override に伝搬。"""
++    from scripts.alpha_factory.run_ga import _args_to_overrides, _parse_args
++
++    args = _parse_args(["--max-workers", "4"])
++    overrides = _args_to_overrides(args)
++    assert overrides["ga"]["max_workers"] == 4
++
++
+ def test_load_config_with_cli_overrides() -> None:
+     overrides = {
+         "dataset": {"instrument": "USD_JPY"},
+diff --git a/tests/scripts/test_run_ga_parallel.py b/tests/scripts/test_run_ga_parallel.py
+new file mode 100644
+index 0000000..dab0dee
+--- /dev/null
++++ b/tests/scripts/test_run_ga_parallel.py
+@@ -0,0 +1,196 @@
++"""GA 並列実行の決定論性 (L1 selection / L2 row-order) 同値性テスト (T052).
++
++設計根拠:
++- devnotes/20260427-1114-ga-parallel-workers/conceptual-design.md §4.0
++- devnotes/20260427-1114-ga-parallel-workers/detailed-design.md §6 施策6
++
++検証契約:
++- L1 selection determinism: best_name / fitness_pen / live_criteria_passed が
++  worker 数に依存しない
++- L2 row-order determinism: archive Parquet 数値 column を
++  (lane_id, generation, genome_name) ソート下で一致
++- L3 artifact bit equivalence は **保証外** (timestamp / wall_time_seconds 等)
++"""
++
++from __future__ import annotations
++
++import json
++from datetime import UTC, datetime, timedelta
++from pathlib import Path
++from typing import Any
++
++import pandas as pd
++import pytest
++
++import scripts.alpha_factory.run_ga as run_ga_module
++from tests.scripts.test_alpha_factory_run_ga import (
++    CONFIG_PATH,
++    _generate_bar_rows,
++    _install_mock_session,
++    _make_currency_pair,
++)
++
++# L2 contract: archive Parquet で完全一致を要求する数値 column
++# (実 column 名は GENOMES_SCHEMA に従う; 存在チェックして比較)
++NUMERIC_L2_COLUMNS = [
++    "fitness_pen_stage_a",
++    "fitness_raw_stage_a",
++    "trade_count_stage_a",
++    "stage_a_pass",
++    "stage_b_pass",
++    "stage_c_pass",
++    "trade_sharpe_raw_stage_a",
++    "total_pnl_stage_a",
++    "median_oos_sharpe_stage_b",
++    "stage_a_genome_size",
++]
++
++
++def _setup_smoke_run_env(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++    *,
++    sub_dir: str,
++) -> Path:
++    """smoke run の DB mock + 出力 path setup を行い、出力 root を返す."""
++    from src.alpha_factory.archive import GenomeArchive as _Archive
++
++    pair = _make_currency_pair("EUR_JPY")
++    start = datetime(2026, 1, 1, tzinfo=UTC)
++    end = datetime(2026, 1, 8, tzinfo=UTC)
++    stage_b_rows = _generate_bar_rows(pair, start, end, step_minutes=60)
++    holdout_rows = _generate_bar_rows(
++        pair, end, end + timedelta(days=1), step_minutes=60,
++    )
++    _install_mock_session(
++        monkeypatch, pair, stage_b_rows, holdout_rows,
++        datetime(2026, 1, 8, tzinfo=UTC),
++    )
++    out_root = tmp_path / sub_dir
++    monkeypatch.setattr(run_ga_module, "RUN_REPORTS_DIR", out_root / "reports")
++    monkeypatch.setattr(run_ga_module, "RUN_CACHE_DIR", out_root / "cache")
++    monkeypatch.setattr(run_ga_module, "get_latest_run_number", lambda: 0)
++    monkeypatch.setattr(_Archive, "DEFAULT_OUTPUT_DIR", out_root / "archive")
++    return out_root
++
++
++def _run_with_workers(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++    *,
++    sub_dir: str,
++    max_workers: int,
++    seed: int = 42,
++) -> tuple[dict[str, Any], pd.DataFrame]:
++    """1 RUN を実行し summary + archive DataFrame を返す."""
++    out_root = _setup_smoke_run_env(monkeypatch, tmp_path, sub_dir=sub_dir)
++    rc = run_ga_module.main(
++        [
++            "--config", str(CONFIG_PATH),
++            "--run-id", f"run_parallel_test_{max_workers}",
++            "--population-size", "4",
++            "--generations", "1",
++            "--seed", str(seed),
++            "--max-workers", str(max_workers),
++        ]
++    )
++    assert rc == 0
++    summary = json.loads(
++        (out_root / "reports" / "run-1" / "summary.json").read_text(encoding="utf-8")
++    )
++    # archive parquet path は summary に書かれている
++    archive_path = Path(summary["archive_parquet"])
++    df = pd.read_parquet(archive_path)
++    return summary, df
++
++
++def test_parallel_evaluation_preserves_l1_selection_determinism(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    """L1: max_workers=1 と max_workers=2 で best.name / fitness / live_criteria_passed 一致."""
++    seq_summary, _ = _run_with_workers(
++        monkeypatch, tmp_path, sub_dir="seq", max_workers=1
++    )
++    par_summary, _ = _run_with_workers(
++        monkeypatch, tmp_path, sub_dir="par", max_workers=2
++    )
++    # L1: best name / fitness の数値表現 / live_criteria 判定
++    assert seq_summary["best"]["name"] == par_summary["best"]["name"]
++    assert seq_summary["best"]["fitness"] == par_summary["best"]["fitness"]
++    assert seq_summary["best"]["fitness_finite"] == par_summary["best"]["fitness_finite"]
++    assert seq_summary["best"]["selection_score"] == par_summary["best"]["selection_score"]
++    # live_criteria 判定 (sharpe / total_pnl / max_drawdown / trade_count)
++    seq_lc = seq_summary["live_criteria"]
++    par_lc = par_summary["live_criteria"]
++    for key in ("sharpe", "total_pnl", "max_drawdown", "trade_count"):
++        if key in seq_lc:
++            assert seq_lc[key] == par_lc[key], f"live_criteria.{key} mismatch"
++
++
++def test_parallel_evaluation_preserves_l2_row_order_determinism(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    """L2: archive Parquet の数値 column が (lane_id, generation, genome_name) ソート下で一致."""
++    _, seq_df = _run_with_workers(
++        monkeypatch, tmp_path, sub_dir="seq", max_workers=1
++    )
++    _, par_df = _run_with_workers(
++        monkeypatch, tmp_path, sub_dir="par", max_workers=2
++    )
++    sort_keys = ["lane_id", "generation", "individual_name"]
++    seq_sorted = seq_df.sort_values(sort_keys).reset_index(drop=True)
++    par_sorted = par_df.sort_values(sort_keys).reset_index(drop=True)
++    # 行数一致
++    assert len(seq_sorted) == len(par_sorted)
++    # キー列一致
++    for k in sort_keys:
++        pd.testing.assert_series_equal(
++            seq_sorted[k], par_sorted[k], check_names=False
++        )
++    # L2 数値 column を限定して比較 (列存在確認後)
++    available_cols = [c for c in NUMERIC_L2_COLUMNS if c in seq_df.columns]
++    assert available_cols, "no L2 columns found in archive Parquet"
++    for col in available_cols:
++        # NaN 安全な比較 (両方 NaN も equal とみなす)
++        assert seq_sorted[col].equals(par_sorted[col]), (
++            f"column '{col}' mismatch between sequential and parallel run"
++        )
++
++
++def test_summary_contains_parallel_config_and_schema_version(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    """T052: summary.json に schema_version / parallel_config / max_rss_mb_per_worker が含まれる."""
++    summary, _ = _run_with_workers(
++        monkeypatch, tmp_path, sub_dir="schema", max_workers=2
++    )
++    assert summary.get("schema_version") == "1.1"
++    assert "parallel_config" in summary
++    assert summary["parallel_config"]["max_workers"] == 2
++    assert summary["parallel_config"]["mode"] == "parallel"
++    assert "max_rss_mb_per_worker" in summary
++    # per_generation[*] に stage 別 timing
++    assert summary["per_generation"], "per_generation should be non-empty"
++    pg0 = summary["per_generation"][0]
++    for key in (
++        "stage_a_seconds_total", "stage_a_seconds_max",
++        "stage_b_seconds_total", "stage_b_seconds_max",
++        "stage_c_seconds_total", "stage_c_seconds_max",
++    ):
++        assert key in pg0, f"per_generation[0] missing {key}"
++
++
++def test_existing_summary_contract_preserved_under_parallel_mode(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    """T052 後方互換: 既存 summary key (run_id / dataset / best 等) が保持される."""
++    summary, _ = _run_with_workers(
++        monkeypatch, tmp_path, sub_dir="compat", max_workers=2
++    )
++    for key in (
++        "run_id", "run_number", "generated_at", "dataset",
++        "ga_config", "backtest_config", "best", "live_criteria",
++        "population_size", "graduation_count", "archive_parquet",
++        "per_generation",
++    ):
++        assert key in summary, f"existing summary key '{key}' missing"
+diff --git a/uv.lock b/uv.lock
+index 658f718..1e80668 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -766,6 +766,34 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+ ]
+ 
++[[package]]
++name = "psutil"
++version = "7.2.2"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/aa/c6/d1ddf4abb55e93cebc4f2ed8b5d6dbad109ecb8d63748dd2b20ab5e57ebe/psutil-7.2.2.tar.gz", hash = "sha256:0746f5f8d406af344fd547f1c8daa5f5c33dbc293bb8d6a16d80b4bb88f59372", size = 493740, upload-time = "2026-01-28T18:14:54.428Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/51/08/510cbdb69c25a96f4ae523f733cdc963ae654904e8db864c07585ef99875/psutil-7.2.2-cp313-cp313t-macosx_10_13_x86_64.whl", hash = "sha256:2edccc433cbfa046b980b0df0171cd25bcaeb3a68fe9022db0979e7aa74a826b", size = 130595, upload-time = "2026-01-28T18:14:57.293Z" },
++    { url = "https://files.pythonhosted.org/packages/d6/f5/97baea3fe7a5a9af7436301f85490905379b1c6f2dd51fe3ecf24b4c5fbf/psutil-7.2.2-cp313-cp313t-macosx_11_0_arm64.whl", hash = "sha256:e78c8603dcd9a04c7364f1a3e670cea95d51ee865e4efb3556a3a63adef958ea", size = 131082, upload-time = "2026-01-28T18:14:59.732Z" },
++    { url = "https://files.pythonhosted.org/packages/37/d6/246513fbf9fa174af531f28412297dd05241d97a75911ac8febefa1a53c6/psutil-7.2.2-cp313-cp313t-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1a571f2330c966c62aeda00dd24620425d4b0cc86881c89861fbc04549e5dc63", size = 181476, upload-time = "2026-01-28T18:15:01.884Z" },
++    { url = "https://files.pythonhosted.org/packages/b8/b5/9182c9af3836cca61696dabe4fd1304e17bc56cb62f17439e1154f225dd3/psutil-7.2.2-cp313-cp313t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:917e891983ca3c1887b4ef36447b1e0873e70c933afc831c6b6da078ba474312", size = 184062, upload-time = "2026-01-28T18:15:04.436Z" },
++    { url = "https://files.pythonhosted.org/packages/16/ba/0756dca669f5a9300d0cbcbfae9a4c30e446dfc7440ffe43ded5724bfd93/psutil-7.2.2-cp313-cp313t-win_amd64.whl", hash = "sha256:ab486563df44c17f5173621c7b198955bd6b613fb87c71c161f827d3fb149a9b", size = 139893, upload-time = "2026-01-28T18:15:06.378Z" },
++    { url = "https://files.pythonhosted.org/packages/1c/61/8fa0e26f33623b49949346de05ec1ddaad02ed8ba64af45f40a147dbfa97/psutil-7.2.2-cp313-cp313t-win_arm64.whl", hash = "sha256:ae0aefdd8796a7737eccea863f80f81e468a1e4cf14d926bd9b6f5f2d5f90ca9", size = 135589, upload-time = "2026-01-28T18:15:08.03Z" },
++    { url = "https://files.pythonhosted.org/packages/81/69/ef179ab5ca24f32acc1dac0c247fd6a13b501fd5534dbae0e05a1c48b66d/psutil-7.2.2-cp314-cp314t-macosx_10_15_x86_64.whl", hash = "sha256:eed63d3b4d62449571547b60578c5b2c4bcccc5387148db46e0c2313dad0ee00", size = 130664, upload-time = "2026-01-28T18:15:09.469Z" },
++    { url = "https://files.pythonhosted.org/packages/7b/64/665248b557a236d3fa9efc378d60d95ef56dd0a490c2cd37dafc7660d4a9/psutil-7.2.2-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:7b6d09433a10592ce39b13d7be5a54fbac1d1228ed29abc880fb23df7cb694c9", size = 131087, upload-time = "2026-01-28T18:15:11.724Z" },
++    { url = "https://files.pythonhosted.org/packages/d5/2e/e6782744700d6759ebce3043dcfa661fb61e2fb752b91cdeae9af12c2178/psutil-7.2.2-cp314-cp314t-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1fa4ecf83bcdf6e6c8f4449aff98eefb5d0604bf88cb883d7da3d8d2d909546a", size = 182383, upload-time = "2026-01-28T18:15:13.445Z" },
++    { url = "https://files.pythonhosted.org/packages/57/49/0a41cefd10cb7505cdc04dab3eacf24c0c2cb158a998b8c7b1d27ee2c1f5/psutil-7.2.2-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:e452c464a02e7dc7822a05d25db4cde564444a67e58539a00f929c51eddda0cf", size = 185210, upload-time = "2026-01-28T18:15:16.002Z" },
++    { url = "https://files.pythonhosted.org/packages/dd/2c/ff9bfb544f283ba5f83ba725a3c5fec6d6b10b8f27ac1dc641c473dc390d/psutil-7.2.2-cp314-cp314t-win_amd64.whl", hash = "sha256:c7663d4e37f13e884d13994247449e9f8f574bc4655d509c3b95e9ec9e2b9dc1", size = 141228, upload-time = "2026-01-28T18:15:18.385Z" },
++    { url = "https://files.pythonhosted.org/packages/f2/fc/f8d9c31db14fcec13748d373e668bc3bed94d9077dbc17fb0eebc073233c/psutil-7.2.2-cp314-cp314t-win_arm64.whl", hash = "sha256:11fe5a4f613759764e79c65cf11ebdf26e33d6dd34336f8a337aa2996d71c841", size = 136284, upload-time = "2026-01-28T18:15:19.912Z" },
++    { url = "https://files.pythonhosted.org/packages/e7/36/5ee6e05c9bd427237b11b3937ad82bb8ad2752d72c6969314590dd0c2f6e/psutil-7.2.2-cp36-abi3-macosx_10_9_x86_64.whl", hash = "sha256:ed0cace939114f62738d808fdcecd4c869222507e266e574799e9c0faa17d486", size = 129090, upload-time = "2026-01-28T18:15:22.168Z" },
++    { url = "https://files.pythonhosted.org/packages/80/c4/f5af4c1ca8c1eeb2e92ccca14ce8effdeec651d5ab6053c589b074eda6e1/psutil-7.2.2-cp36-abi3-macosx_11_0_arm64.whl", hash = "sha256:1a7b04c10f32cc88ab39cbf606e117fd74721c831c98a27dc04578deb0c16979", size = 129859, upload-time = "2026-01-28T18:15:23.795Z" },
++    { url = "https://files.pythonhosted.org/packages/b5/70/5d8df3b09e25bce090399cf48e452d25c935ab72dad19406c77f4e828045/psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:076a2d2f923fd4821644f5ba89f059523da90dc9014e85f8e45a5774ca5bc6f9", size = 155560, upload-time = "2026-01-28T18:15:25.976Z" },
++    { url = "https://files.pythonhosted.org/packages/63/65/37648c0c158dc222aba51c089eb3bdfa238e621674dc42d48706e639204f/psutil-7.2.2-cp36-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:b0726cecd84f9474419d67252add4ac0cd9811b04d61123054b9fb6f57df6e9e", size = 156997, upload-time = "2026-01-28T18:15:27.794Z" },
++    { url = "https://files.pythonhosted.org/packages/8e/13/125093eadae863ce03c6ffdbae9929430d116a246ef69866dad94da3bfbc/psutil-7.2.2-cp36-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:fd04ef36b4a6d599bbdb225dd1d3f51e00105f6d48a28f006da7f9822f2606d8", size = 148972, upload-time = "2026-01-28T18:15:29.342Z" },
++    { url = "https://files.pythonhosted.org/packages/04/78/0acd37ca84ce3ddffaa92ef0f571e073faa6d8ff1f0559ab1272188ea2be/psutil-7.2.2-cp36-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:b58fabe35e80b264a4e3bb23e6b96f9e45a3df7fb7eed419ac0e5947c61e47cc", size = 148266, upload-time = "2026-01-28T18:15:31.597Z" },
++    { url = "https://files.pythonhosted.org/packages/b4/90/e2159492b5426be0c1fef7acba807a03511f97c5f86b3caeda6ad92351a7/psutil-7.2.2-cp37-abi3-win_amd64.whl", hash = "sha256:eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988", size = 137737, upload-time = "2026-01-28T18:15:33.849Z" },
++    { url = "https://files.pythonhosted.org/packages/8c/c7/7bb2e321574b10df20cbde462a94e2b71d05f9bbda251ef27d104668306a/psutil-7.2.2-cp37-abi3-win_arm64.whl", hash = "sha256:8c233660f575a5a89e6d4cb65d9f938126312bca76d8fe087b947b3a1aaac9ee", size = 134617, upload-time = "2026-01-28T18:15:36.514Z" },
++]
++
+ [[package]]
+ name = "psycopg"
+ version = "3.3.3"
+@@ -1510,6 +1538,7 @@ dependencies = [
+     { name = "httpx" },
+     { name = "numpy" },
+     { name = "pandas" },
++    { name = "psutil" },
+     { name = "psycopg", extra = ["binary"] },
+     { name = "pyarrow" },
+     { name = "pydantic" },
+@@ -1540,6 +1569,7 @@ requires-dist = [
+     { name = "httpx" },
+     { name = "numpy", specifier = ">=1.26" },
+     { name = "pandas", specifier = ">=2.2" },
++    { name = "psutil", specifier = ">=5.9" },
+     { name = "psycopg", extras = ["binary"], specifier = ">=3.1" },
+     { name = "pyarrow", specifier = ">=24.0.0" },
+     { name = "pydantic", specifier = ">=2" },

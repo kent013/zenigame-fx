@@ -141,10 +141,18 @@ class GAConfig:
     complexity_size_ref: float = 10.0
     n_edit_max: int = 3
     feasibility: GAFeasibilityConfig = field(default_factory=GAFeasibilityConfig)
+    # T052: GA 評価並列ワーカー数 (1 = sequential)。
+    # L1 selection / L2 row-order 決定論性は worker 数に依存しない契約。
+    # autopilot/improve-cycle は default 1 を維持し、明示指定時のみ並列化する。
+    max_workers: int = 1
 
     def __post_init__(self) -> None:
         if self.population_size < 1:
             raise ValueError("ga.population_size must be >= 1")
+        if self.max_workers < 1:
+            raise ValueError(
+                f"ga.max_workers must be >= 1: {self.max_workers}"
+            )
         if self.generations < 0:
             raise ValueError("ga.generations must be >= 0")
         if self.elite_count < 0:
@@ -348,6 +356,7 @@ def _build_ga(raw: Mapping[str, Any]) -> GAConfig:
         complexity_size_ref=float(raw.get("complexity_size_ref", 10.0)),
         n_edit_max=int(raw.get("n_edit_max", 3)),
         feasibility=_build_feasibility(raw.get("feasibility")),
+        max_workers=int(raw.get("max_workers", 1)),
     )
 
 

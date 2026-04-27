@@ -52,6 +52,49 @@ def test_ga_config_default_includes_feasibility() -> None:
     assert ga.feasibility.apply_from_generation == 0
 
 
+def test_ga_config_default_max_workers_is_one() -> None:
+    """GAConfig の default で max_workers=1 (sequential)。"""
+    ga = GAConfig(
+        population_size=10,
+        generations=5,
+        crossover_rate=0.7,
+        mutation_rate=0.3,
+        tournament_size=3,
+        elite_count=2,
+        max_depth=4,
+    )
+    assert ga.max_workers == 1
+
+
+def test_ga_config_max_workers_zero_raises() -> None:
+    """max_workers < 1 は ValueError。"""
+    with pytest.raises(ValueError, match=r"ga\.max_workers must be >= 1"):
+        GAConfig(
+            population_size=10,
+            generations=5,
+            crossover_rate=0.7,
+            mutation_rate=0.3,
+            tournament_size=3,
+            elite_count=2,
+            max_depth=4,
+            max_workers=0,
+        )
+
+
+def test_ga_config_max_workers_eight_accepted() -> None:
+    ga = GAConfig(
+        population_size=10,
+        generations=5,
+        crossover_rate=0.7,
+        mutation_rate=0.3,
+        tournament_size=3,
+        elite_count=2,
+        max_depth=4,
+        max_workers=8,
+    )
+    assert ga.max_workers == 8
+
+
 def test_ga_config_apply_from_generation_must_be_le_generations() -> None:
     """apply_from_generation > generations は ValueError."""
     with pytest.raises(
@@ -205,6 +248,71 @@ def test_default_yaml_loads_max_spread_bps_for_stage_c(tmp_path: Path) -> None:
     # 更新すること（@why コメントの値根拠も追従）。
     assert cfg.backtest.max_spread_bps == Decimal("10")
     assert cfg.backtest.holding_cost_per_day_bps == Decimal("0")
+
+
+def test_default_yaml_loads_ga_max_workers(tmp_path: Path) -> None:
+    """T052: default.yaml の ga.max_workers が GAConfig に伝搬する。
+
+    default 値は 1 (sequential)。値変更時は本 assertion と
+    devnotes/20260427-1114-ga-parallel-workers/ を同時更新すること。
+    """
+    repo_yaml = (
+        Path(__file__).resolve().parents[2]
+        / "config"
+        / "alpha_factory"
+        / "default.yaml"
+    )
+    cfg = load_config(repo_yaml)
+    assert cfg.ga.max_workers == 1
+
+
+def test_load_config_yaml_overrides_max_workers(tmp_path: Path) -> None:
+    """yaml overrides で ga.max_workers を上書きできる。"""
+    yaml_text = textwrap.dedent(
+        """
+        dataset:
+          instrument: EUR_JPY
+          start: "2025-10-01T00:00:00Z"
+          end: "2026-04-01T00:00:00Z"
+        backtest:
+          initial_cash: "1000000"
+          leverage: 25
+          units: 10000
+          max_spread_bps: "10"
+        ga:
+          population_size: 8
+          generations: 2
+          crossover_rate: 0.7
+          mutation_rate: 0.3
+          tournament_size: 3
+          elite_count: 2
+          max_depth: 4
+          max_workers: 4
+        live_criteria:
+          sharpe_min: 1.0
+          total_pnl_min: 50000
+          max_drawdown_max: 0.2
+          trade_count_min: 50
+          trade_count_max: 5000
+        stage_gate:
+          stage_a:
+            window_days: 60
+            target_pass_rate: 0.15
+            alpha: 0.03
+            threshold: 0.0
+          stage_b:
+            window_months: 18
+          stage_c:
+            holdout_days: 60
+            spread_stress_multiplier: 1.5
+        cross_pair:
+          mode: shadow
+        """
+    )
+    p = tmp_path / "test.yaml"
+    p.write_text(yaml_text, encoding="utf-8")
+    cfg = load_config(p)
+    assert cfg.ga.max_workers == 4
 
 
 def test_strict_bool_string_false_is_false() -> None:
