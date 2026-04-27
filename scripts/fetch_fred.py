@@ -13,7 +13,24 @@ from src.config import settings
 from src.db.connection import SessionLocal
 from src.ingest.fred import fetch_series, upsert_observations
 
-DEFAULT_SERIES = ("VIXCLS", "DTWEXBGS", "DGS10", "DGS2", "T10YIE")
+# T057 Phase 2 Gate B: 9 primitive 充足のため FRED series を 10 件に拡張。
+# - 既存 5: VIXCLS (M5/P7), DTWEXBGS (P11 DXY), DGS10/DGS2/T10YIE (rates baseline)
+# - 新規 5: GOLDPMGBD228NLBM (P12 Gold), DCOILWTICO (P9 WTI),
+#          PCOPPUSDM (P8 Copper), PALLFNFINDEXM (P8 commodity index),
+#          SP500 (P7 SPX500)
+# 月次系列 (PCOPPUSDM/PALLFNFINDEXM) は effective_from_utc に 35 日 lag を付与。
+DEFAULT_SERIES = (
+    "VIXCLS",
+    "DTWEXBGS",
+    "DGS10",
+    "DGS2",
+    "T10YIE",
+    "GOLDPMGBD228NLBM",
+    "DCOILWTICO",
+    "PCOPPUSDM",
+    "PALLFNFINDEXM",
+    "SP500",
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,7 +38,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--series",
         default=",".join(DEFAULT_SERIES),
-        help="comma-separated FRED series ids (default: VIXCLS,DTWEXBGS,DGS10,DGS2,T10YIE)",
+        help=(
+            "comma-separated FRED series ids (default: 10 series for "
+            "Phase 2 aux Coverage; see DEFAULT_SERIES)"
+        ),
     )
     p.add_argument("--from", dest="start", required=True, help="YYYY-MM-DD")
     p.add_argument("--to", dest="end", required=True, help="YYYY-MM-DD")

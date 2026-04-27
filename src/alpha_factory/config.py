@@ -408,6 +408,10 @@ def _build_stage_gate(
         "stage_c_feasibility_apply": bool(
             c_raw.get("feasibility_apply", True)
         ),
+        # T057 Phase 2 Gate C: aux データ preflight 必須化 (default False で互換)
+        "strict_aux_required": bool(
+            stage_gate_raw.get("strict_aux_required", False)
+        ),
     }
     if live_criteria_raw:
         kwargs["live_criteria"] = dict(live_criteria_raw)

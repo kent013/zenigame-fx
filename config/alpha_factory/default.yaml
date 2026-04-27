@@ -151,6 +151,14 @@ stage_gate:
     # live_criteria は上記 SSOT セクションを参照 (重複定義しない)
     # T045: GA selection で stage_c_feasible (PnL>0 ∧ Sharpe>0) 個体を優先 (v3 selection_score)
     feasibility_apply: false   # cycle 11 diagnostic: T045 を一時無効化 (stage_c_feasible=True 固定で v3.1 priority bit を実質無効化)
+  # T057 Phase 2 Gate C: aux データ preflight 強制化。
+  # @why: 9 primitive (P5/P7/P8/P9/P10/P11/P12 + M4/M5) が aux データ不在で
+  # safe default 経路 (定数信号化) で動作しており GA selection が「定数信号悪用」
+  # する構造的バグを構造的に閉じる。effective_from_utc 契約 + per-stage alignment
+  # と組み合わせて look-ahead bias 漏洩なく実 series を注入する。
+  # @override: dev/smoke test では CLI `--allow-aux-missing` で fail-closed を回避可能。
+  # @ref: devnotes/20260427-2234-aux-data-loader-phase2/
+  strict_aux_required: true
 
 # Cross-pair (ii-lite) evaluation 設定 (T016)
 # - 実装: src/alpha_factory/cross_pair.py

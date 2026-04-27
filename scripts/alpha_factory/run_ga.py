@@ -48,6 +48,12 @@ from sqlalchemy import select
 from scripts.alpha_factory.get_latest_run_number import get_latest_run_number
 from src.alpha_factory._registry_bridge import build_random_gen_registry
 from src.alpha_factory.archive import GenomeArchive
+from src.alpha_factory.aux_loader import AuxBundle, build_aux_bundle_from_db
+from src.alpha_factory.aux_preflight import (
+    HARD_REQUIRED_AUX,
+    SOFT_REQUIRED_AUX,
+    preflight_check_aux_data,
+)
 from src.alpha_factory.calibrate_gate_history import DEFAULT_HISTORY_PATH
 from src.alpha_factory.calibrate_state import (
     compute_base_config_hash,
@@ -309,6 +315,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=(
             "Stage A threshold を CLI で明示指定 (history.jsonl override より優先)。"
             "未指定時は (1) history.jsonl の最新適用可能 record (2) config 値 の順で fallback。"
+        ),
+    )
+    # T057 Phase 2 Gate C: aux preflight override (dev 用)
+    p.add_argument(
+        "--allow-aux-missing",
+        action="store_true",
+        help=(
+            "preflight aux data check で hard_missing があっても fail-closed "
+            "せず WARN log のみで継続する (dev / smoke test 用)。"
+            "production では config strict_aux_required=true を維持し本 flag は外す。"
         ),
     )
     args = p.parse_args(argv)
@@ -1142,6 +1158,70 @@ def main(argv: list[str] | None = None) -> int:
     archive = GenomeArchive(run_id=run_id, run_number=run_number)
     lane_id = f"tier1_{cfg.dataset.instrument}"
 
+    # T057 Phase 2 Gate B/C: aux preflight + AuxBundle 構築
+    # CLI > config の優先順位: --allow-aux-missing が指定されたら strict 無効化
+    effective_strict = cfg.stage_gate.strict_aux_required and not args.allow_aux_missing
+    logger.info(
+        "preflight.effective_strict_mode",
+        strict=effective_strict,
+        config_strict=cfg.stage_gate.strict_aux_required,
+        cli_allow_aux_missing=args.allow_aux_missing,
+        source=("cli_override" if args.allow_aux_missing else "config"),
+    )
+    aux_bundle: AuxBundle | None = None
+    try:
+        with SessionLocal() as aux_session:
+            preflight_period = (cfg.dataset.start, cfg.dataset.end)
+            preflight_result = preflight_check_aux_data(
+                db_session=aux_session,
+                period=preflight_period,
+                stage_b_window_months=cfg.stage_gate.stage_b_window_months,
+                stage_c_holdout_days=cfg.stage_gate.stage_c_holdout_days,
+                allow_missing=not effective_strict,
+            )
+            logger.info(
+                "preflight.aux_data_check",
+                hard_satisfied=preflight_result.hard_satisfied,
+                hard_missing=preflight_result.hard_missing,
+                soft_satisfied=preflight_result.soft_satisfied,
+                soft_missing=preflight_result.soft_missing,
+                coverage_pct=preflight_result.coverage_pct_by_series,
+            )
+            # AuxBundle を 1 度だけ構築 (raw)
+            all_series = list(HARD_REQUIRED_AUX.keys()) + list(
+                SOFT_REQUIRED_AUX.keys()
+            )
+            extended_period = (
+                cfg.dataset.start,
+                cfg.dataset.end,
+            )
+            aux_bundle = build_aux_bundle_from_db(
+                db_session=aux_session,
+                period=extended_period,
+                series_ids=all_series,
+                aux_pairs=("EUR_USD", "USD_JPY"),
+            )
+            logger.info(
+                "preflight.aux_bundle_built",
+                daily_series_count=len(aux_bundle.daily_series),
+                aux_pair_bars_count=sum(
+                    len(v) for v in aux_bundle.aux_pair_bars_index.values()
+                ),
+                event_calendar_loaded=aux_bundle.event_calendar is not None,
+                vix_snapshot_loaded=aux_bundle.vix_snapshot is not None,
+            )
+    except Exception as exc:
+        # preflight が effective_strict=True で失敗 → re-raise (fail-closed)
+        # それ以外は WARN log を残して aux_bundle=None で継続 (safe default 経路)
+        if effective_strict:
+            raise
+        logger.warning(
+            "preflight.aux_bundle_build_failed",
+            error=str(exc),
+            note="continuing with aux_bundle=None (safe default path)",
+        )
+        aux_bundle = None
+
     primitive_evaluator = RegistryEvaluator(pair=cfg.dataset.instrument)
     bt_factory = _make_bt_factory(cfg.dataset, cfg.backtest)
 
@@ -1207,6 +1287,7 @@ def main(argv: list[str] | None = None) -> int:
         cp_inputs=None,  # Phase 2: graduation.pair_bars が空のため None
         preflight_underfilled=preflight_underfilled,
         preflight_payload=preflight_payload,
+        aux_bundle=aux_bundle,  # T057 Phase 2: stage 別 align 用 raw container
     )
     # T052: max_workers が available memory budget を超えたら warning
     # (--strict-memory-guard 指定時のみ fail-fast)

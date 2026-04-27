@@ -132,6 +132,36 @@ class RegistryEvaluator:
                     f"(at least one required by optional_data_groups)"
                 )
 
+    def with_aux(
+        self,
+        *,
+        aux_series: Mapping[str, Sequence[float]] | None = None,
+        aux_pair_bars: Mapping[str, Sequence[PriceBar | None]] | None = None,
+        event_snapshot: EconomicEventSnapshot | None = None,
+        vix_snapshot: VixSeriesSnapshot | None = None,
+    ) -> RegistryEvaluator:
+        """同 pair / 同 strict_*_required で aux 部分だけ差し替えた新 instance を返す.
+
+        T057 Phase 2 Gate B: stage 別 aligned bundle を注入する用途.
+        preflight verify は冪等性のため再実行しない (`__init__` の strict_aux_required
+        は再呼び出しで重複 raise する可能性があるため、新 instance では False で構築).
+        """
+        new = RegistryEvaluator.__new__(RegistryEvaluator)
+        new._pair = self._pair
+        new._aux_series = dict(aux_series) if aux_series is not None else dict(self._aux_series)
+        new._aux_pair_bars = (
+            dict(aux_pair_bars) if aux_pair_bars is not None else dict(self._aux_pair_bars)
+        )
+        new._event_snapshot = (
+            event_snapshot if event_snapshot is not None else self._event_snapshot
+        )
+        new._vix_snapshot = (
+            vix_snapshot if vix_snapshot is not None else self._vix_snapshot
+        )
+        new._strict_snapshot_required = self._strict_snapshot_required
+        new._strict_aux_required = False  # preflight は親 instance で済んでいる
+        return new
+
     def evaluate(
         self, bars: list[PriceBar], idx: int, signal: SignalConfig
     ) -> float:

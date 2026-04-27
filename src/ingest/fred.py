@@ -19,6 +19,10 @@ from sqlalchemy.orm import Session
 
 from src.config import settings
 from src.db.models import MacroIndexDaily
+from src.ingest.effective_from import (
+    EffectiveFromSource,
+    compute_effective_from_utc,
+)
 from src.utils.time import now_utc
 
 logger = structlog.get_logger(__name__)
@@ -120,6 +124,8 @@ def upsert_observations(session: Session, rows: Iterable[FredObservation]) -> in
     """`macro_index_daily` に ON CONFLICT (series_id, date) DO UPDATE で UPSERT する。
 
     `value` は NULL も含めて最新値で上書き、`fetched_at` も最新値に更新される。
+    T057 Phase 2: `effective_from_utc` (series 別 lag policy) と `source` 列も同時に
+    UPSERT する (既存 row も backfill する)。
     戻り値は対象行数（insert + update を区別せず合算）。空入力は 0 を返す。
     """
     payload = [
@@ -128,6 +134,10 @@ def upsert_observations(session: Session, rows: Iterable[FredObservation]) -> in
             "date": r.obs_date,
             "value": r.value,
             "fetched_at": r.fetched_at,
+            "effective_from_utc": compute_effective_from_utc(
+                r.series_id, r.obs_date
+            ),
+            "source": EffectiveFromSource.POLICY_CONSERVATIVE.value,
         }
         for r in rows
     ]
@@ -136,7 +146,12 @@ def upsert_observations(session: Session, rows: Iterable[FredObservation]) -> in
     stmt = insert(MacroIndexDaily).values(payload)
     stmt = stmt.on_conflict_do_update(
         index_elements=["series_id", "date"],
-        set_={"value": stmt.excluded.value, "fetched_at": stmt.excluded.fetched_at},
+        set_={
+            "value": stmt.excluded.value,
+            "fetched_at": stmt.excluded.fetched_at,
+            "effective_from_utc": stmt.excluded.effective_from_utc,
+            "source": stmt.excluded.source,
+        },
     )
     session.execute(stmt)
     session.commit()
