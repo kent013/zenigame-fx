@@ -1,0 +1,41 @@
+{
+  "name": "g55_i49",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F7",
+          "weight": 0.9515707194879598,
+          "params": {
+            "n": 20,
+            "scale": 28.816502318821918
+          }
+        },
+        {
+          "name": "P7",
+          "weight": 1.2705428105007055,
+          "params": {
+            "spx_n": 3,
+            "vix_threshold": 21.92280848147493,
+            "vix_scale": 3.753155424146283,
+            "vix_staleness_days": 11.327483961143335,
+            "spx_staleness_bars": 213
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.992892698373871
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.34582471999902054,
+    "exit_threshold": 0.15409982187489166,
+    "max_pos": 3,
+    "time_stop_min": 73
+  },
+  "risk": {
+    "stop_atr": 2.3067652976497364,
+    "take_atr": 1.5256336239014887
+  }
+}
