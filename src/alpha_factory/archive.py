@@ -82,8 +82,14 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
         pa.field("ii_lite_pass", pa.bool_(), nullable=True),
         pa.field("graduated", pa.bool_(), nullable=False),
         # T-sharpe Phase 1A: trade-level Sharpe (v2) と calc version
+        # T044: trade_sharpe_raw は **Stage A 値で固定** (selection 基準と
+        # 整合させるため Stage B/C で上書きしない)。Stage B IS sharpe / Stage C
+        # base sharpe は trade_sharpe_stage_b / trade_sharpe_stage_c で別保持。
         pa.field("trade_sharpe_raw", pa.float64(), nullable=True),
         pa.field("sharpe_calc_version", pa.string(), nullable=True),
+        # T044: stage 別 sharpe (selection と切り離した観測列)
+        pa.field("trade_sharpe_stage_b", pa.float64(), nullable=True),
+        pa.field("trade_sharpe_stage_c", pa.float64(), nullable=True),
         # T035: Stage B 観察可能性 (n_fold_effective / positive_fold_ratio_effective / reason_codes)
         pa.field("n_fold_effective", pa.int64(), nullable=True),
         pa.field("positive_fold_ratio_effective", pa.float64(), nullable=True),
@@ -161,6 +167,9 @@ def _create_row_template() -> dict[str, Any]:
         # T-sharpe Phase 1A
         "trade_sharpe_raw": None,
         "sharpe_calc_version": "v2_trade_level",
+        # T044: stage 別 sharpe
+        "trade_sharpe_stage_b": None,
+        "trade_sharpe_stage_c": None,
         # T035: Stage B 観察可能性
         "n_fold_effective": None,
         "positive_fold_ratio_effective": None,
@@ -449,18 +458,16 @@ class GenomeArchive:
         # T035: reason_codes 永続化 (空タプルなら None、複数は ";" 区切り)
         rc = stage_result.reason_codes
         row["stage_b_reason_codes"] = ";".join(rc) if rc else None
-        # T-sharpe Phase 1A: stage_b は is_full_sharpe を trade_sharpe_raw に書く。
-        # is_full_sharpe は stage_gate.py で trade_sharpe_raw (v2) を入れる
+        # T044: Stage B の is_full_sharpe を **trade_sharpe_stage_b 専用列** に
+        # 書き込む。trade_sharpe_raw は Stage A 値で固定 (selection と整合)。
+        # is_full_sharpe / is_full_total_pnl / is_full_trade_count は Stage B
+        # 全期間 backtest の集計値で、Stage A 60 日とは別 metric。
         is_sharpe = _opt_float(payload, "is_full_sharpe")
         if is_sharpe is not None:
-            row["trade_sharpe_raw"] = is_sharpe
-            row["sharpe_calc_version"] = "v2_trade_level"
-        is_pnl = _opt_float(payload, "is_full_total_pnl")
-        if is_pnl is not None:
-            row["total_pnl"] = is_pnl
-        is_tc = _opt_int(payload, "is_full_trade_count")
-        if is_tc is not None:
-            row["trade_count"] = is_tc
+            row["trade_sharpe_stage_b"] = is_sharpe
+        # T044: total_pnl / trade_count は archive 全体の上書き対象から外し、
+        # Stage A 値を保持する (Stage B の is_full_total_pnl は別途観測したい
+        # 場合は将来 stage 別列で持つ。Phase 0 では Stage A 値で固定)。
         # bootstrap_ci_lower/upper / sortino / calmar は本 TODO スコープ外
         self._mark_stage(row, "B")
 
@@ -502,17 +509,25 @@ class GenomeArchive:
         payload = _extract_payload(stage_result)
         row["stage_c_pass"] = bool(stage_result.passed)
 
-        # T-sharpe Phase 1A: payload key "sharpe" → "trade_sharpe_raw" にリネーム
+        # T044: Stage C base sharpe を **trade_sharpe_stage_c 専用列** に書き込む。
+        # trade_sharpe_raw は Stage A 値で固定 (selection と整合)。
+        # 旧 path では Stage C の payload "trade_sharpe_raw" で上書きしていたが、
+        # 名前は "trade_sharpe_raw" でも実体は Stage C base 評価値で別 metric。
         sharpe = _opt_float(payload, "trade_sharpe_raw")
         if sharpe is not None:
-            row["trade_sharpe_raw"] = sharpe
-            row["sharpe_calc_version"] = "v2_trade_level"
+            row["trade_sharpe_stage_c"] = sharpe
+        # T044: total_pnl / trade_count / max_drawdown_pct は Stage A 値を保持。
+        # Stage C base 評価値は payload に残るので report が必要なら別出し。
+        max_dd_frac = _opt_float(payload, "max_drawdown_frac")
+        if max_dd_frac is not None:
+            # max_drawdown_pct は Stage A 値で初期化されているが Stage C で
+            # 上書きする (live_criteria 評価対象は Stage C 60 日 holdout)。
+            # T044 は trade_sharpe_raw の上書き撤廃のみがスコープで、
+            # max_drawdown_pct / total_pnl / trade_count は別 TODO 検討事項。
+            row["max_drawdown_pct"] = max_dd_frac * 100.0
         total_pnl = _opt_float(payload, "total_pnl")
         if total_pnl is not None:
             row["total_pnl"] = total_pnl
-        max_dd_frac = _opt_float(payload, "max_drawdown_frac")
-        if max_dd_frac is not None:
-            row["max_drawdown_pct"] = max_dd_frac * 100.0
         tc = _opt_int(payload, "trade_count")
         if tc is not None:
             row["trade_count"] = tc
