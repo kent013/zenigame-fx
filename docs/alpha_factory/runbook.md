@@ -120,7 +120,7 @@ uv run python scripts/alpha_factory/run_ga.py --max-workers 4 --strict-memory-gu
 
 ```yaml
 ga:
-  max_workers: 1   # default. autopilot/improve-cycle は変更しない
+  max_workers: 2   # default. シーケンシャル実行は `--max-workers 1` で明示
 ```
 
 **決定論性契約**:

@@ -42,10 +42,11 @@ ga:
   # T052: GA 評価並列ワーカー数 (1 = sequential, 2 以上で multiprocessing.Pool)。
   # @why: GA 評価の wall-time 短縮 (副次目標)。L1 selection / L2 row-order
   #       決定論性は worker 数に依存しない契約 (L3 artifact bit equivalence は非保証)。
-  # @default: 1 (CI / local 既定)。autopilot/improve-cycle は default を変更しない。
+  # @default: 2 (24GB マシンで安全、1 worker ~400MB × 2 + main ≈ 1.2GB)。
+  #           軽量 RUN でも spawn overhead を上回る wall-time 短縮を期待。
   # @upper_bound: 物理コア数 / (24GB ÷ 1worker_3GB) の min。
   # @ref: devnotes/20260427-1114-ga-parallel-workers/
-  max_workers: 1
+  max_workers: 2
   # T-sharpe Phase 1A: trade-level Sharpe のサンプルサイズ最小値。
   # @why: trade_count<N で trade_sharpe_raw を None にして GA fitness の選抜から外す。
   # 30 は Andrew W. Lo (2002) "The Statistics of Sharpe Ratios" の経験則。

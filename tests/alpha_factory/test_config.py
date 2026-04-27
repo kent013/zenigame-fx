@@ -52,8 +52,8 @@ def test_ga_config_default_includes_feasibility() -> None:
     assert ga.feasibility.apply_from_generation == 0
 
 
-def test_ga_config_default_max_workers_is_one() -> None:
-    """GAConfig の default で max_workers=1 (sequential)。"""
+def test_ga_config_default_max_workers_is_two() -> None:
+    """GAConfig の default で max_workers=2 (24GB マシンで安全な並列水準)。"""
     ga = GAConfig(
         population_size=10,
         generations=5,
@@ -63,7 +63,7 @@ def test_ga_config_default_max_workers_is_one() -> None:
         elite_count=2,
         max_depth=4,
     )
-    assert ga.max_workers == 1
+    assert ga.max_workers == 2
 
 
 def test_ga_config_max_workers_zero_raises() -> None:
@@ -253,7 +253,7 @@ def test_default_yaml_loads_max_spread_bps_for_stage_c(tmp_path: Path) -> None:
 def test_default_yaml_loads_ga_max_workers(tmp_path: Path) -> None:
     """T052: default.yaml の ga.max_workers が GAConfig に伝搬する。
 
-    default 値は 1 (sequential)。値変更時は本 assertion と
+    default 値は 2 (24GB マシンで安全な並列水準)。値変更時は本 assertion と
     devnotes/20260427-1114-ga-parallel-workers/ を同時更新すること。
     """
     repo_yaml = (
@@ -263,7 +263,7 @@ def test_default_yaml_loads_ga_max_workers(tmp_path: Path) -> None:
         / "default.yaml"
     )
     cfg = load_config(repo_yaml)
-    assert cfg.ga.max_workers == 1
+    assert cfg.ga.max_workers == 2
 
 
 def test_load_config_yaml_overrides_max_workers(tmp_path: Path) -> None:
