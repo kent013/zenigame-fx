@@ -75,6 +75,7 @@ T012 で `src/alpha_factory/primitives/modulator_generic.py` に実装・登録�
 - M3: bar close 時点のスプレッドを参照（signal at close → execute next bar open 規約と整合、MVP では proxy）
 - M4: `event.actual` を一切参照せず `event.event_time` のみ使用。`EconomicEventSnapshot.as_of` を 1 段目 cap として `event_time > as_of` のイベントを除外。**T039: `as_of_strict=True` のとき per-bar gate (二段目) を有効化し、各 bar で `event_time > bar_time[i]` のイベントを bisect で除外** (causality 強制)。
 - P10: M4 と同方針 (USD/CAD 限定 NA セッション内 gate)。`as_of_strict` で per-bar gate を有効化 (T039)。
+  **T046 production 切替方針**: `event_snapshot=None` 時に safe default 1.0 を返す挙動は backward 互換のため default で温存する。production runner では `EvaluationContext.strict_snapshot_required=True` を設定して `RuntimeError` fail-fast に切替え、aux loader (T047) 完成後に「常時 gate 開放」として GA に悪用される状態を構造的に解消する。既存テスト `test_p10_strict_raises` が strict mode を保護。
 - M5: `bisect_left(pubs, bar_time)` の strict less than で同時刻 publication を除外
 
 **snapshot 欠損時挙動**:
