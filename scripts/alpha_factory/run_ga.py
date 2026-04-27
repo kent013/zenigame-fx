@@ -52,6 +52,7 @@ from src.alpha_factory.aux_loader import AuxBundle, build_aux_bundle_from_db
 from src.alpha_factory.aux_preflight import (
     HARD_REQUIRED_AUX,
     SOFT_REQUIRED_AUX,
+    compute_extended_period,
     preflight_check_aux_data,
 )
 from src.alpha_factory.calibrate_gate_history import DEFAULT_HISTORY_PATH
@@ -1196,13 +1197,10 @@ def main(argv: list[str] | None = None) -> int:
             all_series = list(HARD_REQUIRED_AUX.keys()) + list(
                 SOFT_REQUIRED_AUX.keys()
             )
-            extended_period = (
-                cfg.dataset.start
-                - timedelta(
-                    days=cfg.stage_gate.stage_b_window_months * 30
-                ),
-                cfg.dataset.end
-                + timedelta(days=cfg.stage_gate.stage_c_holdout_days),
+            extended_period = compute_extended_period(
+                preflight_period,
+                stage_b_window_months=cfg.stage_gate.stage_b_window_months,
+                stage_c_holdout_days=cfg.stage_gate.stage_c_holdout_days,
             )
             aux_bundle = build_aux_bundle_from_db(
                 db_session=aux_session,

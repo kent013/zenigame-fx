@@ -20,6 +20,7 @@ from src.alpha_factory.aux_preflight import (
     HARD_REQUIRED_PAIRS,
     SOFT_REQUIRED_AUX,
     PreflightResult,
+    compute_extended_period,
     preflight_check_aux_data,
 )
 from src.db.connection import Base
@@ -278,3 +279,53 @@ def test_preflight_result_passes_property() -> None:
     assert r1.passes is True
     r2 = PreflightResult(hard_satisfied=[], hard_missing=["A"])
     assert r2.passes is False
+
+
+class TestComputeExtendedPeriod:
+    """preflight と aux_bundle 構築で共通使用される拡張期間計算 helper."""
+
+    def test_extends_start_by_stage_b_months_in_30day_units(self) -> None:
+        period = (
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2026, 4, 1, tzinfo=UTC),
+        )
+        ext_start, _ext_end = compute_extended_period(
+            period, stage_b_window_months=18, stage_c_holdout_days=60
+        )
+        # 18 ヶ月 = 18 * 30 = 540 days lookback
+        assert ext_start == period[0] - timedelta(days=540)
+
+    def test_extends_end_by_holdout_days(self) -> None:
+        period = (
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2026, 4, 1, tzinfo=UTC),
+        )
+        _ext_start, ext_end = compute_extended_period(
+            period, stage_b_window_months=18, stage_c_holdout_days=60
+        )
+        assert ext_end == period[1] + timedelta(days=60)
+
+    def test_zero_extension_when_zero_args(self) -> None:
+        period = (
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2026, 4, 1, tzinfo=UTC),
+        )
+        ext_start, ext_end = compute_extended_period(
+            period, stage_b_window_months=0, stage_c_holdout_days=0
+        )
+        assert ext_start == period[0]
+        assert ext_end == period[1]
+
+
+def test_reset_proc_aux_cache_clears_cache() -> None:
+    """T057 Phase 2: parallel_eval._reset_proc_aux_cache() が cache を空にする."""
+    from src.alpha_factory.aux_loader import AuxAlignmentCache, AuxBundle
+    from src.alpha_factory.parallel_eval import (
+        _PROC_AUX_CACHE,
+        _reset_proc_aux_cache,
+    )
+
+    _PROC_AUX_CACHE[12345] = AuxAlignmentCache(AuxBundle())
+    assert len(_PROC_AUX_CACHE) >= 1
+    _reset_proc_aux_cache()
+    assert len(_PROC_AUX_CACHE) == 0

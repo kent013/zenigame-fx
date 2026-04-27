@@ -46,6 +46,31 @@ SOFT_REQUIRED_AUX: Final[dict[str, str]] = {
 }
 
 
+def compute_extended_period(
+    period: tuple[datetime, datetime],
+    *,
+    stage_b_window_months: int,
+    stage_c_holdout_days: int,
+) -> tuple[datetime, datetime]:
+    """preflight / aux_bundle 構築で共通使用する拡張期間計算 helper.
+
+    Codex impl-review-round-2 [Suggestion] 反映: preflight と
+    `build_aux_bundle_from_db` で同じロジックを使い、period のズレで
+    `safe default 経路` に落ちるリスクを排除する.
+
+    Args:
+        period: dataset (start, end).
+        stage_b_window_months: Stage B history を含めるための月数 (1ヶ月=30日 換算).
+        stage_c_holdout_days: holdout 日数.
+
+    Returns:
+        (extended_start, extended_end) tuple.
+    """
+    extended_start = period[0] - timedelta(days=stage_b_window_months * 30)
+    extended_end = period[1] + timedelta(days=stage_c_holdout_days)
+    return extended_start, extended_end
+
+
 @dataclass(frozen=True)
 class PreflightResult:
     """preflight check 結果."""
@@ -159,10 +184,13 @@ def preflight_check_aux_data(
     Raises:
         RuntimeError: hard_missing があり allow_missing=False の場合.
     """
-    # Stage B 18ヶ月履歴 + holdout を含む拡張 period
-    extended_start = period[0] - timedelta(days=stage_b_window_months * 30)
-    extended_end = period[1] + timedelta(days=stage_c_holdout_days)
-    extended_period = (extended_start, extended_end)
+    # Stage B 18ヶ月履歴 + holdout を含む拡張 period (compute_extended_period 統一)
+    extended_period = compute_extended_period(
+        period,
+        stage_b_window_months=stage_b_window_months,
+        stage_c_holdout_days=stage_c_holdout_days,
+    )
+    extended_start, extended_end = extended_period
 
     coverage: dict[str, float] = {}
     latest_eff: dict[str, datetime | None] = {}
