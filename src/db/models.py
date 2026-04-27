@@ -108,8 +108,11 @@ class EconomicEventRow(Base):
 class MacroIndexDaily(Base):
     """FRED 由来の日足マクロ指標 (VIX / DXY / Treasury yields / breakeven 等)。
 
-    `date` は FRED の observations[].date を素直に保持する。`available_at` は持たないため、
-    primitive 側は T+1 利用原則を守ること（look-ahead bias 防止）。
+    `date` は FRED の observations[].date を素直に保持する。
+    `effective_from_utc` は **その値が利用可能になる UTC 時刻** (T057 Phase 2):
+    `bar.bar_time >= effective_from_utc` を満たして以降でしか forward-fill されない契約。
+    daily 系列は `observation_date + 24h`、月次系列 (PCOPPUSDM 等) は `+35d` の保守的 lag。
+    `source` は出所識別 (policy_conservative / fred_realtime_start / oanda_release_time).
     """
 
     __tablename__ = "macro_index_daily"
@@ -119,6 +122,12 @@ class MacroIndexDaily(Base):
     date: Mapped[date] = mapped_column(Date, nullable=False)
     value: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # T057 Phase 2: effective_from_utc は migration 004 で追加。
+    # 過去データの backfill は migration 内で series 別 lag で計算 (Python で実施)。
+    effective_from_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    source: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
