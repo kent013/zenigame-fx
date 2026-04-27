@@ -9,6 +9,7 @@ import structlog
 from src.broker.margin import notional_home_currency, required_margin, validate_leverage
 from src.broker.orders import (
     ExitReason,
+    InsufficientEquityError,
     OrderSignal,
     PortfolioSnapshot,
     Position,
@@ -18,6 +19,15 @@ from src.broker.orders import (
 from src.domain.price import PriceBar
 
 logger = structlog.get_logger(__name__)
+
+
+def _is_finite_decimal(value: Decimal) -> bool:
+    """Decimal が有限値（NaN / Infinity でない）か判定 (T056)。
+
+    Decimal('NaN') / Decimal('Infinity') を `<= 0` 比較すると InvalidOperation を
+    起こすため、比較演算前に本 helper でガードする。
+    """
+    return value.is_finite()
 
 
 @dataclass(frozen=True)
@@ -130,6 +140,11 @@ class MockBroker:
         # object reference を保持することで id() 再利用問題を回避
         # (T028 conceptual-design Round 3 Critical 対応)。
         self._snapshot_cache: tuple[PriceBar, PortfolioSnapshot] | None = None
+        # T056: negative equity 起因で drop された open 系 signal の累計件数。
+        # L1 (fill_pending 冒頭 gate) + L2 (_open_position 内 InsufficientEquityError)
+        # の両方で加算される。pop_negative_equity_drop_count() で取り出すと 0 に reset。
+        # spread filter / session_close 起因の drop はここに含めない（独立 counter）。
+        self._negative_equity_drop_count: int = 0
 
     # ---- public API -------------------------------------------------------
 
@@ -197,18 +212,38 @@ class MockBroker:
         # 同一 bar 内のすべての _open_position に共通で渡す（fill 順依存禁止）
         pre_fill_equity = self._snapshot_at(bar).equity
 
+        # T056 L1: equity 非有限値 / 非正値での open 系 drop（fail-closed）
+        # 注: 同 bar 内の close signal による equity recovery は意図的に取り逃がす
+        # （conservative policy、設計 §2.3 参照）。close 系は通常実行する。
+        if not _is_finite_decimal(pre_fill_equity) or pre_fill_equity <= Decimal(0):
+            before = len(self._pending)
+            self._pending = [
+                (sig, lev) for (sig, lev) in self._pending
+                if sig.kind not in ("open_long", "open_short")
+            ]
+            self._negative_equity_drop_count += before - len(self._pending)
+
         trades: list[Trade] = []
         for signal, leverage in self._pending:
             if signal.kind == "open_long":
-                self._open_position(
-                    "long", cast(int, signal.units), bar.ask.open, bar.bar_time, leverage,
-                    equity_at_entry=pre_fill_equity,
-                )
+                # T056 L2: L1 を通り抜けた異常経路の最終防御。drop 扱いで継続
+                try:
+                    self._open_position(
+                        "long", cast(int, signal.units), bar.ask.open, bar.bar_time, leverage,
+                        equity_at_entry=pre_fill_equity,
+                    )
+                except InsufficientEquityError:
+                    self._negative_equity_drop_count += 1
+                    continue
             elif signal.kind == "open_short":
-                self._open_position(
-                    "short", cast(int, signal.units), bar.bid.open, bar.bar_time, leverage,
-                    equity_at_entry=pre_fill_equity,
-                )
+                try:
+                    self._open_position(
+                        "short", cast(int, signal.units), bar.bid.open, bar.bar_time, leverage,
+                        equity_at_entry=pre_fill_equity,
+                    )
+                except InsufficientEquityError:
+                    self._negative_equity_drop_count += 1
+                    continue
             elif signal.kind == "close_position":
                 if signal.position_id is None:
                     raise ValueError("close_position requires position_id")
@@ -219,6 +254,22 @@ class MockBroker:
                 trades.extend(self._close_all_internal(bar, exit_kind="open", reason="signal"))
         self._pending.clear()
         return trades
+
+    def pop_negative_equity_drop_count(self) -> int:
+        """L1 + L2 で drop した open 系 signal の累計件数を返し、内部 counter を 0 に reset (T056)。
+
+        pop semantics: 呼び出すたびに「前回 pop 以降の累計」を返す。
+        複数 backtest 連続実行や broker 再利用時の混線を防ぐ。
+
+        `run_backtest` は backtest 完了時に 1 回 pop して `backtest.finished` log の
+        `negative_equity_drop_open_count` field に渡す。
+
+        Returns:
+            前回 pop 以降の drop 件数（0 初期化済）。
+        """
+        n = self._negative_equity_drop_count
+        self._negative_equity_drop_count = 0
+        return n
 
     def mark_to_market(self, bar: PriceBar) -> None:
         if bar.pair_name != self._meta.oanda_name:
@@ -319,6 +370,13 @@ class MockBroker:
         *,
         equity_at_entry: Decimal,
     ) -> Position:
+        # T056 L2: defensive guard（L1 を通り抜ける経路があれば fail-fast）
+        # `fill_pending` ループ内で InsufficientEquityError を捕捉して drop 扱いに統一
+        if not _is_finite_decimal(equity_at_entry) or equity_at_entry <= Decimal(0):
+            raise InsufficientEquityError(
+                f"_open_position called with non-finite or non-positive equity: "
+                f"{equity_at_entry}"
+            )
         notional = notional_home_currency(units=units, price_quote_per_base=entry_price, quote_is_home=True)
         margin = required_margin(notional, leverage)
         pos = Position(

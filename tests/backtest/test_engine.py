@@ -242,3 +242,57 @@ def test_run_backtest_finished_summary_smoke_consumer_compat() -> None:
     }
     assert consumer_view["instrument"] == "USD_JPY"
     assert consumer_view["bars"] == 2
+
+
+# -- T056: negative equity drop count を summary に集計 ---------------------------------
+
+
+def test_run_backtest_negative_equity_drop_count_in_summary() -> None:
+    """T056: 破産シナリオで backtest.finished log の negative_equity_drop_open_count が
+    正確な件数を持つこと。
+
+    bar 0 で open_long を発注 → bar 1 で約定後、強制的に cash を負にして
+    bar 2 で更に open_long を試みると L1 で drop される。
+    """
+    bars = [
+        # bar 0: minute=120 → hour=2 (non-session) — open_long submit
+        make_bar(120, bid_close="154.100", ask_close="154.110"),
+        # bar 1: minute=121 → hour=2 — fill
+        make_bar(121, bid_close="154.150", ask_close="154.160"),
+        # bar 2: minute=122 → hour=2 — 別 open_long を試みる（cash を負にしてあるので drop されたい）
+        make_bar(122, bid_close="154.200", ask_close="154.210"),
+        # bar 3: minute=123 → hour=2
+        make_bar(123, bid_close="154.250", ask_close="154.260"),
+    ]
+    strat = _ScriptedStrategy({
+        0: [OrderSignal(kind="open_long", units=10000)],
+        1: [OrderSignal(kind="open_long", units=10000)],
+    })
+    config = _backtest_config_with_session_close_at_hour_zero()
+
+    # bar 1 fill 直後 (= bar 2 fill_pending 前) に cash を負に強制したいが、
+    # _ScriptedStrategy には介入 hook がないため、別アプローチ:
+    # 大量 units で margin call 発火を狙うか、broker._cash を直接操作する。
+    # ここでは subclass で fill_pending を hook して cash を捻じ曲げる。
+    class _CrashBroker(MockBroker):
+        def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            super().__init__(*args, **kwargs)
+            self._bar_count = 0
+
+        def fill_pending(self, bar):  # type: ignore[no-untyped-def]
+            # bar 2 の fill_pending に入る前に cash を負にする
+            if self._bar_count == 2:
+                self._cash = Decimal("-10000000")
+                self._invalidate_snapshot_cache()
+            self._bar_count += 1
+            return super().fill_pending(bar)
+
+    crash_broker = _CrashBroker(instrument_meta=usd_jpy_meta())
+
+    with capture_logs() as logs:
+        run_backtest(bars, strat, crash_broker, config)
+
+    finished = next(log for log in logs if log.get("event") == "backtest.finished")
+    assert "negative_equity_drop_open_count" in finished
+    # bar 2 で 1 件 drop された
+    assert finished["negative_equity_drop_open_count"] == 1

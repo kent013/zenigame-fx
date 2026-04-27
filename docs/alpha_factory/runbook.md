@@ -241,6 +241,51 @@ verdict は観測事実のみ。FORBIDDEN/NOT_FOUND は **現 live/account/envir
 | Exit 1 + `[fatal] OANDA 401` | `OANDA_API_TOKEN` を `.env` で再確認 |
 | 全件 OTHER (5xx / TransportError) | 時間を置いて再実行 |
 
+## OANDA 準拠の margin closeout 設計（既存実装の文書化、T056）
+
+zenigame-fx の `MockBroker` は OANDA v20 / OANDA Japan の強制ロスカット仕様に準拠する。
+本セクションは既存実装（`src/broker/mock.py::force_close_if_margin_call`）の挙動と、
+T056 で追加した多層防御（保有 0 + cash マイナスでの新規 entry 抑止）の設計を文書化する。
+
+### OANDA 仕様（参考: developer.oanda.com/rest-live-v20）
+
+- `marginCloseoutPercent ≥ 1.0`（= 維持率 100% 以下）で margin closeout 発動
+- 発動時は全保有 position を成行で順次強制決済
+- OANDA Japan は JFSA 規制下で同等仕様（個人顧客レバレッジ上限 25 倍 / 維持率 100%）
+
+### 本実装での対応（既存）
+
+| 項目 | 実装 |
+|------|------|
+| 閾値 | `MockBroker.__init__(maintenance_margin_level_pct=Decimal("100"))`（デフォルト 100%） |
+| 発動条件 | `margin_level_pct < maintenance_margin_level_pct`（**strict less-than**）。即ち維持率が 100% **未満** で発動。維持率がちょうど 100.0% の場合は発動しない（境界値）。OANDA 公式仕様の「100% 以下」とはわずかに異なるが、本 MockBroker では現行挙動を維持する |
+| 発動経路 | `force_close_if_margin_call`（mock.py 内）を `engine.run_backtest` で per-bar 呼び出し |
+| 発動時挙動 | `_close_all_internal(reason="margin_call")` で全 position close |
+| 発注価格 | 当該 bar の bid/ask close（成行相当） |
+
+### 多層防御の追加（T056）
+
+「保有 0 + cash マイナス」状態で新規 entry が継続して発注される構造的バグを防ぐ
+fail-closed gate を追加。OANDA の margin closeout 仕様（保有中 position に対する強制決済）
+とは独立した防衛線として設計した。
+
+- **L1**: `fill_pending` 冒頭で `pre_fill_equity` が非有限値（NaN / Infinity）または
+  非正値（≤ 0）の場合、open 系 pending（`open_long` / `open_short`）を drop する。
+  close 系（`close_position` / `close_all`）は通常実行（保有 close を妨げない conservative policy）。
+- **L2**: `_open_position` で `equity_at_entry` が非有限 / 非正値の場合に
+  `InsufficientEquityError`（`Exception` 直系）を raise。
+  `fill_pending` ループ内で個別捕捉して drop counter に加算しループ継続。
+  L1 を通り抜けた異常経路の最終防御。
+- **counter**: `MockBroker._negative_equity_drop_count` に L1 + L2 の drop 件数を累計。
+  `pop_negative_equity_drop_count()`（pop semantics）で取り出し、`backtest.finished` log の
+  `negative_equity_drop_open_count` field に記録される。
+
+### 別 TODO 候補（本 TODO スコープ外）
+
+- `available_margin >= required_margin` gate（過大 notional の entry reject、保有あり時の防御）
+- `maintenance_margin_level_pct` の config 化（現状 `MockBroker.__init__` のデフォルト値固定）
+- per-trade `trade_return.invalid_equity_at_entry` warning の抑制（適切な量に収まれば不要）
+
 ## SSOT 参照
 
 | 項目 | 参照キーパス（config/alpha_factory/default.yaml） |
