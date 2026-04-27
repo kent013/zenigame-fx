@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
 
+from src.alpha_factory.aux_loader import AlignedAuxBundle, AuxAlignmentCache, AuxBundle
 from src.alpha_factory.cross_pair import (
     CrossPairConfig,
     StageCRunCrossPairEvaluator,
@@ -146,6 +147,9 @@ class LaneEvalContext:
     cp_inputs: CrossPairLaneInputs | None = None
     preflight_underfilled: bool = False
     preflight_payload: PreflightPayload | None = None
+    # T057 Phase 2 Gate B: aux 生データ。各 stage で AlignedAuxBundle に展開して
+    # primitive_evaluator に注入する。Pool initargs 経由で worker に broadcast.
+    aux_bundle: AuxBundle | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.bars_a, tuple):
@@ -219,6 +223,47 @@ class GenomeStageResult:
 # ---------------------------------------------------------------------------
 
 
+# T057 Phase 2 Gate B: process-local aux alignment cache (key = LaneEvalContext id).
+# 同 ctx 内では bars_a/b/holdout の identity が stable なので id(bars) ベースで
+# 再利用可能。worker process が複数 ctx を扱う場合 (現状 lane 1 個前提) も問題なし。
+# Codex impl-review-round-1 [Suggestion]: 長寿命 worker でも明示クリア可能にする.
+_PROC_AUX_CACHE: dict[int, AuxAlignmentCache] = {}
+
+
+def _reset_proc_aux_cache() -> None:
+    """process-local aux alignment cache をクリアする (test 用 / 長寿命 worker 用)."""
+    _PROC_AUX_CACHE.clear()
+
+
+def _get_aligned_for_stage(
+    ctx: LaneEvalContext, bars: tuple[PriceBar, ...]
+) -> AlignedAuxBundle | None:
+    """ctx.aux_bundle が None でない場合に bars に align された bundle を返す.
+
+    process-local cache で同じ bars (identity 一致) には 1 回しか展開しない.
+    """
+    if ctx.aux_bundle is None:
+        return None
+    cache_key = id(ctx.aux_bundle)
+    cache = _PROC_AUX_CACHE.get(cache_key)
+    if cache is None:
+        cache = AuxAlignmentCache(ctx.aux_bundle)
+        _PROC_AUX_CACHE[cache_key] = cache
+    return cache.get(bars)
+
+
+def _evaluator_for_stage(
+    base: RegistryEvaluator,
+    ctx: LaneEvalContext,
+    bars: tuple[PriceBar, ...],
+) -> RegistryEvaluator:
+    """ctx.aux_bundle がある場合に bars に align された aux を注入した evaluator を返す."""
+    aligned = _get_aligned_for_stage(ctx, bars)
+    if aligned is None:
+        return base
+    return base.with_aux(**aligned.as_evaluator_kwargs())
+
+
 def evaluate_genome(
     genome: Genome,
     ctx: LaneEvalContext,
@@ -231,18 +276,22 @@ def evaluate_genome(
     副作用なし。``archive.collect_*`` / ``diagnostics.record_*`` は main
     process 側で行う。
 
+    T057 Phase 2: ``ctx.aux_bundle`` が non-None の場合、各 stage の bars に
+    align された AlignedAuxBundle を注入した evaluator で評価する.
+
     短絡条件:
         - Stage A fail → 早期 return
         - preflight_underfilled → 早期 return (main 側で偽 Stage B 生成)
         - Stage B fail → 早期 return
     """
+    ev_a = _evaluator_for_stage(primitive_evaluator, ctx, ctx.bars_a)
     try:
         a_result = evaluate_stage_a(
             genome,
             list(ctx.bars_a),
             ctx.meta,
             ctx.bt_cfg,
-            primitive_evaluator,
+            ev_a,
             stage_gate_cfg,
         )
     except Exception as exc:
@@ -265,13 +314,14 @@ def evaluate_genome(
             cross_pair=None,
         )
 
+    ev_b = _evaluator_for_stage(primitive_evaluator, ctx, ctx.bars_b)
     try:
         b_result = evaluate_stage_b(
             genome,
             list(ctx.bars_b),
             ctx.meta,
             ctx.bt_cfg,
-            primitive_evaluator,
+            ev_b,
             stage_gate_cfg,
         )
     except Exception as exc:
@@ -285,11 +335,12 @@ def evaluate_genome(
             cross_pair=None,
         )
 
+    ev_c = _evaluator_for_stage(primitive_evaluator, ctx, ctx.bars_holdout)
     cp_evaluator: StageCRunCrossPairEvaluator | None = None
     cp_inputs_dict: dict[str, Any] | None = None
     if ctx.cp_inputs is not None:
         cp_evaluator = StageCRunCrossPairEvaluator(
-            primitive_evaluator=primitive_evaluator,
+            primitive_evaluator=ev_c,
             cross_pair_config=cross_pair_cfg,
         )
         cp_inputs_dict = {
@@ -305,7 +356,7 @@ def evaluate_genome(
             list(ctx.bars_holdout),
             ctx.meta,
             ctx.bt_cfg,
-            primitive_evaluator,
+            ev_c,
             stage_gate_cfg,
             cross_pair_evaluator=cp_evaluator,
             cross_pair_inputs=cp_inputs_dict,

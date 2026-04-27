@@ -153,34 +153,72 @@ ga:
 
 ### 6. FRED 取得手順（macro_index_daily 補充）
 
-[FRED](terminology.md#fred) の日足マクロ指標（VIX / DXY / Treasury yields / breakeven）を `macro_index_daily` テーブルへ取り込む。primitive M5 / P7 等の前提データ。
+[FRED](terminology.md#fred) の日足マクロ指標（VIX / DXY / Treasury yields / breakeven / Gold / WTI / Copper / commodity / SP500）を `macro_index_daily` テーブルへ取り込む。primitive M5 / P7-P12 等の前提データ。
+
+#### T057 Phase 2 — aux データ pipeline
+
+T057 Phase 2 で aux データの contract 化と一括取得を整備した。**本番 RUN 前に `scripts/fetch_aux_data.sh` を必ず実行**:
+
+```bash
+# 既定: 2024-08-01 〜 2026-04-30 (Stage B 18ヶ月 history を含む)
+scripts/fetch_aux_data.sh
+
+# 期間指定
+scripts/fetch_aux_data.sh 2024-08-01 2026-04-30
+```
+
+wrapper は以下を順次実行:
+1. **FRED 10 series**: VIXCLS, DTWEXBGS, DGS10, DGS2, T10YIE, GOLDPMGBD228NLBM, DCOILWTICO, PCOPPUSDM, PALLFNFINDEXM, SP500
+2. **aux pair bars (M1)**: EUR_USD / USD_JPY (P5 cross-pair primitive 用)
+3. **economic events**: `data/raw/calendar/events.csv` を DB upsert
+
+run_ga.py 起動時に preflight check が走り、`hard_required` (VIXCLS / DTWEXBGS / EUR_USD_M1 / USD_JPY_M1) が不足していれば fail-closed で run を拒否する。dev / smoke test 用に `--allow-aux-missing` flag で override 可能。
+
+#### effective_from_utc 契約 (T057 Phase 2)
+
+`macro_index_daily.effective_from_utc` は **その値が利用可能になる UTC 時刻** を表す保守的タイムスタンプ:
+
+- daily 系列 (VIXCLS / DTWEXBGS / SP500 など): `observation_date + 24h`
+- 月次系列 (PCOPPUSDM / PALLFNFINDEXM): `observation_date + 35d` (改定遅延吸収)
+
+primitive 側は `bar.bar_time >= effective_from_utc` を満たす obs しか forward-fill しない。これにより look-ahead bias 漏洩を構造的に防ぐ。
+
+詳細: `devnotes/20260427-2234-aux-data-loader-phase2/` および `src/ingest/effective_from.py`.
+
+#### hard_required / soft_required 運用
+
+| 区分 | series / data | 不足時の挙動 |
+|------|--------------|--------------|
+| **HARD** | VIXCLS, DTWEXBGS (DXY), EUR_USD_M1, USD_JPY_M1 | preflight で fail-closed (override: `--allow-aux-missing`) |
+| **SOFT** | GOLDPMGBD228NLBM (Gold), DCOILWTICO (WTI), PCOPPUSDM (Copper), PALLFNFINDEXM (commodity), SP500 | WARN log のみ、該当 primitive (P7/P8/P9/P12) は safe default 経路で動作 |
+
+events (P10/M4) は **partial coverage** (手動 scaffold 33 件, FOMC/NFP/CPI/ECB/BoJ)。自動取得 (forex factory / OANDA Calendar API / FRED releases) は別 TODO。
 
 #### 前提
 
 - `.env` に `FRED_API_KEY` を設定（[FRED API key 発行](https://fred.stlouisfed.org/docs/api/api_key.html)）
 - DB コンテナ稼働: `docker start zenigame-fx-db-1`
-- `uv run alembic upgrade head` で migration 003 を適用
+- `uv run alembic upgrade head` で migration 004 を適用 (effective_from_utc + source 列追加)
 
 #### 通常運用（差分更新）
 
 ```bash
 TODAY=$(date '+%Y-%m-%d')
 YESTERDAY=$(date -v-1d '+%Y-%m-%d')  # macOS の場合
-uv run python scripts/fetch_fred.py --series VIXCLS,DTWEXBGS,DGS10,DGS2,T10YIE \
+uv run python scripts/fetch_fred.py \
   --from "$YESTERDAY" --to "$TODAY"
+# --series 省略時は DEFAULT_SERIES (10 件) が使われる
 ```
 
-UPSERT のため重複日付は安全。
+UPSERT のため重複日付は安全。effective_from_utc / source も同時に更新される。
 
-#### 初期化（3 年分一括）
+#### 初期化（一括）
 
 ```bash
-uv run python scripts/fetch_fred.py \
-  --series VIXCLS,DTWEXBGS,DGS10,DGS2,T10YIE \
-  --from 2023-04-23 --to 2026-04-21
+scripts/fetch_aux_data.sh 2024-08-01 2026-04-30
 ```
 
-5 シリーズ × 3 年で約 3,900 行（約 1 秒）。
+10 シリーズ × 約 1.7 年で 約 4,500 行 (FRED 部分は数秒、OANDA pair bars は数分)。
 
 #### 動作確認
 

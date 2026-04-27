@@ -257,6 +257,28 @@ def test_upsert_observations_emits_on_conflict_do_update() -> None:
     assert "ON CONFLICT" in compiled.upper()
 
 
+def test_upsert_observations_includes_effective_from_utc_and_source() -> None:
+    """T057 Phase 2 Gate B: upsert payload に effective_from_utc / source が含まれること."""
+    session = MagicMock(spec=Session)
+    rows = [_make_obs(date(2026, 4, 14), Decimal("16.42"))]
+
+    upsert_observations(session, rows)
+
+    stmt = session.execute.call_args.args[0]
+    compiled = str(
+        stmt.compile(
+            dialect=__import__(
+                "sqlalchemy.dialects.postgresql", fromlist=["dialect"]
+            ).dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    # 列名が UPDATE 句に含まれること
+    assert "effective_from_utc" in compiled
+    assert "source" in compiled
+    assert "policy_conservative" in compiled
+
+
 # ----- DB 統合テスト（testcontainers Postgres） -----
 
 

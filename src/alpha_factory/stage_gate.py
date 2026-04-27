@@ -149,6 +149,11 @@ class StageGateConfig:
     # 構造的に弾く。default 2 は WF 評価として最低限のサンプル数。
     wf_min_folds_required: int = 2
 
+    # T057 Phase 2: aux data 必須化 flag (default False で互換性維持、
+    # config / CLI で True に上書き可能)。True のとき preflight check で
+    # hard_required (VIXCLS, DTWEXBGS, EUR_USD_M1, USD_JPY_M1) 不足は fail-closed.
+    strict_aux_required: bool = False
+
     # Stage C
     stage_c_holdout_days: int = 60
     spread_stress_multiplier: float = 1.5
