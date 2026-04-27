@@ -153,11 +153,11 @@ class MockBroker:
             raise ValueError(f"max_spread_bps must be >= 0 when set: {max_spread_bps}")
         self._max_spread_bps = max_spread_bps
 
-    def drop_pending_open(self, reason: str = "session_close") -> int:
+    def drop_pending_open(self) -> int:
         """pending の open_long / open_short を drop して件数を返す。
 
-        Args:
-            reason: ログ用の理由文字列。
+        呼び出し元（engine.run_backtest）が return 値で件数を集計する設計。
+        broker 内では log を出さない（per-bar 呼び出しの hot path コスト削減）。
 
         Returns:
             drop 件数。
@@ -167,10 +167,7 @@ class MockBroker:
             (sig, lev) for (sig, lev) in self._pending
             if sig.kind not in ("open_long", "open_short")
         ]
-        dropped = before - len(self._pending)
-        if dropped:
-            logger.info("broker.drop_pending_open", reason=reason, n=dropped)
-        return dropped
+        return before - len(self._pending)
 
     def fill_pending(self, bar: PriceBar) -> list[Trade]:
         if bar.pair_name != self._meta.oanda_name:

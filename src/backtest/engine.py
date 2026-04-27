@@ -119,18 +119,20 @@ def run_backtest(
 
     equity_curve: list[tuple[datetime, Decimal]] = []
 
+    # ループ前に集計カウンタを初期化（per-bar log 削除に伴いサマリ集計に切り替え、T055）
+    session_close_drop_open_count: int = 0
+    session_close_drop_pending_count: int = 0
+    first_drop_open_bar_time: str | None = None
+
     for i, bar in enumerate(bars_list):
         session_closed_bar = bar.bar_time.hour in config.session_close_utc_hours
 
         # 0. session close bar なら pending の open 系シグナルを先頭で drop
         if session_closed_bar:
-            n_dropped = broker.drop_pending_open(reason="session_close.reject_pending_open")
+            n_dropped = broker.drop_pending_open()
             if n_dropped:
-                logger.info(
-                    "backtest.session_close.drop_pending",
-                    n_dropped=n_dropped,
-                    bar_time=bar.bar_time.isoformat(),
-                )
+                session_close_drop_pending_count += n_dropped
+                # logger 呼び出しなし（per-bar 完全削除、サマリで集計）
 
         # 1. pending fill（spread filter は broker.fill_pending 内部で適用）
         broker.fill_pending(bar)
@@ -156,11 +158,10 @@ def run_backtest(
         signals = strategy.on_bar(bar, snapshot)
         for signal in signals:
             if session_closed_bar and signal.kind in ("open_long", "open_short"):
-                logger.info(
-                    "backtest.session_close.drop_open_from_strategy",
-                    genome_signal=signal.kind,
-                    bar_time=bar.bar_time.isoformat(),
-                )
+                session_close_drop_open_count += 1
+                if first_drop_open_bar_time is None:
+                    first_drop_open_bar_time = bar.bar_time.isoformat()
+                # logger 呼び出しなし（per-bar 完全削除、サマリで集計）
                 continue
             broker.submit(signal, leverage=config.leverage)
 
@@ -183,5 +184,8 @@ def run_backtest(
         bars=len(bars_list),
         trades=len(broker.trades),
         final_equity=str(broker.snapshot().equity),
+        session_close_drop_open_count=session_close_drop_open_count,
+        session_close_drop_pending_count=session_close_drop_pending_count,
+        first_drop_open_bar_time=first_drop_open_bar_time,
     )
     return BacktestResult(config=config, trades=broker.trades, equity_curve=equity_curve)
