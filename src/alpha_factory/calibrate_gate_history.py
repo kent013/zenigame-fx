@@ -57,6 +57,16 @@ class HistoryRecord:
     # dict のまま JSONL に保存し、SSoT 矛盾を解消する。空 dict は「達成 (gap無し)」
     # を意味する。
     live_criteria_gap: dict[str, float]
+    # T054: cross-run contamination guard 用メタデータ (optional、後方互換)。
+    # 既存 record (これらが None) は state file load 時に schema_version 不一致で
+    # 適用 skip となる (fail-closed)。新規書き込みでは必ず set される。
+    schema_version: int | None = None
+    base_config_hash: str | None = None
+    full_config_hash: str | None = None
+    dataset_span: list[str] | None = None  # [start, end] の string 2-tuple
+    instrument: str | None = None
+    stage_gate_version: str | None = None
+    applied_from_run_id: str | None = None
 
 
 def append_record(record: HistoryRecord, path: Path = DEFAULT_HISTORY_PATH) -> None:

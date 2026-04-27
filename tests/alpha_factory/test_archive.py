@@ -166,13 +166,14 @@ def _make_archive() -> GenomeArchive:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_has_42_columns() -> None:
+def test_schema_has_43_columns() -> None:
     # T-sharpe Phase 1A: trade_sharpe_raw + sharpe_calc_version (28→30)
     # T035: n_fold_effective + positive_fold_ratio_effective + stage_b_reason_codes (30→33)
     # T043: mission_score (33→34)
     # T036: FSP 6 列 (34→40)
     # T044: trade_sharpe_stage_b + trade_sharpe_stage_c (40→42)
-    assert len(GENOMES_SCHEMA.names) == 42
+    # T054: stage_b_unavailable_reason_counts (42→43)
+    assert len(GENOMES_SCHEMA.names) == 43
     expected = {
         "run_id", "run_number", "generation", "individual_name",
         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
@@ -188,6 +189,8 @@ def test_schema_has_42_columns() -> None:
         # T035: Stage B 観察可能性
         "n_fold_effective", "positive_fold_ratio_effective",
         "stage_b_reason_codes",
+        # T054: Stage B fold unavailable reason 別カウント
+        "stage_b_unavailable_reason_counts",
         # T043: live_criteria 4 軸 soft 合算スコア
         "mission_score",
         # T036: Factor Shadow Plane (FSP) 6 列
@@ -818,6 +821,8 @@ def test_schema_nullable_attributes() -> None:
         # T035
         "n_fold_effective", "positive_fold_ratio_effective",
         "stage_b_reason_codes",
+        # T054: Stage B fold unavailable reason 別カウント (JSON string, nullable)
+        "stage_b_unavailable_reason_counts",
         # T043: Stage C 評価時のみ書き込まれるため nullable
         "mission_score",
         # T036: FSP 6 列 (post-RUN updater が書き込む、collect_stage_* では null)

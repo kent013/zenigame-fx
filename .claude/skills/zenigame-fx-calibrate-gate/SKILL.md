@@ -92,6 +92,21 @@ aggregation_mode の既定は `last_k_generations` (window=5)。
 - `calibrate.enabled=false` で全停止可能（緊急時の fallback）
 - LLM 判断による動的調整は別 TODO (本 skill は deterministic 専用)
 
+### T054: state file 経由の自動適用
+
+calibrate-gate は yaml 直接書き戻しに加え、`reports/calibrate-gate/history.jsonl`
+に cross-run contamination guard 用 metadata 付き record を書き込む:
+- `schema_version=1`, `base_config_hash`, `full_config_hash`,
+  `dataset_span`, `instrument`, `stage_gate_version`, `applied_from_run_id`
+
+run_ga.py 起動時、history の最新適用可能 record (decision in tighten/loosen,
+全 metadata 一致, value isfinite + range 内) から effective threshold を
+自動 override する。yaml 値を chore commit で reset しても、history 経由で
+最新の calibrate decision が継承される (cross-run 一貫性)。
+
+CLI override 優先順位 (高 → 低): `--stage-a-threshold X` > history > yaml。
+詳細: `docs/alpha_factory/stage-gates.md` § "T054: state file 経由の自動適用"。
+
 ## 関連
 
 - 概念設計: `docs/alpha_factory/concepts/calibrate-gate.md`

@@ -1538,3 +1538,126 @@ class TestT034NoExposureSentinel:
             min_exposure_trade_count=1,
         )
         assert cfg.min_exposure_trade_count == 1
+
+
+# ===========================================================================
+# T054: Stage B fold unavailable reason 排他的 enum + reason 別カウント
+# ===========================================================================
+
+
+class TestT054FoldUnavailableReason:
+    """T054: FoldUnavailableReason enum と reason 別カウントの不変条件テスト."""
+
+    def test_fold_unavailable_reason_enum_values(self) -> None:
+        """5 つの reason value が string で取り出せる (排他的 enum)."""
+        from src.alpha_factory.stage_gate import FoldUnavailableReason
+
+        assert FoldUnavailableReason.FOLD_EXCEPTION.value == "fold_exception"
+        assert FoldUnavailableReason.NO_TRADES.value == "no_trades"
+        assert (
+            FoldUnavailableReason.TRADE_COUNT_BELOW_MIN.value
+            == "trade_count_below_min"
+        )
+        assert FoldUnavailableReason.ZERO_VARIANCE.value == "zero_variance"
+        assert FoldUnavailableReason.OTHER.value == "other"
+
+    def test_unavailable_reason_counts_in_payload(self) -> None:
+        """payload に unavailable_reason_counts dict が含まれる."""
+        bars = _make_continuous_bars(20, bars_per_day=4)
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        stage_cfg = StageGateConfig(
+            wf_train_days=3,
+            wf_test_days=2,
+            wf_step_days=2,
+            wf_embargo_days=0,
+        )
+        res = evaluate_stage_b(
+            _one_clause_genome("g_t054_payload"),
+            bars,
+            usd_jpy_meta(),
+            _backtest_config(),
+            ev,
+            stage_cfg,
+        )
+        payload = _payload(res)
+        assert "unavailable_reason_counts" in payload
+        urc = payload["unavailable_reason_counts"]
+        assert isinstance(urc, dict)
+        # 5 つの reason value が key として揃っている
+        assert set(urc.keys()) == {
+            "fold_exception",
+            "no_trades",
+            "trade_count_below_min",
+            "zero_variance",
+            "other",
+        }
+
+    def test_reason_counts_sum_invariant(self) -> None:
+        """sum(reason_counts.values()) == n_fold_unavailable 不変条件."""
+        bars = _make_continuous_bars(20, bars_per_day=4)
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        stage_cfg = StageGateConfig(
+            wf_train_days=3,
+            wf_test_days=2,
+            wf_step_days=2,
+            wf_embargo_days=0,
+        )
+        res = evaluate_stage_b(
+            _one_clause_genome("g_t054_invariant"),
+            bars,
+            usd_jpy_meta(),
+            _backtest_config(),
+            ev,
+            stage_cfg,
+        )
+        payload = _payload(res)
+        urc = cast(dict[str, int], payload["unavailable_reason_counts"])
+        assert sum(urc.values()) == payload["n_fold_unavailable"]
+
+    def test_no_trades_reason_when_zero_signal(self) -> None:
+        """value=0 で trades が出ない fold は no_trades reason に分類される."""
+        bars = _make_continuous_bars(20, bars_per_day=4)
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        stage_cfg = StageGateConfig(
+            wf_train_days=3,
+            wf_test_days=2,
+            wf_step_days=2,
+            wf_embargo_days=0,
+            stage_b_fold_trade_count_min=10,
+        )
+        res = evaluate_stage_b(
+            _one_clause_genome("g_t054_no_trades"),
+            bars,
+            usd_jpy_meta(),
+            _backtest_config(),
+            ev,
+            stage_cfg,
+        )
+        payload = _payload(res)
+        urc = cast(dict[str, int], payload["unavailable_reason_counts"])
+        # value=0 → no entry → trade_count=0 → no_trades reason
+        assert urc["no_trades"] == payload["n_fold_unavailable"]
+        assert urc["trade_count_below_min"] == 0
+
+
+class TestT054StageBFoldTradeCountMin:
+    """T054: Stage B fold 専用 trade_count_min が Stage A と独立に動く."""
+
+    def test_default_value_is_ten(self) -> None:
+        """default は 10 (Lo 2002 SE 上限から逆算)."""
+        cfg = StageGateConfig()
+        assert cfg.stage_b_fold_trade_count_min == 10
+
+    def test_separated_from_stage_a_threshold(self) -> None:
+        """trade_count_min_for_sharpe (Stage A) と独立 field."""
+        cfg = StageGateConfig(
+            trade_count_min_for_sharpe=30,
+            stage_b_fold_trade_count_min=10,
+        )
+        assert cfg.trade_count_min_for_sharpe == 30
+        assert cfg.stage_b_fold_trade_count_min == 10
+
+    def test_can_override_via_config(self) -> None:
+        """Stage B fold-min を 5 に下げられる (経験式禁止だが既存値の override 自体は可能)."""
+        cfg = StageGateConfig(stage_b_fold_trade_count_min=5)
+        assert cfg.stage_b_fold_trade_count_min == 5

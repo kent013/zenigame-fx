@@ -94,6 +94,11 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
         pa.field("n_fold_effective", pa.int64(), nullable=True),
         pa.field("positive_fold_ratio_effective", pa.float64(), nullable=True),
         pa.field("stage_b_reason_codes", pa.string(), nullable=True),
+        # T054: Stage B fold unavailable の排他的 reason 別カウント。
+        # JSON 文字列として永続化 (FoldUnavailableReason value → count)。
+        # 不変条件: 全 reason の合計 == n_fold_unavailable。
+        # 既存 stage_b_reason_codes との後方互換: 追加のみ、既存値は維持。
+        pa.field("stage_b_unavailable_reason_counts", pa.string(), nullable=True),
         # T043: live_criteria 4 軸 soft 合算スコア (Stage C base 評価から計算)。
         # 観測指標として archive/report に記録。GA fitness や stage_c.passed には影響しない。
         # 詳細: docs/alpha_factory/mission-score.md
@@ -174,6 +179,8 @@ def _create_row_template() -> dict[str, Any]:
         "n_fold_effective": None,
         "positive_fold_ratio_effective": None,
         "stage_b_reason_codes": None,
+        # T054: Stage B fold unavailable reason 別カウント (JSON 文字列)
+        "stage_b_unavailable_reason_counts": None,
         # T043: mission_score (Stage C 評価時のみ書き込み、それ以外は None)
         "mission_score": None,
         # T036: FSP — post-RUN updater が一括書き戻し、template は null 初期化のみ
@@ -458,6 +465,15 @@ class GenomeArchive:
         # T035: reason_codes 永続化 (空タプルなら None、複数は ";" 区切り)
         rc = stage_result.reason_codes
         row["stage_b_reason_codes"] = ";".join(rc) if rc else None
+        # T054: 排他的 reason 別カウントを JSON 文字列で永続化
+        urc_obj = payload.get("unavailable_reason_counts")
+        if isinstance(urc_obj, Mapping) and urc_obj:
+            row["stage_b_unavailable_reason_counts"] = json.dumps(
+                {str(k): int(v) for k, v in urc_obj.items()},
+                sort_keys=True,
+            )
+        else:
+            row["stage_b_unavailable_reason_counts"] = None
         # T044: Stage B の is_full_sharpe を **trade_sharpe_stage_b 専用列** に
         # 書き込む。trade_sharpe_raw は Stage A 値で固定 (selection と整合)。
         # is_full_sharpe / is_full_total_pnl / is_full_trade_count は Stage B

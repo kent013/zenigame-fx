@@ -40,7 +40,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from sqlalchemy import select
@@ -48,6 +48,12 @@ from sqlalchemy import select
 from scripts.alpha_factory.get_latest_run_number import get_latest_run_number
 from src.alpha_factory._registry_bridge import build_random_gen_registry
 from src.alpha_factory.archive import GenomeArchive
+from src.alpha_factory.calibrate_gate_history import DEFAULT_HISTORY_PATH
+from src.alpha_factory.calibrate_state import (
+    compute_base_config_hash,
+    compute_full_config_hash,
+    load_calibrated_threshold,
+)
 from src.alpha_factory.config import (
     AlphaFactoryConfig,
     BacktestSectionConfig,
@@ -68,6 +74,7 @@ from src.alpha_factory.parallel_eval import (
     measure_peak_rss_mb,
 )
 from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
+from src.alpha_factory.stage_gate import STAGE_GATE_VERSION
 from src.alpha_factory.swim_lane import (
     GRADUATION_LANE_ID,
     GraduationLane,
@@ -292,6 +299,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=(
             "max_workers が available_memory ベースの推奨値を超えたら "
             "起動時 fail-fast (autopilot 等で OOM を未然防止)。"
+        ),
+    )
+    # T054: Stage A threshold CLI override (history より優先)
+    p.add_argument(
+        "--stage-a-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Stage A threshold を CLI で明示指定 (history.jsonl override より優先)。"
+            "未指定時は (1) history.jsonl の最新適用可能 record (2) config 値 の順で fallback。"
         ),
     )
     args = p.parse_args(argv)
@@ -1017,9 +1034,78 @@ def _check_memory_budget(max_workers: int, strict: bool) -> None:
             )
 
 
+def _resolve_stage_a_threshold(
+    cfg: AlphaFactoryConfig,
+    *,
+    cli_override: float | None,
+    history_path: Path,
+) -> tuple[float, Literal["config", "history", "cli"]]:
+    """T054: Stage A threshold の effective 値と source を確定する。
+
+    優先順位:
+        1. CLI override (--stage-a-threshold) があれば最優先 → source="cli"
+        2. history.jsonl の最新適用可能 record (cross-run guard 通過) → source="history"
+        3. config 値 (yaml load 値) → source="config"
+
+    cross-run contamination guard (load_calibrated_threshold) で
+    base_config_hash / dataset_span / instrument / stage_gate_version の
+    一致確認 + decision filter (tighten/loosen) を行う。
+    """
+    # 1. CLI override 優先
+    if cli_override is not None:
+        return float(cli_override), "cli"
+
+    # 2. history.jsonl から override 試行
+    base_hash = compute_base_config_hash(cfg)
+    dataset_span = (str(cfg.dataset.start), str(cfg.dataset.end))
+    calibrated = load_calibrated_threshold(
+        history_path=history_path,
+        base_config_hash=base_hash,
+        dataset_span=dataset_span,
+        instrument=cfg.dataset.instrument,
+        stage_gate_version=STAGE_GATE_VERSION,
+    )
+    if calibrated is not None:
+        return calibrated, "history"
+
+    # 3. config 値 fallback
+    return cfg.stage_gate.stage_a_threshold, "config"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     cfg = load_config(args.config, overrides=_args_to_overrides(args))
+
+    # T054: Stage A threshold の effective 値と source を確定し cfg に反映する。
+    # source 単一値 ("config" | "history" | "cli") を必ず確定 (詳細設計 §0b)。
+    repo_root = Path(__file__).resolve().parents[2]
+    history_path = repo_root / DEFAULT_HISTORY_PATH
+    effective_threshold, threshold_source = _resolve_stage_a_threshold(
+        cfg,
+        cli_override=args.stage_a_threshold,
+        history_path=history_path,
+    )
+    if effective_threshold != cfg.stage_gate.stage_a_threshold:
+        logger.info(
+            "stage_gate.threshold_override",
+            old=cfg.stage_gate.stage_a_threshold,
+            new=effective_threshold,
+            source=threshold_source,
+        )
+        # frozen dataclass なので replace で書き換え (cfg / cfg.stage_gate 両方 frozen)
+        cfg = replace(
+            cfg,
+            stage_gate=replace(
+                cfg.stage_gate, stage_a_threshold=effective_threshold
+            ),
+        )
+    # 必ず effective threshold + source を log 出力 (V0-B、source 単一値で確定)
+    logger.info(
+        "stage_gate.effective_threshold",
+        stage_a_threshold=cfg.stage_gate.stage_a_threshold,
+        source=threshold_source,
+        full_config_hash=compute_full_config_hash(cfg),
+    )
 
     if cfg.ga.fitness_metric != "sharpe":
         logger.warning(

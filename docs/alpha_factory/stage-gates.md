@@ -248,6 +248,31 @@ bounded quantile tracking with hysteresis (dead-band) + delta clamp。
 詳細: [concepts/calibrate-gate.md](concepts/calibrate-gate.md) /
 `devnotes/20260424-1759-port-calibrate-gate/`。
 
+### T054: state file 経由の自動適用 (cross-run contamination guard 付)
+
+`run_ga.py` 起動時、`reports/calibrate-gate/history.jsonl` の最新 record から
+effective threshold を自動適用する経路を追加 (T054):
+
+優先順位:
+1. CLI override (`--stage-a-threshold X`) があれば最優先 → `source="cli"`
+2. history.jsonl の最新適用可能 record → `source="history"`
+3. config 値 (yaml load 値) → `source="config"`
+
+cross-run contamination guard (`src/alpha_factory/calibrate_state.py`):
+- `schema_version == 1` (record format 互換)
+- `base_config_hash` (適応値除外) 一致 — `compute_base_config_hash` が `stage_a_threshold` を除く全 stage_gate / dataset 値で hash
+- `dataset_span` / `instrument` / `stage_gate_version` 一致
+- `decision in (tighten, loosen)` のみ適用 (`in_band` / `skip_sample_size` は除外)
+- `applied_at` が ISO 8601 形式
+- `new_threshold` が isfinite かつ [floor, ceiling] 内
+
+不一致時は **fail-closed** (None → config 値を使用)。
+
+startup 時に必ず log 出力:
+```
+stage_gate.effective_threshold stage_a_threshold=0.0778 source=history full_config_hash=...
+```
+
 ## 関連 TODO
 
 - T014 完了 — `src/alpha_factory/stage_gate.py` / `src/alpha_factory/walk_forward.py`
@@ -259,6 +284,48 @@ bounded quantile tracking with hysteresis (dead-band) + delta clamp。
   - cross-pair-evaluation-shadow (Stage C `CrossPairEvaluator` 実装)
   - cross-pair の hard gate 化 (Phase 4)
   - calibrate-gate v2: per-lane / LLM 判断 / distribution shift detector (別 TODO)
+
+## T054: Stage B fold-trade-count-min 独立化
+
+### 背景
+
+旧実装では Stage A も Stage B fold も `trade_count_min_for_sharpe = 30` を
+共有していたが、Stage A は 60-day window、Stage B fold は wf_test_days=10
+と評価期間が異なる。同じ 30 trade を 10-day fold に要求すると trade rate
+3 trades/day を満たす個体しか fold 評価可能にならず、
+`run_20260427_015804` では Stage A pass 全 3745 個体が
+`all_folds_unavailable` 一色で reject された。
+
+### 修正
+
+`StageGateConfig.stage_b_fold_trade_count_min` (default=10) を追加し、
+Stage B fold 評価では `trade_count_min_for_sharpe` の代わりにこれを使う。
+
+統計要件 (Lo 2002 SE 上限):
+- trade-level Sharpe SE ≈ √((1+0.5×SR²)/N)
+- 目標 SR ≈ stage_b_median_oos_sharpe_min=0.05、SE 上限 0.32 から逆算 N≈10
+- median + positive_fold_ratio の 2 段集約で fold 単位 noise を吸収
+
+**緩和ではなく「機能していた当時 (run_20260426_145502 median 167) の
+挙動を意図的に再現する設計判断」** (詳細設計 仮説 B-X 案 3、禁止事項 4 抵触なし)。
+
+### 排他的 reason 別 fold count
+
+`evaluate_stage_b` payload に `unavailable_reason_counts` を追加:
+
+```python
+class FoldUnavailableReason(StrEnum):
+    FOLD_EXCEPTION = "fold_exception"      # 例外発生 (最優先)
+    NO_TRADES = "no_trades"                # trade_count = 0
+    TRADE_COUNT_BELOW_MIN = "trade_count_below_min"  # 0 < tc < min
+    ZERO_VARIANCE = "zero_variance"        # tc >= min かつ std=0
+    OTHER = "other"                        # 上記以外 (要 follow-up)
+```
+
+不変条件 (test_stage_gate.py 検証): `sum(reason_counts.values()) == n_fold_unavailable`
+
+archive Parquet schema に `stage_b_unavailable_reason_counts` (JSON 文字列、
+既存 `stage_b_reason_codes` との後方互換は追加のみで保持) を追加。
 
 ## T035: Stage B 観察可能性ハード契約 (Metric Completeness Gate)
 

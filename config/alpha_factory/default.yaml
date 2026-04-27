@@ -131,6 +131,17 @@ stage_gate:
     dsr_min: 0.0                # monitor_only (Phase 4 で hard 化)
     # T044: pre-flight feasibility (LaneManager で max_folds < min なら全 lane 全個体 skip)
     wf_min_folds_required: 2
+    # T054: Stage B fold 専用 trade-level Sharpe sample-size guard。
+    # @why: Stage A は 60-day window で trade_count_min_for_sharpe=30 を要求するが、
+    # Stage B fold は wf_test_days=10 と短い期間で同じ 30 を要求すると
+    # 「trade rate ≥ 3 trades/day の個体しか fold 評価不能」になり、
+    # all_folds_unavailable 一色 (run_20260427_015804 で 3745/3745) を生む。
+    # Lo (2002) "Statistics of Sharpe Ratios" SE ≈ √((1+0.5×SR²)/N) の
+    # SE 上限 0.32 から逆算した N=10 を採用。median + positive_fold_ratio
+    # の 2 段集約で fold 単位 noise を吸収。
+    # **緩和ではなく「機能していた当時 (run_20260426_145502 median 167) の
+    # 挙動を意図的に再現する設計判断」** (詳細設計 仮説 B-X 案 3)。
+    fold_trade_count_min: 10
   stage_c:
     holdout_days: 60
     spread_stress_multiplier: 1.5
