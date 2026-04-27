@@ -55,6 +55,7 @@
 | T050 | selection-tie-drift: selection_score tie drift 調査 (HHI / 多様性測定) | ga-architecture | Medium | 2026-04-27 10:23 | - |
 | T051 | calibrate-monotone-tighten: calibrate-gate monotone tighten 観測 (Run 23-25 drift CLI 集計) | stage-gate | Low | 2026-04-27 10:26 | - |
 | T052 | ga-parallel-workers | ga-architecture | High | 2026-04-27 14:32 | - |
+| T053 | composite per-bar 計算の Numba JIT 化（dict → ndarray, fused kernel） | primitives | High | 2026-04-27 18:22 | - |
 
 ## Obsoleted
 
