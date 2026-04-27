@@ -166,12 +166,13 @@ def _make_archive() -> GenomeArchive:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_has_40_columns() -> None:
+def test_schema_has_42_columns() -> None:
     # T-sharpe Phase 1A: trade_sharpe_raw + sharpe_calc_version (28→30)
     # T035: n_fold_effective + positive_fold_ratio_effective + stage_b_reason_codes (30→33)
     # T043: mission_score (33→34)
     # T036: FSP 6 列 (34→40)
-    assert len(GENOMES_SCHEMA.names) == 40
+    # T044: trade_sharpe_stage_b + trade_sharpe_stage_c (40→42)
+    assert len(GENOMES_SCHEMA.names) == 42
     expected = {
         "run_id", "run_number", "generation", "individual_name",
         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
@@ -182,6 +183,8 @@ def test_schema_has_40_columns() -> None:
         "dsr", "ii_lite_pass", "graduated",
         # T-sharpe Phase 1A
         "trade_sharpe_raw", "sharpe_calc_version",
+        # T044: stage 別 sharpe (selection と切り離した観測列)
+        "trade_sharpe_stage_b", "trade_sharpe_stage_c",
         # T035: Stage B 観察可能性
         "n_fold_effective", "positive_fold_ratio_effective",
         "stage_b_reason_codes",
@@ -208,6 +211,8 @@ def test_template_default_values() -> None:
         "dsr", "ii_lite_pass",
         # T-sharpe Phase 1A: trade_sharpe_raw も nullable -> None
         "trade_sharpe_raw",
+        # T044: stage 別 sharpe
+        "trade_sharpe_stage_b", "trade_sharpe_stage_c",
         # T035
         "n_fold_effective", "positive_fold_ratio_effective",
         "stage_b_reason_codes",
@@ -325,20 +330,26 @@ def test_collect_stage_a_genome_json_roundtrip() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_collect_stage_b_updates_overrides_sharpe_pnl_tc() -> None:
+def test_collect_stage_b_records_to_separate_columns() -> None:
+    """T044: Stage B の is_full_sharpe は trade_sharpe_stage_b に書き込み、
+    trade_sharpe_raw (= Stage A 値) は不変、total_pnl / trade_count も Stage A
+    値を保持する (selection 基準と整合)。"""
     arc = _make_archive()
     g = _stub_genome()
     arc.collect_stage_a(g, "lane", 0, _stage_a_result(),
                          instrument="USD_JPY")
+    # Stage A 値を確認
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["trade_sharpe_raw"] == pytest.approx(0.3)  # Stage A 値
+    assert row["total_pnl"] == 0.0  # Stage A 期間では未集計 (新規行 default)
     arc.collect_stage_b(g, "lane", 0, _stage_b_result())
     row = arc._rows[("lane", 0, "g0_i0")]
     assert row["stage_b_pass"] is True
-    # T-sharpe Phase 1A: is_full_sharpe (Stage B IS monitor の trade_sharpe_raw) は
-    # archive の trade_sharpe_raw 列に上書きされる
-    assert row["trade_sharpe_raw"] == pytest.approx(0.5)
+    # T044: Stage A 値は不変
+    assert row["trade_sharpe_raw"] == pytest.approx(0.3)
     assert row["sharpe_calc_version"] == "v2_trade_level"
-    assert row["total_pnl"] == pytest.approx(12000.0)
-    assert row["trade_count"] == 200
+    # T044: Stage B IS sharpe は新列で観測可能
+    assert row["trade_sharpe_stage_b"] == pytest.approx(0.5)
 
 
 def test_collect_stage_b_fold_sign_ratio_from_oos_sharpes() -> None:
@@ -376,6 +387,36 @@ def test_collect_stage_c_max_drawdown_pct_x100() -> None:
     row = arc._rows[("lane", 0, "g0_i0")]
     assert row["max_drawdown_pct"] == pytest.approx(15.0)  # 0.15 * 100
     assert row["stage_c_pass"] is True
+
+
+def test_collect_stage_c_writes_sharpe_to_stage_c_column() -> None:
+    """T044: Stage C base sharpe は trade_sharpe_stage_c 列に書き込み、
+    trade_sharpe_raw (= Stage A 値) は不変。"""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(),
+                         instrument="USD_JPY")
+    arc.collect_stage_c(g, "lane", 0, _stage_c_result())
+    row = arc._rows[("lane", 0, "g0_i0")]
+    # Stage A 値が固定
+    assert row["trade_sharpe_raw"] == pytest.approx(0.3)
+    # Stage C base sharpe (= _stage_c_result default 1.2) が新列に
+    assert row["trade_sharpe_stage_c"] == pytest.approx(1.2)
+
+
+def test_collect_stage_b_then_c_sharpe_columns_independent() -> None:
+    """T044: Stage A → B → C の sharpe が 3 列で独立に保持される (selection
+    基準 trade_sharpe_raw = Stage A 値が一貫して保たれる)。"""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(),
+                         instrument="USD_JPY")
+    arc.collect_stage_b(g, "lane", 0, _stage_b_result())
+    arc.collect_stage_c(g, "lane", 0, _stage_c_result())
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["trade_sharpe_raw"] == pytest.approx(0.3)  # Stage A
+    assert row["trade_sharpe_stage_b"] == pytest.approx(0.5)  # Stage B
+    assert row["trade_sharpe_stage_c"] == pytest.approx(1.2)  # Stage C
 
 
 def test_collect_stage_c_ii_lite_pass_skipped() -> None:
@@ -514,8 +555,11 @@ def test_flush_load_roundtrip(tmp_path: Path) -> None:
     assert d["graduated"] is True
     assert d["max_drawdown_pct"] == pytest.approx(15.0)
     assert d["fold_sign_ratio"] == pytest.approx(1.0)
-    # T-sharpe Phase 1A: trade_sharpe_raw を Stage C で最終上書き
-    assert d["trade_sharpe_raw"] == pytest.approx(1.2)
+    # T044: trade_sharpe_raw は Stage A 値で固定 (上書きされない)
+    assert d["trade_sharpe_raw"] == pytest.approx(0.3)
+    # T044: stage 別 sharpe は別列で観測可能
+    assert d["trade_sharpe_stage_b"] == pytest.approx(0.5)
+    assert d["trade_sharpe_stage_c"] == pytest.approx(1.2)
     assert d["sharpe_calc_version"] == "v2_trade_level"
     assert d["total_pnl"] == pytest.approx(60000.0)
     assert d["trade_count"] == 80
@@ -560,9 +604,11 @@ def test_stage_regression_ignored_with_warn() -> None:
     with capture_logs() as logs:
         arc.collect_stage_a(g, "lane", 0, _stage_a_result(fitness_raw=99.0),
                              instrument="USD_JPY")
-    # T-sharpe Phase 1A: B 値が保持される (trade_sharpe_raw = 0.5 = is_full_sharpe)
+    # T044: trade_sharpe_raw は Stage A 値 (0.3) で確定、Stage A 再記録は ignored
     row = arc._rows[("lane", 0, "g0_i0")]
-    assert row["trade_sharpe_raw"] == pytest.approx(0.5)
+    assert row["trade_sharpe_raw"] == pytest.approx(0.3)
+    # T044: Stage B 値は別列で保持
+    assert row["trade_sharpe_stage_b"] == pytest.approx(0.5)
     # fitness_raw は 99.0 で上書きされていない
     assert row["fitness_raw"] != pytest.approx(99.0)
     assert any(
@@ -581,9 +627,13 @@ def test_stage_enrich_progresses() -> None:
     assert row["stage_a_pass"] is True
     assert row["stage_b_pass"] is True
     assert row["stage_c_pass"] is True
-    # T-sharpe Phase 1A: Stage C の trade_sharpe_raw / total_pnl / trade_count が最終上書き
-    assert row["trade_sharpe_raw"] == pytest.approx(1.2)
+    # T044: trade_sharpe_raw は Stage A 値で固定、stage 別 sharpe は別列
+    assert row["trade_sharpe_raw"] == pytest.approx(0.3)
+    assert row["trade_sharpe_stage_b"] == pytest.approx(0.5)
+    assert row["trade_sharpe_stage_c"] == pytest.approx(1.2)
     assert row["sharpe_calc_version"] == "v2_trade_level"
+    # Stage C の total_pnl / trade_count / max_drawdown_pct は live_criteria 評価対象
+    # のため Stage C 値で上書き継続 (T044 の scope は trade_sharpe_raw のみ)
     assert row["total_pnl"] == pytest.approx(60000.0)
     assert row["trade_count"] == 80
     # Stage B の fold_sign_ratio は保持
@@ -763,6 +813,8 @@ def test_schema_nullable_attributes() -> None:
         "dsr", "ii_lite_pass",
         # T-sharpe Phase 1A
         "trade_sharpe_raw", "sharpe_calc_version",
+        # T044: stage 別 sharpe (Stage B/C 評価時のみ書き込み)
+        "trade_sharpe_stage_b", "trade_sharpe_stage_c",
         # T035
         "n_fold_effective", "positive_fold_ratio_effective",
         "stage_b_reason_codes",
