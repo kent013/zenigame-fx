@@ -59,6 +59,7 @@
 | T054 | Stage A→B Pipeline Health Fix（calibrate 伝搬不全 + Stage B all_folds_unavailable） | stage-gate | Critical | 2026-04-27 20:26 | - |
 | T055 | backtest per-bar info ログの throttle（呼び出し完全削除 + 集計サマリ化） | infrastructure | High | 2026-04-27 21:03 | - |
 | T056 | negative equity 再発の根本修正（多層防御 + OANDA spec 文書化） | infrastructure | Critical | 2026-04-27 22:18 | - |
+| T057 | aux data loader Phase 2 — 実データ取得 + production wiring（FRED + aux_pair_bars + events + preflight + strict 化） | data-ingest | Critical | 2026-04-28 00:31 | - |
 
 ## Obsoleted
 
