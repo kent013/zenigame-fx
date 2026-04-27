@@ -178,6 +178,10 @@ def run_backtest(
     if broker.open_positions and bars_list:
         broker.close_all(bars_list[-1], reason="end_of_run")
 
+    # T056: negative equity 起因の open 系 drop 件数を pop して log 出力する
+    # （pop semantics: broker 再利用時の混線防止、呼び出しで 0 に reset される）
+    negative_equity_drop_open_count = broker.pop_negative_equity_drop_count()
+
     logger.info(
         "backtest.finished",
         instrument=config.instrument,
@@ -187,5 +191,6 @@ def run_backtest(
         session_close_drop_open_count=session_close_drop_open_count,
         session_close_drop_pending_count=session_close_drop_pending_count,
         first_drop_open_bar_time=first_drop_open_bar_time,
+        negative_equity_drop_open_count=negative_equity_drop_open_count,
     )
     return BacktestResult(config=config, trades=broker.trades, equity_curve=equity_curve)

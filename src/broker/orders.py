@@ -52,3 +52,17 @@ class PortfolioSnapshot:
     margin_used: Decimal
     margin_level_pct: Decimal | None  # 未保有時は None（無限大相当）
     positions: tuple[Position, ...] = field(default_factory=tuple)
+
+
+class InsufficientEquityError(Exception):
+    """`_open_position` で equity_at_entry が非有限値または非正値の場合に raise (T056)。
+
+    `fill_pending` のループ内で個別捕捉し、当該 signal を drop 扱いとして
+    counter に加算してループ継続する設計（fail-closed の「停止」ではなく「拒否」）。
+    L1 (`fill_pending` 冒頭 gate) を通り抜けた異常経路の最終防御として機能する。
+
+    `Exception` 直系で `ValueError` 派生にしない理由:
+    既存コードに `except ValueError` を広域に書いた catcher があると、本例外が
+    意図せず捕捉されて drop counter に加算されない silent な発生経路を生む。
+    domain 限定の `InsufficientEquityError` として明示捕捉する。
+    """
