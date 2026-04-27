@@ -105,6 +105,16 @@ zenigame 側のファイルは `.claude/settings.local.json` の `additionalDire
 
 ---
 
+## aux データ pipeline と preflight 運用 (T057 Phase 2)
+
+本番 RUN 前に **`scripts/fetch_aux_data.sh`** を実行して aux データを取得する。wrapper は FRED 10 series (VIXCLS, DTWEXBGS, DGS10, DGS2, T10YIE, GOLDPMGBD228NLBM, DCOILWTICO, PCOPPUSDM, PALLFNFINDEXM, SP500) + EUR_USD/USD_JPY M1 bars + economic events scaffold を一括取得する。
+
+`run_ga.py` 起動時に preflight check が走り、**HARD_REQUIRED** (VIXCLS / DTWEXBGS / EUR_USD_M1 / USD_JPY_M1) が不足すると fail-closed (override: `--allow-aux-missing`)。**SOFT_REQUIRED** (Gold / WTI / Copper / commodity / SP500) は WARN log のみで safe default 経路に落ちる。
+
+look-ahead bias 防止: `macro_index_daily.effective_from_utc` 契約 (daily +24h / 月次 +35d) で、`bar.bar_time >= effective_from_utc` を満たす obs しか forward-fill しない。詳細: `docs/alpha_factory/runbook.md` § 6 / `devnotes/20260427-2234-aux-data-loader-phase2/`。
+
+---
+
 ## calibrate-gate と state file 経由の自動適用 (T054)
 
 `scripts/alpha_factory/calibrate_gate.py` は Stage A threshold 決定時に以下を実行:
