@@ -58,7 +58,7 @@ ga:
   # cycle 7 (Codex 推奨): entry_count_min 1→50 で live_criteria.trade_count_min=50 と整合化。
   # 「制約不整合 (設計バグ)」の修正 — trade_count=30 等の下限割れ個体 selection 経路を遮断。
   feasibility:
-    entry_count_min: 1                          # cycle 11 diagnostic: 50→1 (Run-20 v2 状態) で T045/T046 撤回しつつ Stage B 復活可否を確認
+    entry_count_min: 50                         # cycle 12: 1→50 復元。Run-24 で trade_count median=30, n_fold_effective=0 → WF fold 内 trade<30 で all_folds_unavailable 確認。entry_count_min=50 で fold-level trade 数を確保
     apply_from_generation: 0                    # 0 世代目から制約適用
     enable_fallback_when_all_infeasible: true   # 全個体 infeasible で旧 4 要素にフォールバック
 
