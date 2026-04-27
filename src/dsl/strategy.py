@@ -12,7 +12,6 @@ primitive 評価は PrimitiveEvaluator Protocol 経由で行い、本 TODO で�
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import NamedTuple, Protocol
@@ -21,7 +20,11 @@ import numpy as np
 
 from src.broker.orders import OrderSignal, PortfolioSnapshot
 from src.domain.price import PriceBar
-from src.dsl.composite import compute_clause_score, compute_composite
+from src.dsl.composite import (
+    compute_clause_score,
+    compute_composite,
+    compute_composite_at_bar_jit,
+)
 from src.dsl.genome import Genome, SignalConfig
 
 # SignalCacheKey: (primitive_id, sorted params tuple)
@@ -78,6 +81,23 @@ class PreparedSignals(NamedTuple):
         ...,
     ]
     genome: Genome
+
+    # === T053: Numba JIT kernel 用 flat ndarray 群 ===
+    # devnotes/20260427-1723-composite-numba-jit/detailed-design.md 施策 3。
+    # arrays / clauses は維持しつつ並行で flat 表現を持つことで:
+    #   - prepared path: kernel に直接渡せる contiguous ndarray
+    #   - unprepared path: 既存 dict / tuple 表現がそのまま使える
+    # の両立を実現する。同データを 2 重保持するが clause 当たり数十 B 程度の
+    # offsets / weights + unique_signal_matrix のみ追加 (~9.4 MB / Stage A
+    # genome 想定、24GB × 6worker 制約に対し許容内)。
+    clause_weights: np.ndarray  # float64[n_clauses]
+    dir_weights_flat: np.ndarray  # float64[total_dir_occurrences]
+    dir_offsets: np.ndarray  # int64[n_clauses+1] CSR 形式
+    dir_signal_idx: np.ndarray  # int64[total_dir_occurrences] - unique_signal_matrix 行 index
+    gate_offsets: np.ndarray  # int64[n_clauses+1] CSR 形式
+    gate_signal_idx: np.ndarray  # int64[total_gate_occurrences]
+    unique_signal_matrix: np.ndarray  # float64[n_unique_signals, n_bars]
+    clause_score_buffer: np.ndarray  # float64[n_clauses] - kernel out, per-bar overwrite
 
 
 class PrimitiveEvaluator(Protocol):
@@ -223,6 +243,17 @@ class DslStrategy:
         if not hasattr(self._evaluator, "evaluate_all_bars"):
             return
 
+        # T053 Round 1 Critical 1: clauses 空の ValueError 契約を prepared
+        # path でも維持する (kernel 側は per-bar 検証しないため、ここで
+        # fail-fast。unprepared path は compute_composite() が per-bar に
+        # raise する既存挙動)。
+        if not self._genome.clauses:
+            raise ValueError(
+                "Genome.clauses must not be empty (compute_composite contract)"
+            )
+
+        n_bars = len(bars)
+
         arrays: dict[SignalCacheKey, np.ndarray] = {}
         clause_entries: list[
             tuple[
@@ -238,22 +269,91 @@ class DslStrategy:
             for sig in clause.directional:
                 key = _signal_cache_key(sig)
                 if key not in arrays:
-                    arrays[key] = self._evaluator.evaluate_all_bars(bars, sig)
+                    # T053 Round 1 Critical 3: 配列長不一致を fail-fast。
+                    # Round 2 Warning: list / Series も np.asarray で正規化
+                    # してから shape 検証。
+                    arr = np.asarray(
+                        self._evaluator.evaluate_all_bars(bars, sig),
+                        dtype=np.float64,
+                    )
+                    if arr.shape != (n_bars,):
+                        raise ValueError(
+                            f"evaluate_all_bars returned shape {arr.shape}, "
+                            f"expected ({n_bars},) for signal {sig.name}"
+                        )
+                    arrays[key] = arr
                 dir_entries.append((sig.name, arrays[key]))
 
             gate_entries: list[tuple[str, np.ndarray]] = []
             for sig in clause.local_gate:
                 key = _signal_cache_key(sig)
                 if key not in arrays:
-                    arrays[key] = self._evaluator.evaluate_all_bars(bars, sig)
+                    arr = np.asarray(
+                        self._evaluator.evaluate_all_bars(bars, sig),
+                        dtype=np.float64,
+                    )
+                    if arr.shape != (n_bars,):
+                        raise ValueError(
+                            f"evaluate_all_bars returned shape {arr.shape}, "
+                            f"expected ({n_bars},) for signal {sig.name}"
+                        )
+                    arrays[key] = arr
                 gate_entries.append((sig.name, arrays[key]))
 
             clause_entries.append((tuple(dir_entries), tuple(gate_entries)))
+
+        # === T053: flat ndarray 構築 (Numba kernel 用) ===
+        n_clauses = len(self._genome.clauses)
+
+        # unique signal matrix: arrays dict を行スタック。
+        # 順序を deterministic にするため key 順でソート。
+        unique_keys = sorted(arrays.keys())
+        key_to_row = {k: i for i, k in enumerate(unique_keys)}
+        n_unique = len(unique_keys)
+        unique_signal_matrix = np.empty((n_unique, n_bars), dtype=np.float64)
+        for k, row_idx in key_to_row.items():
+            # arrays[k] は既に float64 + shape (n_bars,) (上で正規化済み)。
+            # 念のため明示変換 (kernel との dtype 整合担保)。
+            unique_signal_matrix[row_idx, :] = arrays[k]
+
+        clause_weights = np.array(
+            [c.weight for c in self._genome.clauses], dtype=np.float64
+        )
+
+        dir_offsets_list: list[int] = [0]
+        dir_weights_list: list[float] = []
+        dir_signal_idx_list: list[int] = []
+        gate_offsets_list: list[int] = [0]
+        gate_signal_idx_list: list[int] = []
+
+        for clause in self._genome.clauses:
+            for sig in clause.directional:
+                dir_weights_list.append(sig.weight)
+                dir_signal_idx_list.append(key_to_row[_signal_cache_key(sig)])
+            dir_offsets_list.append(len(dir_weights_list))
+            for sig in clause.local_gate:
+                gate_signal_idx_list.append(key_to_row[_signal_cache_key(sig)])
+            gate_offsets_list.append(len(gate_signal_idx_list))
+
+        dir_weights_flat = np.array(dir_weights_list, dtype=np.float64)
+        dir_offsets = np.array(dir_offsets_list, dtype=np.int64)
+        dir_signal_idx = np.array(dir_signal_idx_list, dtype=np.int64)
+        gate_offsets = np.array(gate_offsets_list, dtype=np.int64)
+        gate_signal_idx = np.array(gate_signal_idx_list, dtype=np.int64)
+        clause_score_buffer = np.empty(n_clauses, dtype=np.float64)
 
         self._prepared = PreparedSignals(
             arrays=arrays,
             clauses=tuple(clause_entries),
             genome=self._genome,  # identity 比較用 (O(1))
+            clause_weights=clause_weights,
+            dir_weights_flat=dir_weights_flat,
+            dir_offsets=dir_offsets,
+            dir_signal_idx=dir_signal_idx,
+            gate_offsets=gate_offsets,
+            gate_signal_idx=gate_signal_idx,
+            unique_signal_matrix=unique_signal_matrix,
+            clause_score_buffer=clause_score_buffer,
         )
 
     def on_bar(
@@ -282,23 +382,35 @@ class DslStrategy:
                 return []
             idx = len(self._bars) - 1
 
-        # 各 clause の primitive 値を評価
-        values_per_clause: list[dict[str, float]] = []
+        # T053: prepared path は Numba JIT fused kernel に集約。
+        # unprepared path (live feed / paper trading) は既存挙動を維持。
         if prepared is not None:
-            # fast path: flat list iteration (Cycle 2 / T029)
-            for dir_entries, gate_entries in prepared.clauses:
-                vals: dict[str, float] = {}
-                for name, arr in dir_entries:
-                    v = arr[idx] if 0 <= idx < len(arr) else 0.0
-                    vals[name] = 0.0 if not math.isfinite(v) else float(v)
-                for name, arr in gate_entries:
-                    v = arr[idx] if 0 <= idx < len(arr) else 0.0
-                    vals[name] = 0.0 if not math.isfinite(v) else float(v)
-                values_per_clause.append(vals)
+            # fast path: Numba njit fused kernel (composite + per-clause score
+            # を 1 関数内で同時計算、dict 構築 / hashing / 二重 compute_clause_score
+            # 呼び出しを排除)。
+            composite = compute_composite_at_bar_jit(
+                idx,
+                prepared.clause_weights,
+                prepared.dir_weights_flat,
+                prepared.dir_offsets,
+                prepared.dir_signal_idx,
+                prepared.gate_offsets,
+                prepared.gate_signal_idx,
+                prepared.unique_signal_matrix,
+                prepared.clause_score_buffer,
+            )
+            # T037: per-clause score buffer から exact `!= 0.0` で集計
+            # (kernel が毎 bar 全 clause を上書きする契約)。
+            buf = prepared.clause_score_buffer
+            for ci in range(buf.shape[0]):
+                if buf[ci] != 0.0:
+                    self._active_clause_indices.add(ci)
         else:
-            # unprepared path (live feed / paper trading)
+            # unprepared path: 既存実装 (live feed / paper trading)。
+            # Numba 化のリスクを後段に隔離するため pure Python のまま維持。
+            values_per_clause: list[dict[str, float]] = []
             for clause in self._genome.clauses:
-                vals = {}
+                vals: dict[str, float] = {}
                 for sig in clause.directional:
                     vals[sig.name] = self._evaluator.evaluate(
                         self._bars, idx, sig
@@ -308,20 +420,18 @@ class DslStrategy:
                         self._bars, idx, sig
                     )
                 values_per_clause.append(vals)
+            # T037: composite + active_clause を pure Python で計算。
+            # 同 clause について compute_clause_score を 2 回計算するが
+            # clause 数は 1-3 で重い処理ではない (既存挙動踏襲)。
+            composite = compute_composite(
+                self._genome.clauses, values_per_clause
+            )
+            for ci, (clause, vals) in enumerate(
+                zip(self._genome.clauses, values_per_clause, strict=True)
+            ):
+                if compute_clause_score(clause, vals) != 0.0:
+                    self._active_clause_indices.add(ci)
 
-        # T037: composite の数値・例外契約は完全に compute_composite() に
-        # 委譲し (clauses 空 / 長さ不一致は ValueError として伝搬)、それとは
-        # 独立に per-clause score を別途 compute_clause_score で取得して
-        # active_clause_indices に集計する (observability only、composite 計算
-        # 結果には一切影響しない)。同 clause について compute_clause_score を
-        # 2 回計算するが clause 数は 1-3 で重い処理ではない (Codex round-1
-        # [Critical] 反映)。
-        composite = compute_composite(self._genome.clauses, values_per_clause)
-        for ci, (clause, vals) in enumerate(
-            zip(self._genome.clauses, values_per_clause, strict=True)
-        ):
-            if compute_clause_score(clause, vals) != 0.0:
-                self._active_clause_indices.add(ci)
         pos_cfg = self._genome.position
 
         # 保有あり: exit 判定のみ（無保有のみ entry を試みる = ドテン禁止）

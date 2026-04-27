@@ -20,6 +20,7 @@ dependencies = [
     "pyarrow>=24.0.0",
     "ruamel-yaml>=0.19.1",
     "psutil>=5.9",
+    "numba>=0.61",
 ]
 
 [dependency-groups]
