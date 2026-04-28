@@ -33,7 +33,7 @@ SERIES_POLICY_CONSERVATIVE: Final[dict[str, dict[str, int]]] = {
     "DGS10":            {"lag_hours": 24},
     "DGS2":             {"lag_hours": 24},
     "T10YIE":           {"lag_hours": 24},
-    "GOLDPMGBD228NLBM": {"lag_hours": 24},
+    "GC_F_YAHOO":       {"lag_hours": 24},   # Yahoo Finance Gold Futures (FRED LBMA Gold 廃止 後継)
     "DCOILWTICO":       {"lag_hours": 24},
     "PCOPPUSDM":        {"lag_hours": 24 * 35},
     "PALLFNFINDEXM":    {"lag_hours": 24 * 35},

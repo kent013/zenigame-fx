@@ -80,7 +80,9 @@ DEFAULT_CALENDAR_PATH: Final[Path] = Path("data/raw/calendar/events.csv")
 SERIES_ID_TO_AUX_KEY: Final[dict[str, str]] = {
     "VIXCLS": "macro.vix",
     "DTWEXBGS": "macro.dxy",
-    "GOLDPMGBD228NLBM": "macro.gold",
+    # GOLDPMGBD228NLBM (LBMA London PM fix) は FRED で discontinued (2024-)。
+    # Yahoo Finance GC=F (Gold Futures, daily) に切替。fetch は yfinance 経由 (scripts/fetch_gold_daily.py)。
+    "GC_F_YAHOO": "macro.gold",
     "DCOILWTICO": "macro.wti",
     "PCOPPUSDM": "macro.copper",
     "PALLFNFINDEXM": "macro.commodity_index",

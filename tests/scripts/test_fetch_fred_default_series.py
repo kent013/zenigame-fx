@@ -15,9 +15,12 @@ def test_default_series_includes_existing_baseline() -> None:
 
 
 def test_default_series_includes_phase2_additions() -> None:
-    """T057 Phase 2 で追加された 5 series が含まれること."""
+    """T057 Phase 2 で追加された 4 series が含まれること.
+
+    GOLDPMGBD228NLBM は FRED で discontinued (2024-) のため除外。
+    後継は Yahoo Finance GC=F (scripts/fetch_gold_daily.py 経由)。
+    """
     expected_new = {
-        "GOLDPMGBD228NLBM",  # P12 Gold
         "DCOILWTICO",        # P9 WTI
         "PCOPPUSDM",         # P8 Copper
         "PALLFNFINDEXM",     # P8 commodity index
@@ -26,9 +29,14 @@ def test_default_series_includes_phase2_additions() -> None:
     assert expected_new.issubset(set(DEFAULT_SERIES))
 
 
-def test_default_series_count_is_ten() -> None:
-    """総数 10 であること (拡張漏れ早期検出)."""
-    assert len(DEFAULT_SERIES) == 10
+def test_default_series_excludes_discontinued_gold() -> None:
+    """FRED で discontinued された GOLDPMGBD228NLBM は含まれないこと."""
+    assert "GOLDPMGBD228NLBM" not in set(DEFAULT_SERIES)
+
+
+def test_default_series_count_is_nine() -> None:
+    """総数 9 であること (FRED 廃止 GOLD を除外したため拡張漏れ早期検出)."""
+    assert len(DEFAULT_SERIES) == 9
 
 
 def test_default_series_no_duplicates() -> None:

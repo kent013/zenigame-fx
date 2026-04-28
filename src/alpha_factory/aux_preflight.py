@@ -38,7 +38,7 @@ HARD_REQUIRED_AUX: Final[dict[str, str]] = {
 HARD_REQUIRED_PAIRS: Final[tuple[str, ...]] = ("EUR_USD", "USD_JPY")
 
 SOFT_REQUIRED_AUX: Final[dict[str, str]] = {
-    "GOLDPMGBD228NLBM": "macro.gold",
+    "GC_F_YAHOO": "macro.gold",       # FRED LBMA Gold 廃止 → Yahoo Finance GC=F に切替
     "DCOILWTICO": "macro.wti",
     "PCOPPUSDM": "macro.copper",
     "PALLFNFINDEXM": "macro.commodity_index",

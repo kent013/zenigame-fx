@@ -25,7 +25,8 @@ DEFAULT_SERIES = (
     "DGS10",
     "DGS2",
     "T10YIE",
-    "GOLDPMGBD228NLBM",
+    # GOLDPMGBD228NLBM は FRED で discontinued (2024-)。
+    # 後継は Yahoo Finance GC=F (scripts/fetch_gold_daily.py 経由で MacroIndexDaily 注入)
     "DCOILWTICO",
     "PCOPPUSDM",
     "PALLFNFINDEXM",

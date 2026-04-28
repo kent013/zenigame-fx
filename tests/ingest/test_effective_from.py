@@ -64,7 +64,7 @@ class TestEffectiveFromSource:
         ("DTWEXBGS", date(2026, 1, 1), 24),
         ("PCOPPUSDM", date(2026, 1, 1), 24 * 35),
         ("PALLFNFINDEXM", date(2026, 1, 1), 24 * 35),
-        ("GOLDPMGBD228NLBM", date(2026, 1, 1), 24),
+        ("GC_F_YAHOO", date(2026, 1, 1), 24),  # FRED LBMA Gold 廃止 → Yahoo Finance GC=F
         ("DCOILWTICO", date(2026, 1, 1), 24),
         ("SP500", date(2026, 1, 1), 24),
     ],
