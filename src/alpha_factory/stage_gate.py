@@ -564,6 +564,8 @@ def evaluate_stage_b(
     backtest_config: BacktestConfig,
     primitive_evaluator: PrimitiveEvaluator,
     stage_config: StageGateConfig,
+    *,
+    aux_bundle: object | None = None,
 ) -> StageResult:
     """Stage B — Walk-Forward OOS gate + IS monitor。
 
@@ -627,11 +629,27 @@ def evaluate_stage_b(
     # engine の run_backtest は BacktestConfig.start/end を参照しないため
     # backtest_config をそのまま流用する (詳細設計 §3.2 参照)
     fold_min_trade_count = stage_config.stage_b_fold_trade_count_min
+    # T057 follow-up: aux_bundle が渡された場合、各 fold の test_bars 長に
+    # align し直した evaluator を作る (per-fold aux alignment)。
+    # T057 Phase 2 で「per-stage alignment」は実装したが「Stage B fold
+    # 単位の alignment」が抜けており、aux_series length が Stage B 全体長
+    # (例: 183403) で固定されたまま fold (例: 11646 bars) に渡されて
+    # `_check_aux_series_length` で MISALIGNMENT raise していた。
+    _aux_supports_with_aux = aux_bundle is not None and hasattr(
+        primitive_evaluator, "with_aux"
+    )
     for i, (_train_bars, test_bars) in enumerate(folds):
         fold_sharpe: float | None = None
         fold_reason: FoldUnavailableReason | None = None
         try:
-            strategy = DslStrategy(genome, primitive_evaluator)
+            if _aux_supports_with_aux:
+                aligned_for_fold = aux_bundle.align_to(test_bars)  # type: ignore[union-attr]
+                evaluator_for_fold = primitive_evaluator.with_aux(  # type: ignore[attr-defined]
+                    **aligned_for_fold.as_evaluator_kwargs()
+                )
+            else:
+                evaluator_for_fold = primitive_evaluator
+            strategy = DslStrategy(genome, evaluator_for_fold)
             broker = MockBroker(instrument_meta=meta)
             res = run_backtest(test_bars, strategy, broker, backtest_config)
             # T054: Stage B fold 専用 trade_count_min を適用 (Stage A の

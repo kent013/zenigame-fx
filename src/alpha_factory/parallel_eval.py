@@ -323,6 +323,9 @@ def evaluate_genome(
             ctx.bt_cfg,
             ev_b,
             stage_gate_cfg,
+            # T057 follow-up: Stage B fold ごとに aux を再 align するため
+            # raw AuxBundle を渡す (None なら従来通り primitive_evaluator のまま使う)
+            aux_bundle=ctx.aux_bundle,
         )
     except Exception as exc:
         return _to_error_result(genome.name, "B", exc, stage_a=a_result)
