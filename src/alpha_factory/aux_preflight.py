@@ -89,16 +89,41 @@ class PreflightResult:
         return not self.hard_missing
 
 
+def _expected_obs_count(
+    period: tuple[datetime, datetime], frequency: str
+) -> int:
+    """period 内の期待 obs 数を頻度別に計算 (coverage 分母).
+
+    - "daily_business": 営業日 (週 5、祝日は無視で簡易計算: calendar days × 5/7)
+    - "monthly":        期間内の月数 (period_days / 30 切り上げ)
+    - その他:           calendar days (fallback、過去互換)
+    """
+    period_days = max(1, int((period[1] - period[0]).total_seconds() // 86400))
+    if frequency == "daily_business":
+        # 簡易: 営業日 ≈ 5/7 (祝日無視)。実精度は ±数日で coverage 判定には十分.
+        return max(1, round(period_days * 5 / 7))
+    if frequency == "monthly":
+        # 期間内の月数 (切り上げで偏りを抑える: 一部月でも 1 と数える)
+        return max(1, (period_days + 29) // 30)
+    return period_days
+
+
 def _series_finite_coverage_pct(
     db_session: Session,
     series_id: str,
     period: tuple[datetime, datetime],
 ) -> float:
-    """series の period 内で「value が non-NULL の日 / 期間日数」を 0-100 で返す.
+    """series の period 内で「value が non-NULL の obs 数 / 期待 obs 数」を 0-100 で返す.
+
+    期待 obs 数は系列頻度 (SERIES_FREQUENCY) に基づく:
+    - daily_business: 営業日数 ≈ calendar_days × 5/7
+    - monthly:        期間内月数
 
     Codex impl-review-round-1 [Warning] 反映: 全件 ORM ロード回避し DB 側 COUNT.
     """
-    period_days = max(1, int((period[1] - period[0]).total_seconds() // 86400))
+    from src.ingest.effective_from import get_series_frequency
+
+    expected = _expected_obs_count(period, get_series_frequency(series_id))
     finite = db_session.execute(
         select(func.count())
         .select_from(MacroIndexDaily)
@@ -107,7 +132,7 @@ def _series_finite_coverage_pct(
         .where(MacroIndexDaily.date <= period[1].date())
         .where(MacroIndexDaily.value.is_not(None))
     ).scalar_one()
-    return min(100.0, 100.0 * float(finite) / period_days)
+    return min(100.0, 100.0 * float(finite) / expected)
 
 
 def _series_latest_effective_from(

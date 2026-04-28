@@ -41,6 +41,29 @@ SERIES_POLICY_CONSERVATIVE: Final[dict[str, dict[str, int]]] = {
 }
 
 
+# series 別の更新頻度. coverage 計算で期待 obs 数の分母として使う.
+# - "daily_business": 取引日のみ更新 (FRED rates / CME futures / Yahoo Finance equities)
+# - "monthly":        月次更新 (FRED 月次系列)
+# - 既定は "daily_business" (登録外 series).
+SERIES_FREQUENCY: Final[dict[str, str]] = {
+    "VIXCLS":           "daily_business",
+    "DTWEXBGS":         "daily_business",
+    "DGS10":            "daily_business",
+    "DGS2":             "daily_business",
+    "T10YIE":           "daily_business",
+    "GC_F_YAHOO":       "daily_business",
+    "DCOILWTICO":       "daily_business",
+    "PCOPPUSDM":        "monthly",
+    "PALLFNFINDEXM":    "monthly",
+    "SP500":            "daily_business",
+}
+
+
+def get_series_frequency(series_id: str) -> str:
+    """series の更新頻度 ("daily_business" or "monthly") を返す. 既定は "daily_business"."""
+    return SERIES_FREQUENCY.get(series_id, "daily_business")
+
+
 _DEFAULT_LAG_HOURS: Final[int] = 24
 
 
