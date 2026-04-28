@@ -196,6 +196,16 @@ def preflight_check_aux_data(
     latest_eff: dict[str, datetime | None] = {}
     safety_lag_days = max_policy_lag_days() + 7
 
+    # 末端 freshness の期待値は「現在より未来は要求しない」: extended_end が
+    # holdout 期間込みで未来になるケース (実 dataset.end 以降の holdout を
+    # 評価する設計) で、まだ存在しないデータの freshness を要求しないため
+    # `min(extended_end, now)` で clip する。
+    # look-ahead bias とは独立 (preflight は backtest 前のデータ完備判定で、
+    # backtest 中の look-ahead 防止は align_to() の effective_from_utc gate
+    # で別途実装済)。
+    now_utc = datetime.now(UTC)
+    freshness_target = min(extended_end, now_utc) - timedelta(days=safety_lag_days)
+
     def _check_series(series: str) -> bool:
         cov = _series_finite_coverage_pct(db_session, series, extended_period)
         coverage[series] = cov
@@ -205,20 +215,19 @@ def preflight_check_aux_data(
             return False
         # 両端 freshness check (V13):
         # latest_effective_from >= extended_start
-        # かつ latest_effective_from >= extended_end - safety_lag (近日まで取得済か)
+        # かつ latest_effective_from >= freshness_target
+        # (= min(extended_end, now) - safety_lag, 現在より未来は要求しない)
         if eff is None:
             return False
         if eff < extended_start:
             return False
-        if eff < extended_end - timedelta(days=safety_lag_days):
+        if eff < freshness_target:
             # 末端 freshness 不足: log だけ出して FAIL とする
             logger.warning(
                 "preflight.series_stale",
                 series=series,
                 latest_effective_from=eff.isoformat(),
-                expected_at_least=(
-                    extended_end - timedelta(days=safety_lag_days)
-                ).isoformat(),
+                expected_at_least=freshness_target.isoformat(),
             )
             return False
         return True

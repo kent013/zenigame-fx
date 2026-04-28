@@ -273,6 +273,66 @@ class TestPreflightCheckAuxData:
         assert "VIXCLS" in result.hard_missing
 
 
+    def test_freshness_target_clipped_at_now_when_extended_end_is_future(
+        self, sqlite_session, monkeypatch
+    ) -> None:
+        """extended_end が wall-clock now より未来でも、未来データを要求しない.
+
+        bug fix: holdout 期間込みの extended_end が現在より未来になるケースで、
+        旧実装は `extended_end - safety_lag` を期待値としたため、まだ存在しない
+        データの freshness を要求して必ず fail していた。
+        修正後は `min(extended_end, now) - safety_lag` で clip し、現在時刻まで
+        遡った期待値で判定する。
+        """
+        # period: 2026-01-01 〜 2026-04-01
+        # extended_end = 2026-05-31（holdout 60d）
+        # now を 2026-04-27 に固定 → freshness_target = 2026-04-27 - 42d = 2026-03-16
+        # latest_eff = 2026-04-15 + 24h = 2026-04-16 → freshness_target を超えるので PASS
+        from src.alpha_factory import aux_preflight
+
+        fixed_now = datetime(2026, 4, 27, tzinfo=UTC)
+        monkeypatch.setattr(
+            aux_preflight, "datetime", _PatchedDatetime(fixed_now)
+        )
+        _populate_dense_macro(
+            sqlite_session,
+            "VIXCLS",
+            start=date(2024, 7, 1),
+            end=date(2026, 4, 15),  # 末尾は wall-clock now に近い
+        )
+        result = preflight_check_aux_data(
+            db_session=sqlite_session,
+            period=(
+                datetime(2026, 1, 1, tzinfo=UTC),
+                datetime(2026, 4, 1, tzinfo=UTC),
+            ),
+            stage_b_window_months=18,
+            stage_c_holdout_days=60,
+            allow_missing=True,
+        )
+        # 旧実装ならば extended_end (2026-05-31) - 42d = 2026-04-19 > 2026-04-16 で fail
+        # 修正後は freshness_target = now (2026-04-27) - 42d = 2026-03-16 で PASS
+        assert "VIXCLS" not in result.hard_missing
+
+
+class _PatchedDatetime:
+    """`datetime.now(tz)` のみ固定値を返す datetime 互換 stub."""
+
+    def __init__(self, fixed_now: datetime) -> None:
+        self._now = fixed_now
+
+    def now(self, tz=None):  # type: ignore[no-untyped-def]
+        if tz is None:
+            return self._now.replace(tzinfo=None)
+        return self._now.astimezone(tz)
+
+    def __getattr__(self, name):  # type: ignore[no-untyped-def]
+        # 他属性はそのまま datetime に委譲
+        from datetime import datetime as _dt
+
+        return getattr(_dt, name)
+
+
 def test_preflight_result_passes_property() -> None:
     """PreflightResult.passes は hard_missing が空のときのみ True."""
     r1 = PreflightResult(hard_satisfied=["A"], hard_missing=[])
