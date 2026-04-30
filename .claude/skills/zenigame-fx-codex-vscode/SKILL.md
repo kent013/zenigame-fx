@@ -32,8 +32,8 @@ scripts/codex exec --ephemeral --sandbox read-only -m {model} \
 
 | モデル | 用途 |
 |--------|------|
-| `gpt-5.3-codex` | デフォルト。コード分析・レビュー・技術設計 |
-| `gpt-5.4` | 自然言語中心の議論・概念設計 |
+| `gpt-5.5-codex` | デフォルト。コード分析・レビュー・技術設計 |
+| `gpt-5.5` | 自然言語中心の議論・概念設計 |
 
 ---
 
@@ -47,7 +47,7 @@ scripts/codex exec --ephemeral --sandbox read-only -m {model} \
 | `low` | 全モデル | 高速・軽量な応答 |
 | `medium` | 全モデル | 議論・分析・ブレスト用（デフォルト推奨） |
 | `high` | 全モデル | コードレビュー・安全性判定用 |
-| `xhigh` | `gpt-5.3-codex`, `gpt-5.4` のみ | 最大の推論深度 |
+| `xhigh` | `gpt-5.5-codex`, `gpt-5.5` のみ | 最大の推論深度 |
 
 ---
 
