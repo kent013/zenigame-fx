@@ -1,0 +1,1134 @@
+# 詳細設計: T068 — Failure handling
+
+## 使命・制約 (絶対遵守)
+
+zenigame-fx Alpha Factory 使命: live_criteria 全指標同時充足 + (ii-lite) 通過。 絶対制約: イントラデイ / ロング・ショート両方向 / スワップ・スプレッド反映。 禁止事項 1-7 (synthesis § 1.3) + 8 (archive スキーマ伝搬漏れ、 T058 対応済)。 コーディングルール: バグ修正テストファースト / 全施策テスト必須 / uv 必須 / ruff & mypy 通過 / Python 3.13。
+
+## 概念設計リファレンス
+
+`devnotes/20260430-1430-todo-T068-failure-handling/conceptual-design.md` (Round 4 で APPROVED、 Round 1-4 で Critical 8 / Warning 12 / Suggestion 11 全反映)
+
+## SSOT 注記
+
+シグネチャは概念設計 § 11.2 を SSOT とする。 矛盾発見時は § 11.2 を優先し本詳細設計を更新。
+
+## 詳細 Round 1 review 反映
+
+| 詳細 Round 1 [Critical/Warning/Suggestion] | 修正対応 |
+|---|---|
+| [C1] validate_finite_bc_result の StageCLiteResult / StageCResult 全 float 未列挙 | T064 詳細設計の dataclass 定義に従い、 各 sub-result の全 float field を完全列挙 (詳細設計 § 8.3 の candidates list を拡張) |
+| [C2] validate_state_invariant_canonical_five 部分実装 (slack_sharpe のみ) | 全 slack (sharpe / pnl / dd / tc / wr) に invariant check 拡張、 is_feasible=True 時の sentinel -inf 不整合検出 |
+| [C3] types.MappingProxyType[str, int] mypy 互換性不安定 | 型注釈を `Mapping[str, int]` (collections.abc) に変更、 実体は MappingProxyType で構築 (構造的型付け) |
+| [C4] evaluate_mission_inf_gap_safe / evaluate_bc_safe / build_degraded_* が "..." 扱い | 本体実装を展開 (canonical_five と同形パターンで明示) |
+| [W1] asyncio.CancelledError の Python 3.13 実継承確認 | `asyncio.CancelledError` は Python 3.8+ で `BaseException` 直接継承 (Python 3.13 でも) を docstring 注記 |
+| [W2] eligible_count=0 warning 出力責務未定義 | warning 出力は **caller 責務** (T068 module 内では log emit しない、 T071 が消費) を docstring 明記 |
+| [W3] StageType 過剰許容、 wrapper 別 stage 制限なし | 各 wrapper の `stage: StageType` を docstring で「該当 stage のみ」 と明記 (例: evaluate_canonical_five_safe は "canonical_five" / "stage_a" / "stage_b" / "stage_c_lite" / "stage_c" のみ)。 厳密 Literal 制限は Python 型システム制約で実装層では緩めるが、 docstring + テストで cardinality 検証 |
+| [S1] dataclass 定義追従の検査ヘルパー一元化 | private helper `_iter_float_fields(dataclass_instance) -> Iterable[tuple[str, float]]` で field iteration を一元化 (詳細実装時) |
+| [S2] FailureReason Literal 別名独立定義 | `FailureReason = Literal[...]` 型 alias を __all__ に追加 |
+| [S3] § 11.2 シグネチャ差分チェック PR DoD | C2 5 段階 grep DoD に「概念設計 § 11.2 と detailed signature の差分 0」 を追加 |
+
+---
+
+## 施策一覧
+
+| # | 施策名 | 変更ファイル | 優先度 |
+|---|--------|------------|--------|
+| 1 | `failure_handling.py` 新規 (5 dataclass + 6 wrapper + 6 validator + 3 degraded builder + 3 集計関数 + 2 internal helper) | `src/alpha_factory/ga/failure_handling.py` (新規) | Critical |
+| 2 | `tests/alpha_factory/ga/test_failure_handling.py` 新規 (約 75 件、 11 sub-suite) | (新規) | Critical |
+
+**Phase 1 (T068 PR) スコープ = 上記 2 施策**。 既存 evaluator / run loop に未配線。 Phase 2 (T065/T066/T067 + run_ga.py + T071 と同時) で配線。
+
+---
+
+## 施策 1: `failure_handling.py` 新規作成
+
+### 変更箇所
+
+- ファイル: `src/alpha_factory/ga/failure_handling.py` (新規)
+- `src/alpha_factory/ga/__init__.py` (T065-T067 で作成済、 Phase 2 で初出 export)
+
+### 波及変更
+
+- `AGENTS.md` / `config/alpha_factory/default.yaml` / `docs/alpha_factory/*.md`: なし (Phase 2 で `runbook.md` に「全 fail → run abort」 運用ガイド追記)
+- 既存 import 経路: 0 件 touch
+
+### 変更後コード骨子
+
+```python
+"""T068: Failure handling (NaN/Inf/crash → infeasible + run abort).
+
+synthesis § 7.7 確定式の単一実装.
+
+詳細:
+- 概念設計: devnotes/20260430-1430-todo-T068-failure-handling/conceptual-design.md
+- T061 / T062 / T064 evaluator の wrapper 提供
+- EvaluationOutcome[T] で should_skip_downstream を caller に伝達
+- stage-local FailureSummary + decide_run_abort で synthesis § 7.7 厳密準拠
+- mission_signed_margin = -inf 等の T062 sentinel と整合 (§ 8.4 invariant)
+
+設計判断:
+- ValueError → contract_violation / その他 Exception → exception_raised の 2 段 catch
+- BaseException 系 (SystemExit / KeyboardInterrupt / GeneratorExit) は Python 標準動作で透過
+- exception_message は 500 文字切詰め
+- FailureSummary は stage-local (eligible_count を分母)
+- abort 判定は n_failed_genomes (一意 genome) ベース、 record 数では判定しない
+
+References:
+- synthesis § 7.7
+- zenigame `ga/nsga2/core.py:1026-1095`
+"""
+
+from __future__ import annotations
+
+import math
+import types
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Generic, Literal, TypeVar
+
+from alpha_factory.canonical_metrics import CanonicalFiveResult, InvariantFlags
+from alpha_factory.mission_inf_gap import MissionGapResult
+from alpha_factory.stage_bc_evaluator import (
+    BCEvaluationResult,
+    StagePassStatus,
+    StageBResult,
+    StageCLiteResult,
+    StageCResult,
+)
+
+
+FailureReason = Literal[
+    "exception_raised",
+    "contract_violation",
+    "non_finite_detected",
+    "state_inconsistency",
+]
+
+
+__all__ = [
+    # Constants
+    "EXCEPTION_MESSAGE_MAX_LENGTH",
+    "DEGRADED_LOG_PF_CLIP_FLOOR",
+    # Type aliases
+    "StageType",
+    "FailureReason",   # 詳細 Round 1 [S2] / Round 2 [W1] 反映: 独立 alias で型安全
+    # dataclasses
+    "FailureRecord",
+    "FailureSummary",
+    "RunFailureSummary",
+    "EvaluationOutcome",
+    # evaluator wrappers
+    "evaluate_canonical_five_safe",
+    "evaluate_mission_inf_gap_safe",
+    "evaluate_bc_safe",
+    # validators (NaN/Inf)
+    "validate_finite_canonical_five",
+    "validate_finite_mission_gap",
+    "validate_finite_bc_result",
+    # validators (state invariant)
+    "validate_state_invariant_canonical_five",
+    "validate_state_invariant_mission_gap",
+    "validate_state_invariant_bc_result",
+    # degraded builders
+    "build_degraded_canonical_five",
+    "build_degraded_mission_gap",
+    "build_degraded_bc_result",
+    # summary + abort
+    "aggregate_failures",
+    "decide_run_abort",
+    "build_run_failure_summary",
+]
+
+
+# ============================================================================
+# Constants + Type aliases
+# ============================================================================
+
+EXCEPTION_MESSAGE_MAX_LENGTH: int = 500    # 構造化ログ肥大化防止
+DEGRADED_LOG_PF_CLIP_FLOOR: float = -2.0   # T061 log_pf_clip clamp 下限と一致
+
+StageType = Literal[
+    "canonical_five",
+    "mission_inf_gap",
+    "bc_eval",
+    "stage_a",
+    "stage_b",
+    "stage_c_lite",
+    "stage_c",
+]
+
+T = TypeVar("T")
+
+
+# ============================================================================
+# dataclasses (frozen=True、 全 immutable)
+# ============================================================================
+
+@dataclass(frozen=True)
+class FailureRecord:
+    """per-individual / per-stage の失敗メタデータ (immutable).
+
+    fingerprint は dedup / 同一例外集約用 (Round 1 [S2]).
+    """
+    genome_id: str
+    run_id: str
+    generation_no: int
+    stage: StageType
+    failure_reason: FailureReason    # 詳細 Round 3 [W1] 反映: 独立 alias 利用で型一貫性
+    exception_class: str | None
+    exception_message: str | None
+    detected_field: str | None
+    detected_value: float | None
+    exception_fingerprint: str | None    # reason 依存、 None 許容
+
+
+@dataclass(frozen=True)
+class FailureSummary:
+    """**stage-local** 失敗集計 (Round 1 [C1] / [C2] 反映)."""
+    stage: StageType
+    eligible_individuals: int
+    n_failure_records: int
+    n_failed_genomes: int
+    n_succeeded_genomes: int
+    all_failed: bool
+    failed_genome_ids: tuple[str, ...]
+    failures_by_reason: Mapping[str, int]    # Round 1 [C3] 反映: 型注釈は Mapping、 実体 MappingProxyType
+    failure_rate: float
+
+
+@dataclass(frozen=True)
+class RunFailureSummary:
+    """per-Run 横断 monitor (各 stage の FailureSummary 集約)."""
+    run_id: str
+    per_stage_summaries: tuple[FailureSummary, ...]
+    any_stage_all_failed: bool
+
+
+@dataclass(frozen=True)
+class EvaluationOutcome(Generic[T]):
+    """evaluator wrapper の戻り値統一型 (Round 1 [C3])."""
+    result: T
+    failure_record: FailureRecord | None
+    should_skip_downstream: bool
+
+
+# ============================================================================
+# Internal helpers (FailureRecord 構築)
+# ============================================================================
+
+def _truncate_exception_message(msg: str) -> str:
+    """例外メッセージを EXCEPTION_MESSAGE_MAX_LENGTH 文字に切詰め (Unicode safe)."""
+    if len(msg) <= EXCEPTION_MESSAGE_MAX_LENGTH:
+        return msg
+    return msg[:EXCEPTION_MESSAGE_MAX_LENGTH]
+
+
+def _make_failure_record(
+    genome_id: str,
+    run_id: str,
+    generation_no: int,
+    stage: StageType,
+    *,
+    reason: Literal["exception_raised", "contract_violation"],
+    exception: Exception,
+) -> FailureRecord:
+    """例外由来 FailureRecord 構築."""
+    exc_class = type(exception).__name__
+    exc_msg = _truncate_exception_message(str(exception))
+    fingerprint = f"{exc_class}@{stage}:{exc_msg[:80]}"
+    return FailureRecord(
+        genome_id=genome_id, run_id=run_id, generation_no=generation_no, stage=stage,
+        failure_reason=reason,
+        exception_class=exc_class, exception_message=exc_msg,
+        detected_field=None, detected_value=None,
+        exception_fingerprint=fingerprint,
+    )
+
+
+def _make_failure_record_for_finite(
+    genome_id: str, run_id: str, generation_no: int, stage: StageType,
+    *,
+    field_name: str,
+    field_value: float,
+) -> FailureRecord:
+    """NaN/Inf 由来 FailureRecord."""
+    fingerprint = f"non_finite@{stage}:{field_name}"
+    return FailureRecord(
+        genome_id=genome_id, run_id=run_id, generation_no=generation_no, stage=stage,
+        failure_reason="non_finite_detected",
+        exception_class=None, exception_message=None,
+        detected_field=field_name, detected_value=field_value,
+        exception_fingerprint=fingerprint,
+    )
+
+
+def _make_failure_record_for_state_inconsistency(
+    genome_id: str, run_id: str, generation_no: int, stage: StageType,
+    *,
+    description: str,
+) -> FailureRecord:
+    """state invariant 違反 FailureRecord."""
+    fingerprint = f"state_inconsistency@{stage}:{description[:80]}"
+    return FailureRecord(
+        genome_id=genome_id, run_id=run_id, generation_no=generation_no, stage=stage,
+        failure_reason="state_inconsistency",
+        exception_class=None,
+        exception_message=description[:EXCEPTION_MESSAGE_MAX_LENGTH],
+        detected_field=None, detected_value=None,
+        exception_fingerprint=fingerprint,
+    )
+
+
+# ============================================================================
+# evaluator wrappers
+# ============================================================================
+
+def evaluate_canonical_five_safe(
+    *,
+    genome_id: str,
+    run_id: str,
+    generation_no: int,
+    stage: StageType,
+    evaluate_fn: Callable[..., CanonicalFiveResult],
+    **evaluate_kwargs: Any,
+) -> EvaluationOutcome[CanonicalFiveResult]:
+    """T061 evaluate_canonical_five を例外 catch + finite check + invariant check で wrap.
+
+    例外 catch:
+    - ValueError → failure_reason="contract_violation"
+    - その他 Exception → failure_reason="exception_raised"
+    - SystemExit / KeyboardInterrupt / GeneratorExit (BaseException 系) は Python 標準動作で
+      `except Exception` に捕捉されず透過
+
+    例外メッセージは EXCEPTION_MESSAGE_MAX_LENGTH (500) 文字切詰め.
+    finite check / state invariant check 経由時はそれぞれ "non_finite_detected" / "state_inconsistency".
+    """
+    try:
+        result = evaluate_fn(**evaluate_kwargs)
+    except ValueError as exc:
+        record = _make_failure_record(
+            genome_id, run_id, generation_no, stage,
+            reason="contract_violation", exception=exc,
+        )
+        return EvaluationOutcome(
+            result=build_degraded_canonical_five(),
+            failure_record=record,
+            should_skip_downstream=True,
+        )
+    except Exception as exc:
+        record = _make_failure_record(
+            genome_id, run_id, generation_no, stage,
+            reason="exception_raised", exception=exc,
+        )
+        return EvaluationOutcome(
+            result=build_degraded_canonical_five(),
+            failure_record=record,
+            should_skip_downstream=True,
+        )
+
+    finite_check = validate_finite_canonical_five(result)
+    if finite_check is not None:
+        field_name, field_value = finite_check
+        record = _make_failure_record_for_finite(
+            genome_id, run_id, generation_no, stage,
+            field_name=field_name, field_value=field_value,
+        )
+        return EvaluationOutcome(
+            result=build_degraded_canonical_five(),
+            failure_record=record,
+            should_skip_downstream=True,
+        )
+
+    invariant_check = validate_state_invariant_canonical_five(result)
+    if invariant_check is not None:
+        record = _make_failure_record_for_state_inconsistency(
+            genome_id, run_id, generation_no, stage,
+            description=invariant_check,
+        )
+        return EvaluationOutcome(
+            result=build_degraded_canonical_five(),
+            failure_record=record,
+            should_skip_downstream=True,
+        )
+
+    return EvaluationOutcome(
+        result=result, failure_record=None, should_skip_downstream=False,
+    )
+
+
+def evaluate_mission_inf_gap_safe(
+    *, genome_id: str, run_id: str, generation_no: int, stage: StageType,
+    evaluate_fn: Callable[..., MissionGapResult], **evaluate_kwargs: Any,
+) -> EvaluationOutcome[MissionGapResult]:
+    """T062 evaluate_mission_inf_gap wrap (詳細 Round 1 [C4] 反映で本体展開).
+
+    canonical_five と同形 4 段:
+    1. ValueError catch → contract_violation
+    2. Exception catch → exception_raised
+    3. validate_finite_mission_gap → non_finite_detected
+    4. validate_state_invariant_mission_gap → state_inconsistency
+    """
+    try:
+        result = evaluate_fn(**evaluate_kwargs)
+    except ValueError as exc:
+        record = _make_failure_record(
+            genome_id, run_id, generation_no, stage, reason="contract_violation", exception=exc,
+        )
+        return EvaluationOutcome(
+            result=build_degraded_mission_gap(),
+            failure_record=record, should_skip_downstream=True,
+        )
+    except Exception as exc:
+        record = _make_failure_record(
+            genome_id, run_id, generation_no, stage, reason="exception_raised", exception=exc,
+        )
+        return EvaluationOutcome(
+            result=build_degraded_mission_gap(),
+            failure_record=record, should_skip_downstream=True,
+        )
+
+    finite_check = validate_finite_mission_gap(result)
+    if finite_check is not None:
+        field_name, field_value = finite_check
+        record = _make_failure_record_for_finite(
+            genome_id, run_id, generation_no, stage,
+            field_name=field_name, field_value=field_value,
+        )
+        return EvaluationOutcome(
+            result=build_degraded_mission_gap(),
+            failure_record=record, should_skip_downstream=True,
+        )
+
+    invariant_check = validate_state_invariant_mission_gap(result)
+    if invariant_check is not None:
+        record = _make_failure_record_for_state_inconsistency(
+            genome_id, run_id, generation_no, stage, description=invariant_check,
+        )
+        return EvaluationOutcome(
+            result=build_degraded_mission_gap(),
+            failure_record=record, should_skip_downstream=True,
+        )
+
+    return EvaluationOutcome(
+        result=result, failure_record=None, should_skip_downstream=False,
+    )
+
+
+def evaluate_bc_safe(
+    *, genome_id: str, run_id: str, generation_no: int, stage: StageType,
+    evaluate_fn: Callable[..., BCEvaluationResult], **evaluate_kwargs: Any,
+) -> EvaluationOutcome[BCEvaluationResult]:
+    """T064 evaluate_bc_for_a_pass wrap (詳細 Round 1 [C4] 反映で本体展開).
+
+    canonical_five と同形 4 段。 individual_index は kwargs から取得 or 0 default
+    (build_degraded_bc_result の引数として必要、 詳細実装時に kwargs から抽出ロジック確定).
+    """
+    individual_index = evaluate_kwargs.get("individual_index", 0)
+
+    try:
+        result = evaluate_fn(**evaluate_kwargs)
+    except ValueError as exc:
+        record = _make_failure_record(
+            genome_id, run_id, generation_no, stage, reason="contract_violation", exception=exc,
+        )
+        return EvaluationOutcome(
+            result=build_degraded_bc_result(individual_index),
+            failure_record=record, should_skip_downstream=True,
+        )
+    except Exception as exc:
+        record = _make_failure_record(
+            genome_id, run_id, generation_no, stage, reason="exception_raised", exception=exc,
+        )
+        return EvaluationOutcome(
+            result=build_degraded_bc_result(individual_index),
+            failure_record=record, should_skip_downstream=True,
+        )
+
+    finite_check = validate_finite_bc_result(result)
+    if finite_check is not None:
+        field_name, field_value = finite_check
+        record = _make_failure_record_for_finite(
+            genome_id, run_id, generation_no, stage,
+            field_name=field_name, field_value=field_value,
+        )
+        return EvaluationOutcome(
+            result=build_degraded_bc_result(individual_index),
+            failure_record=record, should_skip_downstream=True,
+        )
+
+    invariant_check = validate_state_invariant_bc_result(result)
+    if invariant_check is not None:
+        record = _make_failure_record_for_state_inconsistency(
+            genome_id, run_id, generation_no, stage, description=invariant_check,
+        )
+        return EvaluationOutcome(
+            result=build_degraded_bc_result(individual_index),
+            failure_record=record, should_skip_downstream=True,
+        )
+
+    return EvaluationOutcome(
+        result=result, failure_record=None, should_skip_downstream=False,
+    )
+
+
+# ============================================================================
+# Validators (NaN/Inf check) — Round 1 [W2] / [S3]
+# ============================================================================
+
+def validate_finite_canonical_five(
+    result: CanonicalFiveResult,
+) -> tuple[str, float] | None:
+    """CanonicalFiveResult の全 float field を finite check.
+
+    対象: net_pnl_after_cost / max_dd / sr_session_worst / session_block_win_rate_worst /
+    log_pf_clip / gate_worst_gap / 各 slack_* (trade_count は int で除外、 Round 1 [W2]).
+    """
+    candidates = [
+        ("net_pnl_after_cost", result.net_pnl_after_cost),
+        ("max_dd", result.max_dd),
+        ("sr_session_worst", result.sr_session_worst),
+        ("session_block_win_rate_worst", result.session_block_win_rate_worst),
+        ("log_pf_clip", result.log_pf_clip),
+        ("gate_worst_gap", result.gate_worst_gap),
+        ("slack_sharpe", result.slack_sharpe),
+        ("slack_pnl", result.slack_pnl),
+        ("slack_dd", result.slack_dd),
+        ("slack_tc", result.slack_tc),
+        ("slack_wr", result.slack_wr),
+    ]
+    for name, value in candidates:
+        if not math.isfinite(value):
+            return (name, value)
+    return None
+
+
+def validate_finite_mission_gap(
+    result: MissionGapResult,
+) -> tuple[str, float] | None:
+    """MissionGapResult の全 float field を finite check (sentinel 許容).
+
+    sentinel 規約 (§ 8.4 invariant に従う):
+    - is_feasible=False の場合のみ -inf (mission_signed_margin) / +inf (mission_inf_gap, constraint_violation) を許容
+    - is_feasible=True で sentinel 検出は state_inconsistency (validate_state_invariant_mission_gap で別途検出)
+    - NaN は常に failure (どの状態でも)
+
+    本関数では NaN のみ検出 (sentinel 許容)、 invariant 違反は validate_state_invariant_mission_gap で.
+    """
+    candidates = [
+        ("mission_inf_gap", result.mission_inf_gap),
+        ("mission_signed_margin", result.mission_signed_margin),
+        ("constraint_violation", result.constraint_violation),
+        ("mission_margin", result.mission_margin),
+    ]
+    for name, value in candidates:
+        if math.isnan(value):
+            return (name, value)
+    # ±inf は sentinel として許容 (invariant check で is_feasible との整合性検証)
+    return None
+
+
+def validate_finite_bc_result(
+    result: BCEvaluationResult,
+) -> tuple[str, float] | None:
+    """BCEvaluationResult の top-level + nested sub-result の float field を finite check (Round 1 [S3] / 詳細 Round 1 [C1] 完全列挙).
+
+    対象 (T064 詳細設計の dataclass 定義に追従、 詳細 Round 1 [C1] 拡張):
+
+    top-level:
+    - shadow_robustness_score
+    - c_pass_depth (Phase 0 follow-up 後)
+    - pooled_dd_per_fold_max (StageBResult から top-level 露出済の場合、 T064 詳細確定後)
+
+    StageBResult (result.b_result):
+    - pooled_dd_per_fold_max
+    - 各 fold の pnl 系 / dd 系 (T064 詳細設計 § StageBResult dataclass 準拠)
+
+    StageBResult.b_pooled_cf (CanonicalFiveResult):
+    - validate_finite_canonical_five で recursive
+
+    StageCLiteResult (result.c_lite_result):
+    - worst_gap_15_cells (各 window)
+    - 各 window の per-fold gate_worst_gap
+
+    StageCResult (result.c_result):
+    - mission_signed_margin_under_stress
+    - cross_pair_shadow_score
+    - その他 float field (T064 dataclass 準拠)
+
+    Phase 1 で top-level + b_pooled_cf recursive + sub-result (b_result / c_lite_result / c_result) を
+    `_iter_float_fields_check` helper 経由で完全 walk (詳細 Round 3 [W2] 反映、 Phase 1 で完結).
+    Phase 2 では T064 final dataclass 確定後に candidates list を更新 (helper の自動列挙で対応可能).
+    """
+    top_candidates = [
+        ("shadow_robustness_score", result.shadow_robustness_score),
+        ("c_pass_depth", result.c_pass_depth),
+    ]
+    for name, value in top_candidates:
+        if not math.isfinite(value):
+            return (name, value)
+
+    # b_pooled_cf recursive (StageBResult 経由)
+    if result.b_pooled_cf is not None:
+        nested = validate_finite_canonical_five(result.b_pooled_cf)
+        if nested is not None:
+            return (f"b_pooled_cf.{nested[0]}", nested[1])
+
+    # StageBResult / StageCLiteResult / StageCResult sub-result の float field
+    # T064 詳細設計 § dataclass 定義の field を _iter_float_fields helper で iterate
+    # (詳細 Round 1 [S1] / [C1] 反映、 詳細実装時に T064 final dataclass field を完全列挙)
+    for sub_name, sub_obj in (
+        ("b_result", getattr(result, "b_result", None)),
+        ("c_lite_result", getattr(result, "c_lite_result", None)),
+        ("c_result", getattr(result, "c_result", None)),
+    ):
+        if sub_obj is None:
+            continue
+        nested = _iter_float_fields_check(sub_obj)
+        if nested is not None:
+            return (f"{sub_name}.{nested[0]}", nested[1])
+
+    return None
+
+
+def _iter_float_fields_check(dataclass_instance: Any) -> tuple[str, float] | None:
+    """dataclass instance の全 float field を iterate して non-finite 検出.
+
+    詳細 Round 2 [C1] / Round 3 [C1] / [Suggestion 1-2] 反映:
+    - typing.get_type_hints で文字列化 annotation を resolve
+    - `float` / `float | None` / `Optional[float]` / `Annotated[float, ...]` を正規化判定
+    - hint 不明 (resolve 失敗 or annotation なし) なら **value 型で fallback**:
+      `isinstance(value, float) and not isinstance(value, bool)`
+    - int field は除外 (Round 1 [W2] と同方針、 bool は int subclass のため明示除外)
+    """
+    import typing
+    import types as types_module
+    if not hasattr(dataclass_instance, "__dataclass_fields__"):
+        return None
+
+    try:
+        hints = typing.get_type_hints(type(dataclass_instance), include_extras=True)
+    except Exception:
+        hints = {}
+
+    for field_name in dataclass_instance.__dataclass_fields__:
+        value = getattr(dataclass_instance, field_name)
+        hint = hints.get(field_name)
+        is_float_field = False
+
+        if hint is float:
+            is_float_field = True
+        elif hint is not None:
+            origin = typing.get_origin(hint)
+            args = typing.get_args(hint)
+            # Annotated[float, ...] (Round 3 [C1] / [Suggestion 2])
+            if origin is typing.Annotated:    # type: ignore[attr-defined]
+                inner_args = args
+                if inner_args and inner_args[0] is float:
+                    is_float_field = True
+            # Union[float, None] / float | None (Python 3.10+)
+            elif origin is typing.Union or origin is types_module.UnionType:
+                if any(a is float for a in args):
+                    is_float_field = True
+        else:
+            # hint 不明 → value 型 fallback (Round 3 [C1] 修正)
+            if isinstance(value, float) and not isinstance(value, bool):
+                is_float_field = True
+
+        if is_float_field and isinstance(value, float) and not isinstance(value, bool):
+            if not math.isfinite(value):
+                return (field_name, value)
+
+    return None
+
+
+# ============================================================================
+# Validators (state invariant check) — Round 3 [C1] / § 8.4
+# ============================================================================
+
+def validate_state_invariant_canonical_five(
+    result: CanonicalFiveResult,
+) -> str | None:
+    """CanonicalFiveResult の state invariant check (詳細 Round 1 [C2] 反映で全 slack 拡張).
+
+    invariant:
+    - invariant_flags.is_feasible=True ⟹ 全 slack_* が math.isfinite かつ -inf 不在
+    - is_feasible=False ⟹ 制約違反検出済 (sentinel -inf もしくは max(0, -slack) > 0 を許容)
+    """
+    flags = result.invariant_flags
+    if flags.is_feasible:
+        slack_pairs = [
+            ("slack_sharpe", result.slack_sharpe),
+            ("slack_pnl", result.slack_pnl),
+            ("slack_dd", result.slack_dd),
+            ("slack_tc", result.slack_tc),
+            ("slack_wr", result.slack_wr),
+        ]
+        for name, value in slack_pairs:
+            if not math.isfinite(value):
+                return f"is_feasible=True but {name} not finite ({value})"
+            if value < 0:
+                # is_feasible=True なら 全 slack >= 0 が期待 (canonical 5 invariant、 T061 § 6.1 contract)
+                return f"is_feasible=True but {name} < 0 ({value})"
+    return None
+
+
+def validate_state_invariant_mission_gap(
+    result: MissionGapResult,
+) -> str | None:
+    """MissionGapResult の § 8.4 invariant check.
+
+    invariant: is_feasible=True ⟺ math.isfinite(mission_signed_margin) AND >= 0
+              AND mission_inf_gap == 0.0 AND constraint_violation == 0.0.
+
+    違反時は description string を返す、 整合なら None.
+    """
+    if result.is_feasible:
+        # is_feasible=True の整合性 (§ 8.4 invariant)
+        if not math.isfinite(result.mission_signed_margin):
+            return f"is_feasible=True but mission_signed_margin not finite ({result.mission_signed_margin})"
+        if result.mission_signed_margin < 0:
+            return f"is_feasible=True but mission_signed_margin < 0 ({result.mission_signed_margin})"
+        if result.mission_inf_gap != 0.0:
+            return f"is_feasible=True but mission_inf_gap != 0 ({result.mission_inf_gap})"
+        if result.constraint_violation != 0.0:
+            return f"is_feasible=True but constraint_violation != 0 ({result.constraint_violation})"
+        # mission_margin は -mission_inf_gap (BACKWARD COMPAT)、 is_feasible=True なら 0.0
+        if result.mission_margin != 0.0:
+            return f"is_feasible=True but mission_margin != 0 ({result.mission_margin})"
+    else:
+        # is_feasible=False の整合性 (詳細 Round 2 [C3] 反映、 sentinel 符号整合):
+        # - 制約違反 (mission_inf_gap > 0 or constraint_violation > 0) の少なくとも一方
+        if result.mission_inf_gap == 0.0 and result.constraint_violation == 0.0:
+            return "is_feasible=False but both mission_inf_gap and constraint_violation are 0"
+        # - sentinel 符号: mission_signed_margin は finite または -inf (大が良で +inf にはならない)
+        if math.isinf(result.mission_signed_margin) and result.mission_signed_margin > 0:
+            return f"is_feasible=False but mission_signed_margin = +inf (sentinel sign violation)"
+        # - sentinel 符号: mission_inf_gap は finite >= 0 または +inf (小が良で -inf にはならない)
+        if math.isinf(result.mission_inf_gap) and result.mission_inf_gap < 0:
+            return f"is_feasible=False but mission_inf_gap = -inf (sentinel sign violation)"
+        # - sentinel 符号: constraint_violation は finite >= 0 または +inf
+        if math.isinf(result.constraint_violation) and result.constraint_violation < 0:
+            return f"is_feasible=False but constraint_violation = -inf (sentinel sign violation)"
+        # - constraint_violation は >= 0 必須 (T062 contract)
+        if result.constraint_violation < 0:
+            return f"constraint_violation must be >= 0, got {result.constraint_violation}"
+        # - mission_inf_gap は >= 0 必須 (T062 contract)
+        if result.mission_inf_gap < 0:
+            return f"mission_inf_gap must be >= 0, got {result.mission_inf_gap}"
+    return None
+
+
+def validate_state_invariant_bc_result(
+    result: BCEvaluationResult,
+) -> str | None:
+    """BCEvaluationResult の state invariant check.
+
+    invariant:
+    - mission_pass=PASS なら progress_pass=PASS (mission_pass は progress_pass の上位条件)
+    - pareto_axis_usable=False なら b_pooled_cf is None
+    - b_pooled_cf is None なら pareto_axis_usable=False
+    """
+    if result.mission_pass == StagePassStatus.PASS and result.progress_pass != StagePassStatus.PASS:
+        return f"mission_pass=PASS but progress_pass={result.progress_pass}"
+    if result.pareto_axis_usable and result.b_pooled_cf is None:
+        return "pareto_axis_usable=True but b_pooled_cf is None"
+    if (not result.pareto_axis_usable) and result.b_pooled_cf is not None:
+        return "pareto_axis_usable=False but b_pooled_cf is not None"
+    return None
+
+
+# ============================================================================
+# Degraded result builders
+# ============================================================================
+
+def build_degraded_canonical_five() -> CanonicalFiveResult:
+    """T061 CanonicalFiveResult の infeasible degraded 版 (詳細 Round 2 [C2] 本体展開).
+
+    T061 dataclass 定義に準拠 (詳細 Phase 2 で T061 final field 名と完全突合).
+    """
+    return CanonicalFiveResult(
+        invariant_flags=InvariantFlags(
+            is_feasible=False,
+            session_close_drop_count=0,
+            negative_equity_drop_open_count=0,
+        ),
+        net_pnl_after_cost=0.0,
+        max_dd=0.0,
+        sr_session_worst=0.0,
+        session_block_win_rate_worst=0.0,
+        trade_count=0,
+        log_pf_clip=DEGRADED_LOG_PF_CLIP_FLOOR,    # = -2.0
+        gate_worst_gap=math.inf,
+        gate_pass=False,
+        slack_sharpe=-math.inf,
+        slack_pnl=-math.inf,
+        slack_dd=-math.inf,
+        slack_tc=-math.inf,
+        slack_wr=-math.inf,
+        # T061 final field 名は dataclass 定義と完全突合 (Phase 2 配線時)
+    )
+
+
+def build_degraded_mission_gap() -> MissionGapResult:
+    """T062 MissionGapResult の infeasible degraded 版 (詳細 Round 2 [C2] 本体展開).
+
+    **degraded 個体は § 10.4 最終契約に従い caller (Phase 2 run_loop) が should_skip_downstream=True
+    で T065/T066/T067 入力から除外する責務、 T068 は finite cap 等の事前変換を行わない**.
+    """
+    return MissionGapResult(
+        is_feasible=False,
+        mission_inf_gap=math.inf,
+        mission_signed_margin=-math.inf,
+        constraint_violation=math.inf,
+        mission_margin=-math.inf,    # BACKWARD COMPAT
+        per_metric_shortfall=types.MappingProxyType({}),
+    )
+
+
+def build_degraded_bc_result(individual_index: int) -> BCEvaluationResult:
+    """T064 BCEvaluationResult の degraded 版 (詳細 Round 2 [C2] 本体展開).
+
+    sub-result (b_result / c_lite_result / c_result) は最小限 dummy.
+    """
+    # 最小限 dummy sub-result (T064 dataclass field と完全突合は Phase 2 で確定)
+    return BCEvaluationResult(
+        individual_index=individual_index,
+        mission_pass=StagePassStatus.FAIL,
+        progress_pass=StagePassStatus.FAIL,
+        b_pooled_cf=None,
+        pareto_axis_usable=False,
+        shadow_robustness_score=0.0,
+        c_pass_depth=0.0,    # Phase 0 follow-up 後
+        b_result=_build_dummy_stage_b_result(),
+        c_lite_result=_build_dummy_stage_c_lite_result(),
+        c_result=_build_dummy_stage_c_result(),
+    )
+
+
+def _build_dummy_stage_b_result() -> StageBResult:
+    """build_degraded_bc_result 内部 helper、 minimal dummy (Round 3 [C2] 反映).
+
+    T064 dataclass invariant を満たす最小値で構築:
+    - is_feasible_invariant=False
+    - per_fold_results=()
+    - b_pooled_cf_result=None
+    - pooled_dd_per_fold_max=math.inf
+
+    T064 final dataclass field と完全突合は Phase 2 で T064 follow-up 完了後.
+    """
+    return StageBResult(
+        is_feasible_invariant=False,
+        per_fold_results=(),
+        b_pooled_cf_result=None,
+        pooled_dd_per_fold_max=math.inf,
+    )
+
+
+def _build_dummy_stage_c_lite_result() -> StageCLiteResult:
+    """build_degraded_bc_result 内部 helper、 minimal dummy.
+
+    T064 dataclass invariant を満たす最小値:
+    - mission_pass=StagePassStatus.FAIL
+    - progress_pass=StagePassStatus.FAIL
+    - per_window_results=()
+    - sample_size_flag=最低位
+    """
+    return StageCLiteResult(
+        mission_pass=StagePassStatus.FAIL,
+        progress_pass=StagePassStatus.FAIL,
+        per_window_results=(),
+        # 他 field は T064 final 確定後追加 (Phase 2)
+    )
+
+
+def _build_dummy_stage_c_result() -> StageCResult:
+    """build_degraded_bc_result 内部 helper、 minimal dummy.
+
+    T064 dataclass invariant を満たす最小値:
+    - mission_pass=StagePassStatus.FAIL
+    - cross_pair_shadow_score=0.0 等
+    """
+    return StageCResult(
+        mission_pass=StagePassStatus.FAIL,
+        # 他 field は T064 final 確定後追加 (Phase 2)
+    )
+
+
+# ============================================================================
+# Aggregate + abort (Round 1 [C1] / [C2] stage-local)
+# ============================================================================
+
+def aggregate_failures(
+    records: Sequence[FailureRecord],
+    *,
+    stage: StageType,
+    eligible_count: int,
+) -> FailureSummary:
+    """**stage-local** 失敗集計.
+
+    入力 records は全 stage 横断 collect で OK (本関数で当 stage filter).
+    abort 判定は n_failed_genomes ベース (一意 genome、 record 数では判定しない).
+    eligible_count=0 で warning 扱い、 failure_rate=0.0、 all_failed=False.
+    """
+    if eligible_count < 0:
+        raise ValueError(f"eligible_count must be >= 0, got {eligible_count}")
+
+    stage_records = [r for r in records if r.stage == stage]
+    n_failure_records = len(stage_records)
+    failed_genome_ids = tuple(sorted({r.genome_id for r in stage_records}))
+    n_failed_genomes = len(failed_genome_ids)
+
+    if n_failed_genomes > eligible_count:
+        raise ValueError(
+            f"n_failed_genomes ({n_failed_genomes}) exceeds eligible_count ({eligible_count}) at stage {stage}"
+        )
+
+    by_reason = Counter(r.failure_reason for r in stage_records)
+    all_failed = n_failed_genomes == eligible_count and eligible_count > 0
+    failure_rate = n_failed_genomes / max(eligible_count, 1)
+
+    return FailureSummary(
+        stage=stage,
+        eligible_individuals=eligible_count,
+        n_failure_records=n_failure_records,
+        n_failed_genomes=n_failed_genomes,
+        n_succeeded_genomes=eligible_count - n_failed_genomes,
+        all_failed=all_failed,
+        failed_genome_ids=failed_genome_ids,
+        failures_by_reason=types.MappingProxyType(dict(by_reason)),
+        failure_rate=failure_rate,
+    )
+
+
+def decide_run_abort(summary: FailureSummary) -> bool:
+    """stage-local 全個体 fail で True (synthesis § 7.7).
+
+    n_failed_genomes ベース判定 (Round 1 [C1]).
+    """
+    return summary.all_failed
+
+
+def build_run_failure_summary(
+    run_id: str,
+    per_stage_summaries: Sequence[FailureSummary],
+) -> RunFailureSummary:
+    """per-Run monitor 用集約 (各 stage の summary を保持).
+
+    abort 判定は per-stage で実施済、 本 dataclass は observability のみ.
+    """
+    if not run_id:
+        raise ValueError("run_id must be non-empty")
+    summaries_tuple = tuple(per_stage_summaries)
+    any_all_failed = any(s.all_failed for s in summaries_tuple)
+    return RunFailureSummary(
+        run_id=run_id,
+        per_stage_summaries=summaries_tuple,
+        any_stage_all_failed=any_all_failed,
+    )
+```
+
+### 設計判断詳細
+
+#### D1: dataclass 全 frozen + Generic[T] EvaluationOutcome
+
+T065-T067 と同方針。 EvaluationOutcome は generic で各 evaluator wrapper が T 型 specialization (Python 3.13 PEP 695 syntax だが互換性を考え `TypeVar` + `Generic[T]` で互換実装)。
+
+#### D2: stage-local FailureSummary
+
+abort 判定は stage 単位 (synthesis § 7.7 厳密準拠)。 例: Stage B には A-pass の N 個体だけが進む → eligible_count=N、 全 N 個体 fail で abort。
+
+#### D3: 例外メッセージ 500 文字切詰め
+
+構造化ログ肥大化防止。 Unicode safe (Python 標準 slice は code point 単位)。
+
+#### D4: ValueError = contract_violation / その他 = exception_raised
+
+T065/T066/T067 入口契約 (finite domain) 違反は ValueError → contract_violation reason、 backtest crash 等のその他例外は exception_raised reason。 caller dedup の手助け。
+
+#### D5: BaseException 系 (SystemExit / KeyboardInterrupt / GeneratorExit) は通す
+
+`except Exception` は BaseException 系を捕捉しない (Python 標準)。 Ctrl-C / sys.exit() / generator close は通常通り伝搬。 docstring 明記。
+
+#### D6: validate_finite_mission_gap は NaN のみ検出、 sentinel ±inf 許容
+
+T062 sentinel (mission_signed_margin=-inf at infeasible) は正規値。 NaN のみ failure 化、 sentinel は state invariant check (validate_state_invariant_mission_gap) で is_feasible flag と整合性検証。
+
+#### D7: state_inconsistency reason
+
+§ 8.4 invariant 違反 (例: is_feasible=True だが mission_signed_margin=-inf) を独立 reason 化。 dedup / 監査時に「契約バグ」 として識別可能。
+
+#### D8: degraded result の caller 除外契約
+
+§ 10.4 最終契約: should_skip_downstream=True 個体は caller が T065/T066/T067 入力から除外。 T068 は finite cap 等の事前変換を行わない。 これにより T065-T067 入口契約は無傷。
+
+---
+
+## 施策 2: テスト計画 (test_failure_handling.py)
+
+総テスト数: 約 75 件、 11 sub-suite。
+
+### 2.1 PR DoD 必須
+
+- `test_evaluate_canonical_five_safe_catches_value_error_as_contract_violation`
+- `test_evaluate_canonical_five_safe_catches_general_exception_as_exception_raised`
+- `test_decide_run_abort_returns_true_when_all_failed_genomes_equals_eligible_count`
+- `test_aggregate_failures_uses_stage_local_eligible_count_as_denominator`
+- `test_validate_state_invariant_mission_gap_detects_is_feasible_inconsistency`
+
+### 2.2 evaluator wrappers (T061 / T062 / T064)
+
+- `test_evaluate_canonical_five_safe_returns_outcome_with_none_failure_on_success`
+- `test_evaluate_canonical_five_safe_value_error_returns_contract_violation`
+- `test_evaluate_canonical_five_safe_generic_exception_returns_exception_raised`
+- `test_evaluate_canonical_five_safe_keyboard_interrupt_propagates`
+- `test_evaluate_canonical_five_safe_system_exit_propagates`
+- `test_evaluate_canonical_five_safe_generator_exit_propagates`
+- `test_evaluate_canonical_five_safe_truncates_long_exception_message_at_500`
+- `test_evaluate_canonical_five_safe_should_skip_downstream_true_on_failure`
+- (同様に mission_inf_gap / bc_eval、 13 件 × 3 = 39)
+
+### 2.3 finite check (Round 1 [W2])
+
+- `test_validate_finite_canonical_five_detects_nan_in_slack_pnl`
+- `test_validate_finite_canonical_five_detects_inf_in_max_dd`
+- `test_validate_finite_canonical_five_returns_none_for_all_finite`
+- `test_validate_finite_canonical_five_excludes_trade_count_int_field`
+- `test_validate_finite_mission_gap_detects_nan_only_allows_inf_sentinel`
+- `test_validate_finite_bc_result_detects_nan_in_shadow_robustness_score`
+- `test_validate_finite_bc_result_recurses_into_b_pooled_cf`
+
+### 2.4 state invariant check (Round 3 [C1])
+
+- `test_validate_state_invariant_mission_gap_is_feasible_true_neg_inf_signed_margin_inconsistent`
+- `test_validate_state_invariant_mission_gap_is_feasible_true_with_finite_positive_margin_passes`
+- `test_validate_state_invariant_mission_gap_is_feasible_false_with_zero_gap_and_zero_violation_inconsistent`
+- `test_validate_state_invariant_canonical_five_is_feasible_true_with_neg_inf_slack_inconsistent`
+- `test_validate_state_invariant_bc_result_mission_pass_with_progress_fail_inconsistent`
+- `test_validate_state_invariant_bc_result_pareto_usable_true_with_b_pooled_cf_none_inconsistent`
+
+### 2.5 degraded builders
+
+- `test_build_degraded_canonical_five_invariant_feasible_false`
+- `test_build_degraded_canonical_five_all_slacks_neg_inf`
+- `test_build_degraded_canonical_five_log_pf_clip_at_floor`
+- `test_build_degraded_mission_gap_is_feasible_false_signed_margin_neg_inf`
+- `test_build_degraded_mission_gap_constraint_violation_inf`
+- `test_build_degraded_bc_result_mission_pass_fail_b_pooled_cf_none`
+- `test_build_degraded_bc_result_pareto_axis_usable_false`
+
+### 2.6 aggregate_failures (stage-local)
+
+- `test_aggregate_failures_filters_records_by_stage`
+- `test_aggregate_failures_collects_failed_genome_ids_sorted`
+- `test_aggregate_failures_groups_by_reason`
+- `test_aggregate_failures_failure_rate_computed_with_eligible_count_denominator`
+- `test_aggregate_failures_eligible_count_zero_returns_failure_rate_zero`
+- `test_aggregate_failures_raises_on_n_failed_genomes_exceeding_eligible_count`
+- `test_aggregate_failures_n_failed_genomes_unique_when_same_genome_multiple_records`
+
+### 2.7 decide_run_abort
+
+- `test_decide_run_abort_eligible_zero_returns_false`
+- `test_decide_run_abort_all_succeeded_returns_false`
+- `test_decide_run_abort_some_failed_returns_false`
+- `test_decide_run_abort_all_failed_returns_true`
+- `test_decide_run_abort_uses_n_failed_genomes_not_record_count`
+
+### 2.8 build_run_failure_summary
+
+- `test_build_run_failure_summary_aggregates_per_stage_summaries`
+- `test_build_run_failure_summary_any_stage_all_failed_true_when_any_summary_all_failed`
+- `test_build_run_failure_summary_raises_on_empty_run_id`
+
+### 2.9 Determinism + immutability
+
+- `test_failure_record_is_frozen_dataclass`
+- `test_failure_summary_failures_by_reason_is_mapping_proxy`
+- `test_aggregate_failures_deterministic_with_unsorted_input`
+- `test_evaluation_outcome_is_frozen_dataclass`
+
+### 2.10 sentinel 許容 invariant (§ 8.4 truth table)
+
+- `test_validate_finite_mission_gap_neg_inf_signed_margin_with_is_feasible_false_is_valid`
+- `test_validate_state_invariant_mission_gap_is_feasible_false_with_neg_inf_passes`
+- `test_validate_state_invariant_mission_gap_truth_table_full_coverage`
+
+### 2.11 Edge cases + schema v2 整合性
+
+- `test_truncate_exception_message_handles_unicode_correctly`
+- `test_failure_record_stage_enum_matches_synthesis_terms`
+- `test_make_failure_record_fingerprint_dedup_key_format`
+- `test_evaluation_outcome_generic_type_canonical_five_vs_mission_gap`
+
+総テスト数: 約 75 件 (11 sub-suite)
+
+---
+
+## C2 parallel-path 5 段階 grep DoD
+
+```bash
+# 段階 1 (直 import、 tests 除外)
+grep -rn --exclude-dir=tests -E "^from alpha_factory\.ga\.failure_handling import|^import alpha_factory\.ga\.failure_handling" \
+  src/alpha_factory scripts
+# 期待: 0 件
+
+# 段階 2-5 同様 (T065-T067 と同パターン)
+```
+
+詳細は T065-T067 と同様、 Phase 1 期待値はテスト以外 0 件。
+
+---
+
+## Phase 2 申し送り (T065/T066/T067 + run_ga.py + T071 と同時、 別 PR、 8 箇所)
+
+| # | ファイル / 箇所 | 担当 | 内容 |
+|---|---|---|---|
+| 1 | `src/alpha_factory/ga/__init__.py` で `from .failure_handling import ...` | T068 Phase 2 | T065-T067 と同時 export |
+| 2 | `scripts/alpha_factory/run_ga.py` per-individual chain で T068 wrapper 経由、 should_skip_downstream=True 個体を T065/T066/T067 入力から除外 | T068 Phase 2 | 旧経路全廃 |
+| 3 | (新規) `src/alpha_factory/observability/failure_metrics.py` で FailureSummary / RunFailureSummary 消費 | T071 | 構造化ログ emit |
+| 4 | (新規) `tests/integration/test_failure_handling_e2e.py` | T068 Phase 2 | T068 + T061-T064 統合 test |
+| 5 | `config/alpha_factory/default.yaml` に failure logging 設定 (max_message_length 等) | T068 Phase 2 | T058 schema v2 準拠 |
+| 6 | (新規) `docs/alpha_factory/runbook.md` に「全 fail → run abort」 運用ガイド | T068 Phase 2 | smoke / production 運用 |
+| 7 | (Phase 0) T064 BCEvaluationResult.c_pass_depth field 利用 | T064 follow-up | T066 / T067 と共通 |
+| 8 | run_ga.py で degraded 個体の T065 入力除外実装 | Phase 2 配線 | § 10.4 最終契約準拠 |
+
+---
+
+## 残論点 / Decision Pending
+
+### R3: `KeyboardInterrupt` 以外の signal の扱い
+
+採用方針: BaseException 系 (SystemExit / GeneratorExit / asyncio.CancelledError 等) は Python 標準動作で `except Exception` に捕捉されない、 透過。 詳細実装時に asyncio 環境での挙動を確認。
+
+### R4: T065/T066/T067 自身の例外 handling
+
+T065/T066/T067 は pure function で入口契約違反のみ ValueError。 T068 はこれらを wrap しない (caller が直接呼出、 ValueError 発生時は契約違反 indicator として上位 abort)。
+
+### R5: 部分 fail の許容率閾値
+
+採用: 閾値なし (synthesis § 7.7 「全 fail のみ abort」 厳密準拠)、 部分 fail は warning + 続行。 INCONCLUSIVE (smoke 後 R5 検討候補)。
+
+(R1 / R2 は概念で確定済、 残論点ではない)
+
+---
+
+## zenigame コード参考
+
+| 機構 | zenigame ファイル | 行番号 | fx 流用方針 |
+|---|---|---|---|
+| evaluator 例外 catch + +inf 化 | `ga/nsga2/core.py` | 1026-1052 | 構造化 (FailureRecord) で fx 化 |
+| 全 fail RuntimeError | `ga/nsga2/core.py` | 1085-1089 | T068 は bool 判定、 caller raise |
+| 部分 fail warning ログ | `ga/nsga2/core.py` | 1090-1095 | 構造化 (FailureSummary) で T071 emit |
+
+---
+
+## 完了判定
+
+- [ ] § 施策 1 で `failure_handling.py` の全シグネチャが概念設計 § 11.2 と完全一致
+- [ ] § 施策 2 でテスト計画 11 sub-suite × 約 75 件、 PR DoD 必須 5 件含む
+- [ ] § C2 5 段階 grep DoD で期待 0 件 (テスト以外)
+- [ ] § Phase 2 申し送り 8 箇所が具体ファイル名 + 担当 TODO 名
+- [ ] § 残論点 3 件 (R3/R4/R5) Decision Pending、 R1/R2 概念で確定済
+- [ ] T064 follow-up Phase 0 (c_pass_depth field) を前提 (validate_finite_bc_result で消費)
+- [ ] Codex 詳細レビュー APPROVED
