@@ -1,0 +1,455 @@
+diff --git a/config/alpha_factory/default.yaml b/config/alpha_factory/default.yaml
+index a4ef4e0..4eba3b1 100644
+--- a/config/alpha_factory/default.yaml
++++ b/config/alpha_factory/default.yaml
+@@ -79,6 +79,11 @@ stage_gate:
+     target_pass_rate: 0.15      # 探索圧の代理指標 (calibrate-gate T027 で使用)
+     alpha: 0.03
+     threshold: 0.0              # cycle 7 reset: cycle 5/6 で gate 0.4655→0.3655 でも A=0 継続。delta_max=0.1 では復旧 4 run 必要なので即時 reset。本 cycle は calibrate-gate skip。
++    # T034: trade_count<min_exposure_trade_count の個体は no_exposure reason +
++    # NO_EXPOSURE_FITNESS sentinel で淘汰する (selection_score tie-break で
++    # 「無取引優位」を構造的に解消)。default 1 = 「1 trade 未満 = 取引未成立」。
++    # 不変条件: 1 <= min_exposure_trade_count < live_criteria.trade_count_min。
++    min_exposure_trade_count: 1
+     # T027 calibrate-gate 設定 (deterministic 制御則)
+     # - 概念設計: docs/alpha_factory/concepts/calibrate-gate.md
+     # - SSOT: 本セクション、loader: scripts/alpha_factory/calibrate_gate.py
+diff --git a/docs/alpha_factory/stage-gates.md b/docs/alpha_factory/stage-gates.md
+index 4026bb2..7209c2b 100644
+--- a/docs/alpha_factory/stage-gates.md
++++ b/docs/alpha_factory/stage-gates.md
+@@ -114,10 +114,18 @@ display 用に `reason_if_failed` property (`";".join(reason_codes)`) を提供
+ 
+ | Stage | Reason Code | 意味 |
+ |-------|-------------|------|
+-| A | `system_failure` | backtest / size_norm 計算で例外 |
+-| A | `no_trades` | trade_count == 0 |
+-| A | `metric_unavailable` | sharpe が計算不可 (returns 不足など) |
++| A | `system_failure` | backtest / size_norm 計算で例外。payload `fitness_pen` に `SYSTEM_FAILURE_FITNESS=-1e12` (T034) |
++| A | `no_exposure` | trade_count < `min_exposure_trade_count` (default 1)。旧 `no_trades` を置き換え。payload `fitness_pen` に `NO_EXPOSURE_FITNESS=-1e9` (T034) |
++| A | `metric_unavailable` | sharpe が計算不可 (returns 不足など)。payload `fitness_pen` に `METRIC_UNAVAILABLE_FITNESS=-1e6` (T034) |
+ | A | `below_threshold` | fitness_pen ≤ stage_a_threshold |
++
++**T034 sentinel 序列** (selection_score tie-break で「無取引優位」を解消):
++```
++system_failure (-1e12) < no_exposure (-1e9) < metric_unavailable (-1e6) < below_threshold (実値) < 通常
++```
++calibrate_gate は `STAGE_A_FITNESS_SENTINELS` 集合一致で sentinel を quantile pool から除外する (混入による threshold 不当緩和を防ぐ)。詳細: [stage_gate.py](../../src/alpha_factory/stage_gate.py) / [calibrate_gate.py](../../src/alpha_factory/calibrate_gate.py)。
++
++**`min_exposure_trade_count` 不変条件**: `1 <= min_exposure_trade_count < live_criteria.trade_count_min` (live_criteria 緩和回避、禁止事項 #4 ガード)。`live_criteria.trade_count_min == 0` (緩和テスト用) では validation skip。
+ | B | `no_folds` | bars が train+embargo+test 未満で fold が出ない |
+ | B | `insufficient_folds` | fold が 1 のみ (n_fold < 2) |
+ | B | `median_oos_sharpe<min` | median OOS Sharpe < 閾値 |
+diff --git a/src/alpha_factory/calibrate_gate.py b/src/alpha_factory/calibrate_gate.py
+index f796f11..84b23cc 100644
+--- a/src/alpha_factory/calibrate_gate.py
++++ b/src/alpha_factory/calibrate_gate.py
+@@ -34,6 +34,8 @@ import numpy as np
+ import pyarrow as pa
+ import structlog
+ 
++from src.alpha_factory.stage_gate import STAGE_A_FITNESS_SENTINELS
++
+ __all__ = [
+     "AGGREGATION_MODES",
+     "REQUIRED_COLS",
+@@ -281,6 +283,21 @@ class AggregatedSample:
+     window: int
+ 
+ 
++def _pool_excluding_sentinels(rows: Iterable[Mapping[str, Any]]) -> tuple[float, ...]:
++    """T034: fitness_pen pool から Stage A failure sentinel 値を除外する。
++
++    sentinel (SYSTEM_FAILURE / NO_EXPOSURE / METRIC_UNAVAILABLE) を quantile 計算
++    に混ぜると threshold が不当に低く出る (探索圧崩壊) ため、値一致 (set
++    membership) で明示除外する。閾値分離 (例: < -100) は fitness_pen 通常実値域
++    と被る可能性があり安全でない (sharpe 下限 clamp が無いため)。
++    """
++    return tuple(
++        float(r["fitness_pen"])
++        for r in rows
++        if float(r["fitness_pen"]) not in STAGE_A_FITNESS_SENTINELS
++    )
++
++
+ def aggregate_sample(
+     rows: Iterable[Mapping[str, Any]],
+     *,
+@@ -323,14 +340,14 @@ def aggregate_sample(
+         n_used = len(used)
+         pass_count = sum(1 for r in used if bool(r["stage_a_pass"]))
+         actual = (pass_count / n_used) if n_used > 0 else 0.0
+-        pool = tuple(float(r["fitness_pen"]) for r in used)
++        pool = _pool_excluding_sentinels(used)
+ 
+     elif mode == "all_generations":
+         used = rows_list
+         n_used = len(used)
+         pass_count = sum(1 for r in used if bool(r["stage_a_pass"]))
+         actual = (pass_count / n_used) if n_used > 0 else 0.0
+-        pool = tuple(float(r["fitness_pen"]) for r in used)
++        pool = _pool_excluding_sentinels(used)
+ 
+     else:  # generation_weighted_mean
+         gen_to_rows: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
+@@ -348,8 +365,8 @@ def aggregate_sample(
+             )
+             weighted_sum += weights[g] * gen_pass_rate
+         actual = (weighted_sum / total_w) if total_w > 0 else 0.0
+-        # 全世代統一: pool は全行
+-        pool = tuple(float(r["fitness_pen"]) for r in rows_list)
++        # 全世代統一: pool は全行 (sentinel 除外)
++        pool = _pool_excluding_sentinels(rows_list)
+         n_used = len(rows_list)
+         pass_count = round(actual * n_used)
+ 
+diff --git a/src/alpha_factory/config.py b/src/alpha_factory/config.py
+index dfddb21..f6f4c90 100644
+--- a/src/alpha_factory/config.py
++++ b/src/alpha_factory/config.py
+@@ -328,6 +328,10 @@ def _build_stage_gate(
+         "stage_a_window_days": int(a_raw.get("window_days", 60)),
+         "stage_a_alpha": float(a_raw.get("alpha", 0.03)),
+         "stage_a_threshold": float(a_raw.get("threshold", 0.0)),
++        # T034: 取引未成立 (no_exposure) を sentinel 化するための下限
++        "min_exposure_trade_count": int(
++            a_raw.get("min_exposure_trade_count", 1)
++        ),
+         "stage_b_window_months": int(b_raw.get("window_months", 18)),
+         "wf_train_days": int(b_raw.get("wf_train_days", 120)),
+         "wf_test_days": int(b_raw.get("wf_test_days", 20)),
+diff --git a/src/alpha_factory/stage_gate.py b/src/alpha_factory/stage_gate.py
+index 447e280..e5afc1b 100644
+--- a/src/alpha_factory/stage_gate.py
++++ b/src/alpha_factory/stage_gate.py
+@@ -44,7 +44,27 @@ from src.ga.complexity import genome_size_norm
+ 
+ logger = structlog.get_logger(__name__)
+ 
++# T034: Stage A fitness_pen sentinel 序列。
++# archive `_required_float` は None → 0.0 fallback するため、Stage A の 3 失敗
++# 経路 (system_failure / no_exposure / metric_unavailable) は payload に明示的な
++# 大負値 sentinel を入れることで selection_score tie-break で「無取引優位」を解消する。
++# 序列: system_failure < no_exposure < metric_unavailable < below_threshold (実値)
++# 詳細: docs/alpha_factory/stage-gates.md / devnotes/20260425-0937-risk-no-trade-fitness-guard/
++SYSTEM_FAILURE_FITNESS: Final[float] = -1e12
++NO_EXPOSURE_FITNESS: Final[float] = -1e9
++METRIC_UNAVAILABLE_FITNESS: Final[float] = -1e6
++
++# T034: calibrate_gate が threshold 計算時に除外する sentinel 値の集合。
++# 値一致 (set membership) で判定する (閾値分離は通常実値域と被るため安全でない)。
++STAGE_A_FITNESS_SENTINELS: Final[frozenset[float]] = frozenset(
++    {SYSTEM_FAILURE_FITNESS, NO_EXPOSURE_FITNESS, METRIC_UNAVAILABLE_FITNESS}
++)
++
+ __all__ = [
++    "METRIC_UNAVAILABLE_FITNESS",
++    "NO_EXPOSURE_FITNESS",
++    "STAGE_A_FITNESS_SENTINELS",
++    "SYSTEM_FAILURE_FITNESS",
+     "CrossPairEvaluator",
+     "CrossPairInputs",
+     "CrossPairResult",
+@@ -74,6 +94,13 @@ class StageGateConfig:
+     stage_a_window_days: int = 60
+     stage_a_alpha: float = 0.03
+     stage_a_threshold: float = 0.0  # 暫定固定 (calibrate-gate TODO で動的化)
++    # T034: 取引が成立しなかった個体 (trade_count < min_exposure_trade_count) を
++    # `no_exposure` reason + sentinel fitness_pen で淘汰する。
++    # default 1 = 「1 trade 未満 = 取引未成立 = 評価不能」(従来 no_trades と同等)。
++    # live_criteria.trade_count_min との不変条件: min_exposure_trade_count <
++    # trade_count_min (live_criteria 緩和回避、__post_init__ で検証)。
++    # 詳細: docs/alpha_factory/stage-gates.md (sentinel 序列)
++    min_exposure_trade_count: int = 1
+ 
+     # Stage B
+     stage_b_window_months: int = 18
+@@ -145,6 +172,31 @@ class StageGateConfig:
+             raise ValueError(
+                 f"live_criteria missing required keys: {sorted(missing)}"
+             )
++        # T034: min_exposure_trade_count の不変条件:
++        # 0 < min_exposure_trade_count < live_criteria.trade_count_min。
++        # 上限を trade_count_min 未満に制限することで「Stage A で trade_count_min
++        # まで要求 = 事実上 live_criteria.trade_count_min を緩和」を防ぐ
++        # (禁止事項 #4 ガード)。
++        if self.min_exposure_trade_count < 1:
++            raise ValueError(
++                "min_exposure_trade_count must be >= 1: "
++                f"got {self.min_exposure_trade_count}"
++            )
++        # 禁止事項 #4 ガード: live_criteria.trade_count_min を Stage A 内で
++        # 事実上強化することを禁ずる。trade_count_min が緩和テスト等で 0/小さい
++        # 場合 (relaxed_lc) は live_criteria 自体が「制約無効」を表明している
++        # ため本ガードは適用しない (defensive 動作)。
++        lc_trade_count_min = int(self.live_criteria["trade_count_min"])
++        if (
++            lc_trade_count_min >= 1
++            and self.min_exposure_trade_count >= lc_trade_count_min
++        ):
++            raise ValueError(
++                "min_exposure_trade_count must be < live_criteria.trade_count_min "
++                f"(禁止事項 #4 ガード): got min_exposure_trade_count="
++                f"{self.min_exposure_trade_count}, "
++                f"trade_count_min={lc_trade_count_min}"
++            )
+         # MappingProxyType で frozen dict 化（外部書換不能）
+         object.__setattr__(
+             self,
+@@ -258,7 +310,7 @@ def evaluate_stage_a(
+     控除して ``fitness_pen`` を算出。``stage_a_threshold`` 超過で通過。
+ 
+     判定優先順位 (canonical):
+-        ``system_failure`` > ``no_trades`` > ``metric_unavailable`` >
++        ``system_failure`` > ``no_exposure`` > ``metric_unavailable`` >
+         ``below_threshold`` > 通過。
+ 
+     Args:
+@@ -325,13 +377,19 @@ def evaluate_stage_a(
+         exception_caught = True
+ 
+     # 判定優先順位 (canonical):
+-    #   system_failure > no_trades > metric_unavailable > below_threshold
++    #   system_failure > no_exposure > metric_unavailable > below_threshold
++    # T034: 3 失敗経路は payload に sentinel fitness_pen を入れる (None → 0.0
++    # fallback の排除、selection_score tie-break で「無取引優位」を解消)。
++    # fitness_raw は変更しない (観察値は保持、ペナルティは fitness_pen のみ)。
+     if exception_caught:
+         reasons.append("system_failure")
+-    elif trade_count < 1:
+-        reasons.append("no_trades")
++        fitness_pen = SYSTEM_FAILURE_FITNESS
++    elif trade_count < stage_config.min_exposure_trade_count:
++        reasons.append("no_exposure")
++        fitness_pen = NO_EXPOSURE_FITNESS
+     elif sharpe_raw is None:
+         reasons.append("metric_unavailable")
++        fitness_pen = METRIC_UNAVAILABLE_FITNESS
+     else:
+         assert size_norm_val is not None  # type narrowing
+         fitness_raw = sharpe_raw
+diff --git a/tests/alpha_factory/test_calibrate_gate.py b/tests/alpha_factory/test_calibrate_gate.py
+index 20e326c..25f26ed 100644
+--- a/tests/alpha_factory/test_calibrate_gate.py
++++ b/tests/alpha_factory/test_calibrate_gate.py
+@@ -511,3 +511,55 @@ def test_validate_schema_raises_on_nan_in_trade_count_via_float_column() -> None
+     )
+     with pytest.raises(SchemaMismatchError, match="NaN or Inf"):
+         validate_schema(table)
++
++
++# T034: sentinel 値除外 ========================================================
++
++
++class TestT034SentinelExclusion:
++    """fitness_pen pool は Stage A failure sentinel を除外する。
++    sentinel が混入すると quantile が不当に低くなり threshold が過剰緩和される。"""
++
++    def test_sentinel_values_excluded_from_pool_last_k(self) -> None:
++        from src.alpha_factory.stage_gate import (
++            METRIC_UNAVAILABLE_FITNESS,
++            NO_EXPOSURE_FITNESS,
++            SYSTEM_FAILURE_FITNESS,
++        )
++        rows = [
++            _row(generation=0, stage_a_pass=False, fitness_pen=NO_EXPOSURE_FITNESS),
++            _row(generation=0, stage_a_pass=False, fitness_pen=SYSTEM_FAILURE_FITNESS),
++            _row(generation=0, stage_a_pass=False, fitness_pen=METRIC_UNAVAILABLE_FITNESS),
++            _row(generation=0, stage_a_pass=True, fitness_pen=0.5),
++            _row(generation=0, stage_a_pass=False, fitness_pen=-0.1),
++        ]
++        s = aggregate_sample(rows, mode="last_k_generations", window=1)
++        # sentinel 3 件除外 → pool は実値 2 件のみ
++        assert s.n_rows_used == 5  # used 自体は除外しない (pass_rate 計算に使う)
++        assert len(s.fitness_pen_pool) == 2
++        assert sorted(s.fitness_pen_pool) == [-0.1, 0.5]
++
++    def test_sentinel_values_excluded_from_pool_all_generations(self) -> None:
++        from src.alpha_factory.stage_gate import NO_EXPOSURE_FITNESS
++        rows = [
++            _row(generation=g, stage_a_pass=False, fitness_pen=NO_EXPOSURE_FITNESS)
++            for g in range(3)
++        ] + [
++            _row(generation=0, stage_a_pass=False, fitness_pen=-0.5),
++            _row(generation=1, stage_a_pass=True, fitness_pen=0.2),
++        ]
++        s = aggregate_sample(rows, mode="all_generations", window=1)
++        assert len(s.fitness_pen_pool) == 2
++        assert sorted(s.fitness_pen_pool) == [-0.5, 0.2]
++
++    def test_sentinel_values_excluded_from_pool_weighted_mean(self) -> None:
++        from src.alpha_factory.stage_gate import SYSTEM_FAILURE_FITNESS
++        rows = [
++            _row(generation=0, stage_a_pass=False, fitness_pen=SYSTEM_FAILURE_FITNESS),
++            _row(generation=0, stage_a_pass=False, fitness_pen=0.1),
++            _row(generation=1, stage_a_pass=True, fitness_pen=0.3),
++        ]
++        s = aggregate_sample(rows, mode="generation_weighted_mean", window=1)
++        # sentinel は除外、実値 2 件のみ
++        assert len(s.fitness_pen_pool) == 2
++        assert sorted(s.fitness_pen_pool) == [0.1, 0.3]
+diff --git a/tests/alpha_factory/test_stage_gate.py b/tests/alpha_factory/test_stage_gate.py
+index 591fc42..6712327 100644
+--- a/tests/alpha_factory/test_stage_gate.py
++++ b/tests/alpha_factory/test_stage_gate.py
+@@ -21,6 +21,10 @@ from typing import Any, ClassVar, cast
+ import pytest
+ 
+ from src.alpha_factory.stage_gate import (
++    METRIC_UNAVAILABLE_FITNESS,
++    NO_EXPOSURE_FITNESS,
++    STAGE_A_FITNESS_SENTINELS,
++    SYSTEM_FAILURE_FITNESS,
+     TRADING_DAYS_PER_YEAR,
+     CrossPairResult,
+     StageGateConfig,
+@@ -357,8 +361,9 @@ class TestStageA:
+         assert isinstance(ac, int)
+         assert ac >= 0
+ 
+-    def test_no_trades_reason(self) -> None:
+-        """Constant 0.0 では entry シグナルが発生しない → trade_count == 0."""
++    def test_no_exposure_reason(self) -> None:
++        """T034: Constant 0.0 では entry シグナルが発生しない → trade_count == 0
++        → no_exposure (旧 no_trades)。fitness_pen に NO_EXPOSURE_FITNESS が入る。"""
+         bars = _make_continuous_bars(2, bars_per_day=4)
+         ev = ConstantPrimitiveEvaluator(value=0.0)
+         res = evaluate_stage_a(
+@@ -370,7 +375,10 @@ class TestStageA:
+             StageGateConfig(),
+         )
+         assert not res.passed
+-        assert res.reason_codes == ("no_trades",)
++        assert res.reason_codes == ("no_exposure",)
++        payload = cast(dict[str, Any], _envelope(res)["payload"])
++        # T034: payload fitness_pen は sentinel 値 (None ではなく数値で埋まる)
++        assert payload["fitness_pen"] == NO_EXPOSURE_FITNESS
+ 
+     def test_system_failure_reason(self) -> None:
+         bars = _make_continuous_bars(2, bars_per_day=4)
+@@ -401,9 +409,9 @@ class TestStageA:
+             ev,
+             stage_cfg,
+         )
+-        # trade があれば below_threshold、なければ no_trades のいずれか
++        # T034: trade があれば below_threshold、なければ no_exposure のいずれか
+         assert not res.passed
+-        assert res.reason_codes[0] in {"below_threshold", "no_trades", "metric_unavailable"}
++        assert res.reason_codes[0] in {"below_threshold", "no_exposure", "metric_unavailable"}
+ 
+     def test_fitness_pen_includes_complexity_penalty(self) -> None:
+         """size_norm が大きい genome は fitness_pen が必ず低い (penalty 反映).
+@@ -1420,3 +1428,113 @@ class TestT042StageCLiveCriteriaAnnualized:
+             ann = float(payload["trade_sharpe_annualized"])
+             expected = ann >= 0.5
+             assert payload["live_criteria_pass"]["sharpe"] is expected
++
++
++# T034: 無取引優位の遮断 (no_exposure / sentinel) ===============================
++
++
++class TestT034NoExposureSentinel:
++    """trade_count<min_exposure_trade_count を no_exposure reason + sentinel
++    fitness_pen で淘汰する。selection_score tie-break で「無取引優位」を
++    構造的に解消する設計の動作検証。"""
++
++    def test_sentinel_constants_have_correct_ordering(self) -> None:
++        """sentinel 序列: system_failure < no_exposure < metric_unavailable < 0."""
++        assert SYSTEM_FAILURE_FITNESS < NO_EXPOSURE_FITNESS
++        assert NO_EXPOSURE_FITNESS < METRIC_UNAVAILABLE_FITNESS
++        assert METRIC_UNAVAILABLE_FITNESS < 0.0
++
++    def test_sentinel_set_membership(self) -> None:
++        """STAGE_A_FITNESS_SENTINELS は 3 sentinel 全てを含む."""
++        assert SYSTEM_FAILURE_FITNESS in STAGE_A_FITNESS_SENTINELS
++        assert NO_EXPOSURE_FITNESS in STAGE_A_FITNESS_SENTINELS
++        assert METRIC_UNAVAILABLE_FITNESS in STAGE_A_FITNESS_SENTINELS
++        assert len(STAGE_A_FITNESS_SENTINELS) == 3
++
++    def test_no_exposure_payload_fitness_pen_is_sentinel(self) -> None:
++        """trade_count=0 なら payload fitness_pen は NO_EXPOSURE_FITNESS."""
++        bars = _make_continuous_bars(2, bars_per_day=4)
++        ev = ConstantPrimitiveEvaluator(value=0.0)
++        res = evaluate_stage_a(
++            _one_clause_genome(),
++            bars,
++            usd_jpy_meta(),
++            _backtest_config(),
++            ev,
++            StageGateConfig(),
++        )
++        payload = cast(dict[str, Any], _envelope(res)["payload"])
++        assert payload["fitness_pen"] == NO_EXPOSURE_FITNESS
++
++    def test_system_failure_payload_fitness_pen_is_sentinel(self) -> None:
++        """exception 経路では payload fitness_pen は SYSTEM_FAILURE_FITNESS."""
++        bars = _make_continuous_bars(2, bars_per_day=4)
++        ev = _RaisingEvaluator()
++        res = evaluate_stage_a(
++            _one_clause_genome(),
++            bars,
++            usd_jpy_meta(),
++            _backtest_config(),
++            ev,
++            StageGateConfig(),
++        )
++        payload = cast(dict[str, Any], _envelope(res)["payload"])
++        assert "system_failure" in res.reason_codes
++        assert payload["fitness_pen"] == SYSTEM_FAILURE_FITNESS
++
++    def test_min_exposure_threshold_above_one_triggers_no_exposure(self) -> None:
++        """min_exposure_trade_count=10 で trade_count=5 → no_exposure 判定."""
++        bars = _make_oscillating_bars(5, bars_per_day=4)
++        ev = _AlternatingEvaluator()
++        # min_exposure_trade_count=10, live_criteria 緩和で他軸は通る
++        relaxed_lc = {
++            "sharpe_min": -1e9,
++            "total_pnl_min": -1e9,
++            "max_drawdown_max": 1.0,
++            "trade_count_min": 100,  # >= 10 + 1 (validation)
++            "trade_count_max": 1_000_000,
++        }
++        cfg = StageGateConfig(
++            live_criteria=relaxed_lc,
++            min_exposure_trade_count=10,
++            stage_a_threshold=-1e9,
++        )
++        res = evaluate_stage_a(
++            _one_clause_genome(),
++            bars,
++            usd_jpy_meta(),
++            _backtest_config(),
++            ev,
++            cfg,
++        )
++        payload = cast(dict[str, Any], _envelope(res)["payload"])
++        # trade_count が 10 未満なら no_exposure、十分にあれば pass / below
++        if payload["trade_count"] < 10:
++            assert "no_exposure" in res.reason_codes
++            assert payload["fitness_pen"] == NO_EXPOSURE_FITNESS
++
++    def test_min_exposure_must_be_lt_trade_count_min(self) -> None:
++        """validation: min_exposure_trade_count >= live_criteria.trade_count_min は ValueError."""
++        with pytest.raises(ValueError, match="禁止事項 #4 ガード"):
++            StageGateConfig(min_exposure_trade_count=50)  # default trade_count_min=50
++
++    def test_min_exposure_must_be_at_least_one(self) -> None:
++        """validation: min_exposure_trade_count < 1 は ValueError."""
++        with pytest.raises(ValueError, match="must be >= 1"):
++            StageGateConfig(min_exposure_trade_count=0)
++
++    def test_min_exposure_validation_skipped_when_lc_trade_count_min_zero(self) -> None:
++        """live_criteria.trade_count_min=0 (緩和テスト用) では validation skip."""
++        relaxed_lc = {
++            "sharpe_min": 0.0,
++            "total_pnl_min": 0.0,
++            "max_drawdown_max": 1.0,
++            "trade_count_min": 0,  # 制約無効
++            "trade_count_max": 1_000_000,
++        }
++        # min_exposure_trade_count=1 で 0 と比較されないこと
++        cfg = StageGateConfig(
++            live_criteria=relaxed_lc,
++            min_exposure_trade_count=1,
++        )
++        assert cfg.min_exposure_trade_count == 1

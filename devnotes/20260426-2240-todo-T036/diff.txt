@@ -1,0 +1,1480 @@
+diff --git a/config/alpha_factory/default.yaml b/config/alpha_factory/default.yaml
+index 4eba3b1..7c417c5 100644
+--- a/config/alpha_factory/default.yaml
++++ b/config/alpha_factory/default.yaml
+@@ -179,3 +179,17 @@ improve_cycle:
+   plateau_cycles: 3
+   plateau_mutation_bump: 0.05
+   mutation_rate_max: 0.6
++
++# T036: Factor Shadow Plane (FSP) — single instrument 専用 外生因子 diagnostic layer
++# - 概念設計: devnotes/20260425-0956-factor-shadow-plane-single-instr/conceptual-design.md
++# - Phase 1: diagnostic-only (選抜介入なし)、post-RUN 独立計算
++# - default で無効化 (enabled: false)。実データ無い間は skipped_no_factor_data を
++#   archive に記録するのみ (副作用なし)。enabled=true 化前に data/raw/fred/DXY.csv
++#   (close 列必須) を整備すること。
++factor_shadow:
++  enabled: false
++  factors: ["DXY"]
++  sampling_mode: "daily"
++  window_days: 60
++  factor_asof_lag: 1
++  conditioning_set: "all_bars_all_individuals"
+diff --git a/docs/alpha_factory/factor-shadow-plane.md b/docs/alpha_factory/factor-shadow-plane.md
+new file mode 100644
+index 0000000..9b1bc3e
+--- /dev/null
++++ b/docs/alpha_factory/factor-shadow-plane.md
+@@ -0,0 +1,95 @@
++# Factor Shadow Plane (FSP) — Single Instrument Diagnostic Layer
++
++**TODO**: T036 (Phase 0 Critical / 概念設計 Round 6 APPROVED)
++**実装**: [`src/alpha_factory/fsp_updater.py`](../../src/alpha_factory/fsp_updater.py)
++**Config**: [`src/alpha_factory/config.py`](../../src/alpha_factory/config.py) `FspConfig`
++**起点監査**: Run 7/8/9 すべての run_report に `cross_pair_runtime_mode: skipped_single_instrument` が記録されていた事実 (`ii_lite_pass: True=0, False=0, None=120`)。single instrument RUN では cross-pair 妥当性検証経路が完全に空転する問題への対応。
++
++## 目的
++
++single instrument RUN では cross-pair (T016) が無効化される (`skipped_single_instrument`) ため、「ペアを跨ぐ共通因子で動いているのか / そのペア固有の癖で動いているのか」を判別する経路が完全に欠落していた。FSP は **外生因子 (DXY 等) との相関で個体ごとの「共通因子帯への依存度」を測る observability layer** を提供する。
++
++**重要**: Phase 1 は **diagnostic-only** (選抜介入なし)。GA fitness や `stage_*.passed` には一切影響しない。post-RUN で archive Parquet を in-place 更新するだけ。
++
++## Dispatch Matrix
++
++`fsp_runtime_mode` は以下 6 値のいずれかを取る:
++
++| RUN 形態 | enabled | factor data | bars | mode |
++|---------|---------|------------|------|------|
++| multi-pair RUN | any | any | any | `skipped_multi_pair_run` (T016 と排他) |
++| single instrument RUN | false | any | any | `skipped_disabled` |
++| single instrument RUN | true | 不在 | any | `skipped_no_factor_data` |
++| single instrument RUN | true | available | bars < window | `skipped_window_too_short` |
++| single instrument RUN | true | available | bars >= window, キー不一致 | `skipped_conditioning_mismatch` |
++| single instrument RUN | true | available | bars >= window, キー一致 | **`active`** |
++
++dispatch 順序は SSOT として [`_decide_runtime_mode`](../../src/alpha_factory/fsp_updater.py) に記述。
++
++## 計測内容（Phase 1）
++
++| Archive 列 | 型 | 説明 |
++|-----------|---|------|
++| `fsp_runtime_mode` | string | dispatch 結果（6 値 enum） |
++| `fsp_sampling_mode` | string | `"daily"` 固定 (Phase 1) |
++| `fsp_factor_set` | list[string] | `["DXY"]` (Phase 1 は 1 因子のみ) |
++| `fsp_rolling_corr_60d` | list[float64] | rolling 60d Spearman (窓内 rank-Pearson 近似) |
++| `fsp_explained_variance` | float64 | 全期間 OLS R² (unclipped、R²<0 も記録) |
++| `fsp_idio_ratio` | float64 | `1 - R²` (unclipped) |
++
++## 換算式 / 前提
++
++### Sampling
++- **daily**: PnL は UTC 日次境界で集計、因子も日次そのまま (FRED の DXY/VIX は日足密度のため intraday 補間しない)
++- `factor_asof_lag=1`: 当日 t に対する factor return は前日の pct_change (look-ahead bias 回避)
++
++### Conditioning Set
++- 戦略リターン: archive に書き込まれた個体すべて (Stage A 通過のみ等のフィルタ禁止)
++- Bar grid: 全 bar 上で評価 (ポジション保有日のみではない、survivor 限定ではない)
++
++### Statistics
++- rolling Spearman: 各窓内で `rank()` を取り Pearson 相関 (Phase 1 近似、`pandas.Rolling.corr` に Spearman メソッドが無いため)
++- OLS R²: numpy `lstsq` で β を解いて `1 - SSres/SStot`、unclipped (R² < 0 も記録)
++- `fsp_idio_ratio = 1 - R²` (R²<0 では 1 を超える可能性あり、Phase 1 はそのまま記録)
++
++学術引用:
++- Fama, E. F., & French, K. R. (1993). Common risk factors in the returns on stocks and bonds. _Journal of Financial Economics_, 33(1), 3-56. (factor model 文脈の出発点)
++
++## 北極星制約・禁止事項チェック
++
++| 禁止事項 | 該当性 |
++|---------|------|
++| 1. 評価期間延長 | 該当なし (post-RUN observability) |
++| 2. 見た目の数値改善 | 該当なし (archive 観測のみ追加) |
++| 3. GA hack | 該当なし (fitness / selection に影響無) |
++| 4. live_criteria 緩和 | 該当なし |
++| 5. 過剰な複雑化 | Phase 1 は 1 因子・diagnostic only に限定 |
++| 6. 取引回数削減 | 該当なし |
++| 7. オーバーナイト前提 | 該当なし |
++| 8. archive スキーマ伝搬漏れ | 6 列を `GENOMES_SCHEMA` / `_create_row_template` の 4 段で完備 |
++
++## H1 評価クエリ
++
++dispatch 健全性と整合性失敗を分離して観測:
++
++- `evaluate_h1(rows)`: eligible (`active` + `skipped_conditioning_mismatch`) のうち `active` 比率
++- `evaluate_key_integrity_failure_rate(rows)`: eligible のうち `skipped_conditioning_mismatch` 比率
++
++`H1_NON_ELIGIBLE_MODES = {skipped_multi_pair_run, skipped_disabled, skipped_no_factor_data, skipped_window_too_short}` は eligible から除外。
++
++## 冪等性
++
++- `fsp_runtime_mode` が null の行のみ再計算 (`force_recalculate=False` 既定)
++- POSIX atomic write (tmp → fsync → rename → fsync(parent dir)) でクラッシュ耐性
++- 全行既処理時は `active` を return (`rows_processed=0` を log で no-op として識別可能)
++
++## Phase 1 制限事項
++
++- **trade ledger 統合は別 TODO で実施**: 現時点では PnL 系列の取得経路が未整備のため、`active` dispatch でも `fsp_results` が空 dict となり下流で `skipped_conditioning_mismatch` を返す (詳細設計 §11 注記参照)
++- データ準備: `data/raw/fred/DXY.csv` (close 列必須) を別途整備すること (`scripts/fetch_fred.py` を参照)
++- 多因子 (VIX / 金利差) は Phase 2 で導入
++- `fsp_partial_corr` は Phase 1 不要
++
++## 変更履歴
++
++- 2026-04-26: T036 Phase 1 初期実装。yaml + FspConfig + GENOMES_SCHEMA 6 列 + fsp_updater モジュール + dispatch matrix + atomic write + 単体/統合テスト 36 件。trade ledger 統合は次フェーズへ申し送り。
+diff --git a/pyproject.toml b/pyproject.toml
+index 7597d7a..a0a808d 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -16,6 +16,7 @@ dependencies = [
+     "structlog",
+     "pyyaml>=6.0.3",
+     "numpy>=1.26",
++    "pandas>=2.2",
+     "pyarrow>=24.0.0",
+     "ruamel-yaml>=0.19.1",
+ ]
+diff --git a/src/alpha_factory/archive.py b/src/alpha_factory/archive.py
+index 17a853f..2db82ef 100644
+--- a/src/alpha_factory/archive.py
++++ b/src/alpha_factory/archive.py
+@@ -92,6 +92,17 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
+         # 観測指標として archive/report に記録。GA fitness や stage_c.passed には影響しない。
+         # 詳細: docs/alpha_factory/mission-score.md
+         pa.field("mission_score", pa.float64(), nullable=True),
++        # T036: Factor Shadow Plane (FSP) — single instrument 用 diagnostic layer。
++        # post-RUN updater (src/alpha_factory/fsp_updater.py) が一括書き戻し。
++        # collect_stage_* は触らない (template 初期化時の None のまま flush)。
++        # 詳細: docs/alpha_factory/factor-shadow-plane.md /
++        # devnotes/20260425-0956-factor-shadow-plane-single-instr/
++        pa.field("fsp_runtime_mode", pa.string(), nullable=True),
++        pa.field("fsp_sampling_mode", pa.string(), nullable=True),
++        pa.field("fsp_factor_set", pa.list_(pa.string()), nullable=True),
++        pa.field("fsp_rolling_corr_60d", pa.list_(pa.float64()), nullable=True),
++        pa.field("fsp_explained_variance", pa.float64(), nullable=True),
++        pa.field("fsp_idio_ratio", pa.float64(), nullable=True),
+     ]
+ )
+ 
+@@ -156,6 +167,13 @@ def _create_row_template() -> dict[str, Any]:
+         "stage_b_reason_codes": None,
+         # T043: mission_score (Stage C 評価時のみ書き込み、それ以外は None)
+         "mission_score": None,
++        # T036: FSP — post-RUN updater が一括書き戻し、template は null 初期化のみ
++        "fsp_runtime_mode": None,
++        "fsp_sampling_mode": None,
++        "fsp_factor_set": None,
++        "fsp_rolling_corr_60d": None,
++        "fsp_explained_variance": None,
++        "fsp_idio_ratio": None,
+     }
+ 
+ 
+diff --git a/src/alpha_factory/config.py b/src/alpha_factory/config.py
+index f6f4c90..eea0abb 100644
+--- a/src/alpha_factory/config.py
++++ b/src/alpha_factory/config.py
+@@ -34,6 +34,7 @@ __all__ = [
+     "BacktestSectionConfig",
+     "CrossPairConfig",
+     "DatasetConfig",
++    "FspConfig",
+     "GAConfig",
+     "GAFeasibilityConfig",
+     "StageGateConfig",
+@@ -195,6 +196,38 @@ class StageWindowsConfig:
+             raise ValueError("stage_windows.stage_c_holdout_days must be >= 1")
+ 
+ 
++@dataclass(frozen=True)
++class FspConfig:
++    """T036: Factor Shadow Plane (FSP) — single instrument 専用 diagnostic layer 設定.
++
++    Phase 1: diagnostic-only (選抜介入なし)、post-RUN 独立計算。default で無効。
++    詳細: docs/alpha_factory/factor-shadow-plane.md (新規) /
++    devnotes/20260425-0956-factor-shadow-plane-single-instr/
++    """
++
++    enabled: bool = False
++    factors: tuple[str, ...] = ("DXY",)
++    sampling_mode: Literal["daily"] = "daily"
++    window_days: int = 60
++    factor_asof_lag: int = 1
++    conditioning_set: Literal[
++        "all_bars_all_individuals"
++    ] = "all_bars_all_individuals"
++
++    def __post_init__(self) -> None:
++        if self.window_days < 1:
++            raise ValueError(
++                f"factor_shadow.window_days must be >= 1: got {self.window_days}"
++            )
++        if self.factor_asof_lag < 0:
++            raise ValueError(
++                f"factor_shadow.factor_asof_lag must be >= 0: "
++                f"got {self.factor_asof_lag}"
++            )
++        if not self.factors:
++            raise ValueError("factor_shadow.factors must be non-empty")
++
++
+ @dataclass(frozen=True)
+ class AlphaFactoryConfig:
+     """Alpha Factory 全体 config。loader から返される SSOT 構造。
+@@ -209,6 +242,7 @@ class AlphaFactoryConfig:
+     stage_gate: StageGateConfig
+     cross_pair: CrossPairConfig
+     stage_windows: StageWindowsConfig
++    fsp: FspConfig = field(default_factory=FspConfig)
+ 
+     @property
+     def live_criteria(self) -> Mapping[str, float | int]:
+@@ -423,4 +457,27 @@ def load_config(
+         stage_windows=_build_stage_windows(
+             raw.get("stage_windows") or {}, stage_gate
+         ),
++        fsp=_build_fsp(raw.get("factor_shadow") or {}),
+     )
++
++
++def _build_fsp(raw: Mapping[str, Any]) -> FspConfig:
++    """T036: factor_shadow yaml section → FspConfig.
++
++    yaml キー名は `factor_shadow` (FSP は実装内部の略称、yaml は full name)。
++    factors は list → tuple 変換 (FspConfig は frozen dataclass)。
++    """
++    kwargs: dict[str, Any] = {}
++    if "enabled" in raw:
++        kwargs["enabled"] = bool(raw["enabled"])
++    if "factors" in raw:
++        kwargs["factors"] = tuple(str(f) for f in raw["factors"])
++    if "sampling_mode" in raw:
++        kwargs["sampling_mode"] = str(raw["sampling_mode"])
++    if "window_days" in raw:
++        kwargs["window_days"] = int(raw["window_days"])
++    if "factor_asof_lag" in raw:
++        kwargs["factor_asof_lag"] = int(raw["factor_asof_lag"])
++    if "conditioning_set" in raw:
++        kwargs["conditioning_set"] = str(raw["conditioning_set"])
++    return FspConfig(**kwargs)
+diff --git a/src/alpha_factory/fsp_updater.py b/src/alpha_factory/fsp_updater.py
+new file mode 100644
+index 0000000..3afbef7
+--- /dev/null
++++ b/src/alpha_factory/fsp_updater.py
+@@ -0,0 +1,482 @@
++"""T036: Factor Shadow Plane (FSP) updater (single instrument 専用 diagnostic layer).
++
++Phase 1 仕様:
++- post-RUN で archive Parquet を読み込み、FSP 6 列を計算して書き戻す
++- 選抜介入 / fitness への寄与は無し (observability only)
++- dispatch matrix 6 modes:
++    active / skipped_multi_pair_run / skipped_disabled / skipped_no_factor_data /
++    skipped_window_too_short / skipped_conditioning_mismatch
++- 冪等性: fsp_runtime_mode が null の行のみ再計算 (`force_recalculate=False`)
++- POSIX atomic write (tmp → fsync → rename → fsync(parent dir)) で耐クラッシュ
++
++詳細: devnotes/20260425-0956-factor-shadow-plane-single-instr/detailed-design.md
++"""
++
++from __future__ import annotations
++
++import os
++from collections.abc import Mapping
++from pathlib import Path
++from typing import Any, Final
++
++import numpy as np
++import pandas as pd
++import pyarrow as pa
++import pyarrow.parquet as pq
++import structlog
++
++from src.alpha_factory.archive import GENOMES_SCHEMA
++from src.alpha_factory.config import FspConfig
++
++logger = structlog.get_logger(__name__)
++
++__all__ = [
++    "FSP_NULLABLE_COLS",
++    "FSP_RUNTIME_MODES",
++    "H1_NON_ELIGIBLE_MODES",
++    "_aggregate_daily_pnl",
++    "_atomic_write_parquet",
++    "_check_archive_duplicate_keys",
++    "_check_key_integrity",
++    "_compute_fsp_stats",
++    "_decide_runtime_mode",
++    "_load_dxy_series",
++    "_read_archive_with_fsp_compat",
++    "evaluate_h1",
++    "evaluate_key_integrity_failure_rate",
++    "rolling_spearman",
++    "run_fsp_updater",
++]
++
++FSP_RUNTIME_MODES: Final[frozenset[str]] = frozenset(
++    {
++        "active",
++        "skipped_no_factor_data",
++        "skipped_disabled",
++        "skipped_multi_pair_run",
++        "skipped_window_too_short",
++        "skipped_conditioning_mismatch",
++    }
++)
++
++H1_NON_ELIGIBLE_MODES: Final[frozenset[str]] = frozenset(
++    {
++        "skipped_multi_pair_run",
++        "skipped_disabled",
++        "skipped_no_factor_data",
++        "skipped_window_too_short",
++    }
++)
++
++FSP_NULLABLE_COLS: Final[tuple[str, ...]] = (
++    "fsp_runtime_mode",
++    "fsp_sampling_mode",
++    "fsp_factor_set",
++    "fsp_rolling_corr_60d",
++    "fsp_explained_variance",
++    "fsp_idio_ratio",
++)
++
++
++# ---------------------------------------------------------------------------
++# Dispatch
++# ---------------------------------------------------------------------------
++
++
++def _decide_runtime_mode(
++    fsp_cfg: FspConfig,
++    is_multi_pair: bool,
++    factor_data_available: bool,
++    min_bars: int,
++) -> str:
++    """6 パスの dispatch matrix のうち最初の 5 パスを判定。
++
++    `active` を返した場合でも下流の `_check_key_integrity()` が
++    `skipped_conditioning_mismatch` を返す可能性がある (件数整合チェック)。
++    """
++    if is_multi_pair:
++        return "skipped_multi_pair_run"
++    if not fsp_cfg.enabled:
++        return "skipped_disabled"
++    if not factor_data_available:
++        return "skipped_no_factor_data"
++    if min_bars < fsp_cfg.window_days:
++        return "skipped_window_too_short"
++    return "active"
++
++
++# ---------------------------------------------------------------------------
++# Archive read with FSP-compat
++# ---------------------------------------------------------------------------
++
++
++def _read_archive_with_fsp_compat(archive_path: Path) -> pd.DataFrame:
++    """旧/新 両方の archive Parquet を読み込み、FSP 列を None 補完する。"""
++    table = pq.read_table(archive_path)
++    df = table.to_pandas()
++    for col in FSP_NULLABLE_COLS:
++        if col not in df.columns:
++            df[col] = None
++    return df
++
++
++# ---------------------------------------------------------------------------
++# Key integrity (Step A: 全件重複検知 / Step B: TARGET_ROWS 整合)
++# ---------------------------------------------------------------------------
++
++
++def _check_archive_duplicate_keys(archive_df: pd.DataFrame) -> str | None:
++    """Step A: archive 全件で重複キー検知 (TARGET_ROWS によらず常時)."""
++    all_keys = list(
++        zip(
++            archive_df["run_id"],
++            archive_df["lane_id"],
++            archive_df["generation"],
++            archive_df["individual_name"],
++            strict=True,
++        )
++    )
++    if len(all_keys) != len(set(all_keys)):
++        logger.warning(
++            "fsp_duplicate_keys_in_archive",
++            total=len(all_keys),
++            unique=len(set(all_keys)),
++        )
++        return "skipped_conditioning_mismatch"
++    return None
++
++
++def _check_key_integrity(
++    target_df: pd.DataFrame,
++    fsp_results: Mapping[tuple[Any, ...], Mapping[str, Any]],
++) -> str | None:
++    """Step B: TARGET_ROWS と fsp_results のキー集合一致チェック."""
++    target_keys = set(
++        zip(
++            target_df["run_id"],
++            target_df["lane_id"],
++            target_df["generation"],
++            target_df["individual_name"],
++            strict=True,
++        )
++    )
++    fsp_keys = set(fsp_results.keys())
++    if target_keys != fsp_keys:
++        logger.warning(
++            "fsp_key_mismatch",
++            missing=len(fsp_keys - target_keys),
++            extra=len(target_keys - fsp_keys),
++        )
++        return "skipped_conditioning_mismatch"
++    return None
++
++
++# ---------------------------------------------------------------------------
++# Atomic Parquet write (POSIX rename + fsync)
++# ---------------------------------------------------------------------------
++
++
++def _atomic_write_parquet(
++    df: pd.DataFrame, target_path: Path, schema: pa.Schema
++) -> None:
++    """tmp → fsync(file) → atomic rename → fsync(dir) で耐クラッシュ書き出し."""
++    tmp_path = target_path.with_suffix(".fsp_tmp.parquet")
++    try:
++        table = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
++        pq.write_table(table, tmp_path)
++        with open(tmp_path, "rb") as f:
++            os.fsync(f.fileno())
++        tmp_path.rename(target_path)
++        parent_fd = os.open(str(target_path.parent), os.O_RDONLY)
++        try:
++            os.fsync(parent_fd)
++        finally:
++            os.close(parent_fd)
++    except Exception:
++        tmp_path.unlink(missing_ok=True)
++        raise
++
++
++# ---------------------------------------------------------------------------
++# Factor data loading + statistics
++# ---------------------------------------------------------------------------
++
++
++def _load_dxy_series(
++    fred_data_dir: Path, factor_asof_lag: int
++) -> pd.Series | None:
++    """data/raw/fred/DXY.csv から日次系列を読み込み lag 適用。
++
++    factor_asof_lag=1 の場合: factor_return_t = (DXY_{t-1} - DXY_{t-2}) / DXY_{t-2}
++    look-ahead bias 回避。
++
++    ファイル不在 / `close` 列不在 / 空データなら None を返す。
++    """
++    dxy_path = fred_data_dir / "DXY.csv"
++    if not dxy_path.exists():
++        return None
++    try:
++        dxy = pd.read_csv(dxy_path, index_col=0, parse_dates=True)
++    except Exception:
++        return None
++    if "close" not in dxy.columns or dxy.empty:
++        return None
++    series = dxy["close"].pct_change().shift(factor_asof_lag).dropna()
++    if series.empty:
++        return None
++    return series
++
++
++def _aggregate_daily_pnl(
++    trades_df: pd.DataFrame,
++    date_range: pd.DatetimeIndex,
++) -> pd.Series:
++    """UTC 日次境界で trades の pnl を集計。ゼロポジション日は 0.0 で補完."""
++    if trades_df.empty:
++        return pd.Series(0.0, index=date_range)
++    work = trades_df.copy()
++    work["date_utc"] = pd.to_datetime(work["close_time"]).dt.normalize()
++    daily = work.groupby("date_utc")["pnl"].sum()
++    return daily.reindex(date_range, fill_value=0.0)
++
++
++def rolling_spearman(
++    series_a: pd.Series, series_b: pd.Series, window: int
++) -> pd.Series:
++    """Phase 1 近似: 窓ごとに rank → Pearson 相関 (rank-Pearson 近似)."""
++    result = pd.Series(index=series_a.index, dtype=float)
++    n = len(series_a)
++    if n < window:
++        return result
++    for end in range(window - 1, n):
++        start = end - window + 1
++        a_win = series_a.iloc[start : end + 1]
++        b_win = series_b.iloc[start : end + 1]
++        result.iloc[end] = a_win.rank().corr(b_win.rank())
++    return result
++
++
++def _compute_fsp_stats(
++    daily_pnl: pd.Series,
++    factor_return: pd.Series,
++    window_days: int = 60,
++) -> dict[str, Any]:
++    """rolling 60d Spearman + 全期間 OLS R² (unclipped)."""
++    aligned = pd.concat([daily_pnl, factor_return], axis=1).dropna()
++    aligned.columns = ["pnl", "factor"]
++
++    if len(aligned) < 2:
++        return {
++            "fsp_rolling_corr_60d": [],
++            "fsp_explained_variance": None,
++            "fsp_idio_ratio": None,
++        }
++
++    rolling_corr = rolling_spearman(
++        aligned["pnl"], aligned["factor"], window_days
++    )
++
++    # OLS R² (numpy 直接、sklearn 依存を避ける)
++    x = aligned["factor"].to_numpy()
++    y = aligned["pnl"].to_numpy()
++    if x.var() == 0.0 or y.var() == 0.0:
++        r2 = 0.0
++    else:
++        a = np.column_stack([x, np.ones_like(x)])
++        beta, *_ = np.linalg.lstsq(a, y, rcond=None)
++        y_pred = a @ beta
++        ss_res = float(((y - y_pred) ** 2).sum())
++        ss_tot = float(((y - y.mean()) ** 2).sum())
++        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
++
++    return {
++        "fsp_rolling_corr_60d": rolling_corr.dropna().tolist(),
++        "fsp_explained_variance": float(r2),
++        "fsp_idio_ratio": float(1.0 - r2),
++    }
++
++
++# ---------------------------------------------------------------------------
++# H1 evaluation queries
++# ---------------------------------------------------------------------------
++
++
++def evaluate_h1(archive_df: pd.DataFrame) -> float:
++    """eligible rows のうち active 比率."""
++    eligible = archive_df[
++        archive_df["fsp_runtime_mode"].notna()
++        & (~archive_df["fsp_runtime_mode"].isin(H1_NON_ELIGIBLE_MODES))
++    ]
++    if len(eligible) == 0:
++        return 0.0
++    return float((eligible["fsp_runtime_mode"] == "active").mean())
++
++
++def evaluate_key_integrity_failure_rate(archive_df: pd.DataFrame) -> float:
++    """eligible rows のうち skipped_conditioning_mismatch 比率."""
++    eligible = archive_df[
++        archive_df["fsp_runtime_mode"].notna()
++        & (~archive_df["fsp_runtime_mode"].isin(H1_NON_ELIGIBLE_MODES))
++    ]
++    if len(eligible) == 0:
++        return 0.0
++    return float(
++        (eligible["fsp_runtime_mode"] == "skipped_conditioning_mismatch").mean()
++    )
++
++
++# ---------------------------------------------------------------------------
++# Top-level updater
++# ---------------------------------------------------------------------------
++
++
++def _write_mode_to_targets(
++    archive_df: pd.DataFrame,
++    target_idx: pd.Index,
++    mode: str,
++    fsp_cfg: FspConfig,
++) -> None:
++    """target rows に mode + sampling_mode のみを書き込む (skip path 共通)."""
++    archive_df.loc[target_idx, "fsp_runtime_mode"] = mode
++    archive_df.loc[target_idx, "fsp_sampling_mode"] = fsp_cfg.sampling_mode
++
++
++def _factor_data_available(fred_data_dir: Path, fsp_cfg: FspConfig) -> bool:
++    """factor data の存在判定 (Phase 1 は DXY のみ)."""
++    if "DXY" in fsp_cfg.factors:
++        return (fred_data_dir / "DXY.csv").exists()
++    return False
++
++
++def _estimate_min_bars(target_df: pd.DataFrame) -> int:
++    """個体ごとの bars 数を見積もる Phase 1 ヒューリスティック (trade_count で代用).
++
++    archive には bars 数を直接持たないため `trade_count` で代用する
++    (= 観測 window 中に発生した取引数の最低保証)。Phase 2 で run_ga 側から
++    n_bars を渡す経路を整備する想定。
++    """
++    if "trade_count" not in target_df.columns or target_df.empty:
++        return 0
++    return int(target_df["trade_count"].max())
++
++
++def run_fsp_updater(
++    archive_path: Path,
++    fred_data_dir: Path,
++    fsp_cfg: FspConfig,
++    run_id: str,
++    is_multi_pair: bool = False,
++    force_recalculate: bool = False,
++) -> str:
++    """FSP を計算して archive Parquet を in-place 更新する。
++
++    Returns:
++        ``fsp_runtime_mode`` (active or skipped_*).
++    """
++    archive_df = _read_archive_with_fsp_compat(archive_path)
++
++    # 再計算対象 (冪等性): fsp_runtime_mode が null の行のみ
++    target_df = (
++        archive_df.copy()
++        if force_recalculate
++        else archive_df[archive_df["fsp_runtime_mode"].isna()].copy()
++    )
++
++    # Step A: 全件重複検知
++    dup_mismatch = _check_archive_duplicate_keys(archive_df)
++    if dup_mismatch:
++        mode = "skipped_conditioning_mismatch"
++        _write_mode_to_targets(archive_df, target_df.index, mode, fsp_cfg)
++        _atomic_write_parquet(
++            archive_df, archive_path, schema=GENOMES_SCHEMA
++        )
++        logger.warning("fsp_updater.skipped", mode=mode, run_id=run_id)
++        return mode
++
++    # 全行既処理 → no-op active (dispatch 判定の前にチェック、min_bars=0 で
++    # 誤って skipped_window_too_short を返すことを防ぐ)
++    if target_df.empty:
++        logger.info(
++            "fsp_updater.no_op",
++            reason="all_rows_already_processed",
++            rows_total=len(archive_df),
++            rows_processed=0,
++            run_id=run_id,
++        )
++        return "active"
++
++    factor_data_available = _factor_data_available(fred_data_dir, fsp_cfg)
++    min_bars = _estimate_min_bars(target_df)
++    initial_mode = _decide_runtime_mode(
++        fsp_cfg=fsp_cfg,
++        is_multi_pair=is_multi_pair,
++        factor_data_available=factor_data_available,
++        min_bars=min_bars,
++    )
++
++    if initial_mode != "active":
++        _write_mode_to_targets(
++            archive_df, target_df.index, initial_mode, fsp_cfg
++        )
++        _atomic_write_parquet(
++            archive_df, archive_path, schema=GENOMES_SCHEMA
++        )
++        logger.info(
++            "fsp_updater.skipped",
++            mode=initial_mode,
++            run_id=run_id,
++            min_bars=min_bars,
++            window=fsp_cfg.window_days,
++        )
++        return initial_mode
++
++    # Phase 1: trade ledger 統合は別 TODO (Phase 2) で行う。
++    # 現実装では fsp_results 空 dict → _check_key_integrity が conditioning_mismatch
++    # を返し、target rows に書き戻して mismatch を返す (詳細設計 §11 notes)。
++    # PnL 注入経路の本実装は次フェーズで整備する。
++    fsp_results: dict[tuple[Any, ...], dict[str, Any]] = {}
++
++    key_mismatch = _check_key_integrity(target_df, fsp_results)
++    if key_mismatch:
++        mode = key_mismatch
++        _write_mode_to_targets(archive_df, target_df.index, mode, fsp_cfg)
++        _atomic_write_parquet(
++            archive_df, archive_path, schema=GENOMES_SCHEMA
++        )
++        logger.warning(
++            "fsp_updater.skipped",
++            mode=mode,
++            run_id=run_id,
++            reason="empty_fsp_results_phase1",
++        )
++        return mode
++
++    # Phase 2 で fsp_results が target_df と一致したらこの経路に来る
++    for key, stats in fsp_results.items():
++        mask = (
++            (archive_df["run_id"] == key[0])
++            & (archive_df["lane_id"] == key[1])
++            & (archive_df["generation"] == key[2])
++            & (archive_df["individual_name"] == key[3])
++        )
++        idx = archive_df.index[mask]
++        archive_df.loc[idx, "fsp_runtime_mode"] = "active"
++        archive_df.loc[idx, "fsp_sampling_mode"] = fsp_cfg.sampling_mode
++        archive_df.loc[idx, "fsp_explained_variance"] = stats[
++            "fsp_explained_variance"
++        ]
++        archive_df.loc[idx, "fsp_idio_ratio"] = stats["fsp_idio_ratio"]
++        # list 列は object 経由で代入
++        archive_df.at[idx[0], "fsp_factor_set"] = list(fsp_cfg.factors)
++        archive_df.at[idx[0], "fsp_rolling_corr_60d"] = stats[
++            "fsp_rolling_corr_60d"
++        ]
++
++    _atomic_write_parquet(archive_df, archive_path, schema=GENOMES_SCHEMA)
++    logger.info(
++        "fsp_updater.completed",
++        mode="active",
++        rows_processed=len(target_df),
++        run_id=run_id,
++    )
++    return "active"
+diff --git a/tests/alpha_factory/test_archive.py b/tests/alpha_factory/test_archive.py
+index de85f9d..c18cdf7 100644
+--- a/tests/alpha_factory/test_archive.py
++++ b/tests/alpha_factory/test_archive.py
+@@ -166,11 +166,12 @@ def _make_archive() -> GenomeArchive:
+ # ---------------------------------------------------------------------------
+ 
+ 
+-def test_schema_has_34_columns() -> None:
++def test_schema_has_40_columns() -> None:
+     # T-sharpe Phase 1A: trade_sharpe_raw + sharpe_calc_version (28→30)
+     # T035: n_fold_effective + positive_fold_ratio_effective + stage_b_reason_codes (30→33)
+     # T043: mission_score (33→34)
+-    assert len(GENOMES_SCHEMA.names) == 34
++    # T036: FSP 6 列 (34→40)
++    assert len(GENOMES_SCHEMA.names) == 40
+     expected = {
+         "run_id", "run_number", "generation", "individual_name",
+         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
+@@ -186,6 +187,9 @@ def test_schema_has_34_columns() -> None:
+         "stage_b_reason_codes",
+         # T043: live_criteria 4 軸 soft 合算スコア
+         "mission_score",
++        # T036: Factor Shadow Plane (FSP) 6 列
++        "fsp_runtime_mode", "fsp_sampling_mode", "fsp_factor_set",
++        "fsp_rolling_corr_60d", "fsp_explained_variance", "fsp_idio_ratio",
+     }
+     assert set(GENOMES_SCHEMA.names) == expected
+ 
+@@ -764,6 +768,9 @@ def test_schema_nullable_attributes() -> None:
+         "stage_b_reason_codes",
+         # T043: Stage C 評価時のみ書き込まれるため nullable
+         "mission_score",
++        # T036: FSP 6 列 (post-RUN updater が書き込む、collect_stage_* では null)
++        "fsp_runtime_mode", "fsp_sampling_mode", "fsp_factor_set",
++        "fsp_rolling_corr_60d", "fsp_explained_variance", "fsp_idio_ratio",
+     }
+     for f in GENOMES_SCHEMA:
+         if f.name in nullable_cols:
+diff --git a/tests/alpha_factory/test_fsp_updater.py b/tests/alpha_factory/test_fsp_updater.py
+new file mode 100644
+index 0000000..4f03264
+--- /dev/null
++++ b/tests/alpha_factory/test_fsp_updater.py
+@@ -0,0 +1,552 @@
++"""T036: Factor Shadow Plane (FSP) updater テスト.
++
++詳細設計: devnotes/20260425-0956-factor-shadow-plane-single-instr/detailed-design.md
++"""
++
++from __future__ import annotations
++
++from pathlib import Path
++from typing import Any
++
++import numpy as np
++import pandas as pd
++import pyarrow as pa
++import pyarrow.parquet as pq
++import pytest
++
++from src.alpha_factory.archive import GENOMES_SCHEMA, _create_row_template
++from src.alpha_factory.config import FspConfig
++from src.alpha_factory.fsp_updater import (
++    FSP_NULLABLE_COLS,
++    FSP_RUNTIME_MODES,
++    H1_NON_ELIGIBLE_MODES,
++    _aggregate_daily_pnl,
++    _atomic_write_parquet,
++    _check_archive_duplicate_keys,
++    _check_key_integrity,
++    _compute_fsp_stats,
++    _decide_runtime_mode,
++    _load_dxy_series,
++    _read_archive_with_fsp_compat,
++    evaluate_h1,
++    evaluate_key_integrity_failure_rate,
++    rolling_spearman,
++    run_fsp_updater,
++)
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++
++
++def _write_dxy_csv(path: Path, n_days: int = 80) -> None:
++    """合成 DXY series を CSV に書き出し (close 列必須)."""
++    rng = np.random.default_rng(seed=42)
++    dates = pd.date_range("2026-01-01", periods=n_days, freq="D")
++    closes = 100.0 + rng.normal(scale=0.5, size=n_days).cumsum()
++    df = pd.DataFrame({"close": closes}, index=dates)
++    df.index.name = "date"
++    path.parent.mkdir(parents=True, exist_ok=True)
++    df.to_csv(path)
++
++
++def _make_archive_table(n_rows: int = 3) -> pa.Table:
++    """T036 schema 完備の minimal archive Parquet を返す."""
++    rows = []
++    for i in range(n_rows):
++        r = _create_row_template()
++        r.update(
++            {
++                "run_id": "run_test",
++                "run_number": 0,
++                "generation": 0,
++                "individual_name": f"g0_i{i}",
++                "instrument": "USD_JPY",
++                "lane_id": "tier1_USD_JPY",
++                "genome_json": "{}",
++                "stage_a_pass": False,
++                "stage_b_pass": False,
++                "stage_c_pass": False,
++                "graduated": False,
++                "trade_count": 80 + i,
++            }
++        )
++        # _MAX_STAGE_KEY は schema 外なので削除
++        r.pop("_max_stage_seen", None)
++        rows.append(r)
++    return pa.Table.from_pylist(rows, schema=GENOMES_SCHEMA)
++
++
++def _write_archive(path: Path, table: pa.Table) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    pq.write_table(table, path)
++
++
++# ---------------------------------------------------------------------------
++# T036-1: Module-level constants
++# ---------------------------------------------------------------------------
++
++
++class TestFspConstants:
++    def test_runtime_modes_has_six_values(self) -> None:
++        assert len(FSP_RUNTIME_MODES) == 6
++        assert "active" in FSP_RUNTIME_MODES
++        assert "skipped_conditioning_mismatch" in FSP_RUNTIME_MODES
++
++    def test_h1_non_eligible_modes_excludes_active_and_mismatch(self) -> None:
++        assert "active" not in H1_NON_ELIGIBLE_MODES
++        assert "skipped_conditioning_mismatch" not in H1_NON_ELIGIBLE_MODES
++        assert len(H1_NON_ELIGIBLE_MODES) == 4
++
++    def test_fsp_nullable_cols_count(self) -> None:
++        assert len(FSP_NULLABLE_COLS) == 6
++
++
++# ---------------------------------------------------------------------------
++# T036-2: _decide_runtime_mode (5 path dispatch)
++# ---------------------------------------------------------------------------
++
++
++class TestDecideRuntimeMode:
++    @pytest.mark.parametrize(
++        "case,expected",
++        [
++            (
++                {"is_multi_pair": True, "factor_data_available": True, "min_bars": 100, "enabled": True},
++                "skipped_multi_pair_run",
++            ),
++            (
++                {"is_multi_pair": False, "factor_data_available": True, "min_bars": 100, "enabled": False},
++                "skipped_disabled",
++            ),
++            (
++                {"is_multi_pair": False, "factor_data_available": False, "min_bars": 100, "enabled": True},
++                "skipped_no_factor_data",
++            ),
++            (
++                {"is_multi_pair": False, "factor_data_available": True, "min_bars": 30, "enabled": True},
++                "skipped_window_too_short",
++            ),
++            (
++                {"is_multi_pair": False, "factor_data_available": True, "min_bars": 100, "enabled": True},
++                "active",
++            ),
++        ],
++    )
++    def test_dispatch_paths(self, case: dict[str, Any], expected: str) -> None:
++        cfg = FspConfig(enabled=case["enabled"], window_days=60)
++        actual = _decide_runtime_mode(
++            fsp_cfg=cfg,
++            is_multi_pair=case["is_multi_pair"],
++            factor_data_available=case["factor_data_available"],
++            min_bars=case["min_bars"],
++        )
++        assert actual == expected
++
++    def test_multi_pair_takes_priority_over_disabled(self) -> None:
++        cfg = FspConfig(enabled=False)
++        # disabled でも multi_pair が先 (T016 と排他)
++        assert (
++            _decide_runtime_mode(
++                fsp_cfg=cfg,
++                is_multi_pair=True,
++                factor_data_available=False,
++                min_bars=0,
++            )
++            == "skipped_multi_pair_run"
++        )
++
++
++# ---------------------------------------------------------------------------
++# T036-3: Key integrity (Step A / Step B)
++# ---------------------------------------------------------------------------
++
++
++class TestKeyIntegrity:
++    def test_no_duplicate_keys_returns_none(self) -> None:
++        df = pd.DataFrame(
++            {
++                "run_id": ["r"] * 3,
++                "lane_id": ["lane"] * 3,
++                "generation": [0, 0, 0],
++                "individual_name": ["a", "b", "c"],
++            }
++        )
++        assert _check_archive_duplicate_keys(df) is None
++
++    def test_duplicate_keys_detected(self) -> None:
++        df = pd.DataFrame(
++            {
++                "run_id": ["r"] * 3,
++                "lane_id": ["lane"] * 3,
++                "generation": [0, 0, 0],
++                "individual_name": ["a", "b", "a"],  # 重複
++            }
++        )
++        assert (
++            _check_archive_duplicate_keys(df) == "skipped_conditioning_mismatch"
++        )
++
++    def test_key_integrity_match(self) -> None:
++        df = pd.DataFrame(
++            {
++                "run_id": ["r"],
++                "lane_id": ["lane"],
++                "generation": [0],
++                "individual_name": ["a"],
++            }
++        )
++        results = {("r", "lane", 0, "a"): {"x": 1.0}}
++        assert _check_key_integrity(df, results) is None
++
++    def test_key_integrity_extra_in_results(self) -> None:
++        df = pd.DataFrame(
++            {
++                "run_id": ["r"],
++                "lane_id": ["lane"],
++                "generation": [0],
++                "individual_name": ["a"],
++            }
++        )
++        results = {
++            ("r", "lane", 0, "a"): {},
++            ("r", "lane", 0, "b"): {},  # archive にないキー
++        }
++        assert _check_key_integrity(df, results) == "skipped_conditioning_mismatch"
++
++    def test_key_integrity_missing_in_results(self) -> None:
++        df = pd.DataFrame(
++            {
++                "run_id": ["r", "r"],
++                "lane_id": ["lane", "lane"],
++                "generation": [0, 0],
++                "individual_name": ["a", "b"],
++            }
++        )
++        results: dict[tuple[Any, ...], dict[str, Any]] = {
++            ("r", "lane", 0, "a"): {}
++        }  # b が無い
++        assert _check_key_integrity(df, results) == "skipped_conditioning_mismatch"
++
++
++# ---------------------------------------------------------------------------
++# T036-4: Atomic Parquet write
++# ---------------------------------------------------------------------------
++
++
++class TestAtomicWriteParquet:
++    def test_round_trip(self, tmp_path: Path) -> None:
++        path = tmp_path / "archive.parquet"
++        table = _make_archive_table(n_rows=2)
++        df = table.to_pandas()
++        _atomic_write_parquet(df, path, schema=GENOMES_SCHEMA)
++        assert path.exists()
++        rt = pq.read_table(path).to_pandas()
++        assert len(rt) == 2
++
++    def test_tmp_file_cleaned_on_success(self, tmp_path: Path) -> None:
++        path = tmp_path / "archive.parquet"
++        table = _make_archive_table(n_rows=1)
++        df = table.to_pandas()
++        _atomic_write_parquet(df, path, schema=GENOMES_SCHEMA)
++        # tmp ファイルは消えていること
++        assert not path.with_suffix(".fsp_tmp.parquet").exists()
++
++
++# ---------------------------------------------------------------------------
++# T036-5: Schema compat (old / new / mixed)
++# ---------------------------------------------------------------------------
++
++
++class TestSchemaCompat:
++    def test_new_archive_reads_with_all_fsp_cols(self, tmp_path: Path) -> None:
++        path = tmp_path / "new.parquet"
++        _write_archive(path, _make_archive_table(n_rows=3))
++        df = _read_archive_with_fsp_compat(path)
++        assert all(col in df.columns for col in FSP_NULLABLE_COLS)
++        assert df["fsp_runtime_mode"].isna().all()
++
++    def test_old_archive_without_fsp_cols_compatibility(
++        self, tmp_path: Path
++    ) -> None:
++        """旧 schema (FSP 列なし) を読んでも KeyError を起こさない."""
++        # FSP 列を除いた schema で書き出す
++        old_fields = [
++            f for f in GENOMES_SCHEMA if not f.name.startswith("fsp_")
++        ]
++        old_schema = pa.schema(old_fields)
++        rows = []
++        for i in range(2):
++            r = _create_row_template()
++            r.update(
++                {
++                    "run_id": "run_old",
++                    "individual_name": f"g0_i{i}",
++                    "instrument": "USD_JPY",
++                    "lane_id": "tier1_USD_JPY",
++                    "genome_json": "{}",
++                }
++            )
++            r.pop("_max_stage_seen", None)
++            for k in FSP_NULLABLE_COLS:
++                r.pop(k, None)
++            rows.append(r)
++        old_table = pa.Table.from_pylist(rows, schema=old_schema)
++        path = tmp_path / "old.parquet"
++        path.parent.mkdir(parents=True, exist_ok=True)
++        pq.write_table(old_table, path)
++
++        df = _read_archive_with_fsp_compat(path)
++        # FSP 6 列が None で補完されている
++        for col in FSP_NULLABLE_COLS:
++            assert col in df.columns
++            assert df[col].isna().all()
++
++
++# ---------------------------------------------------------------------------
++# T036-6: _load_dxy_series
++# ---------------------------------------------------------------------------
++
++
++class TestLoadDxySeries:
++    def test_returns_none_when_file_missing(self, tmp_path: Path) -> None:
++        s = _load_dxy_series(tmp_path / "missing", factor_asof_lag=1)
++        assert s is None
++
++    def test_returns_none_when_close_column_missing(
++        self, tmp_path: Path
++    ) -> None:
++        path = tmp_path / "fred" / "DXY.csv"
++        path.parent.mkdir(parents=True, exist_ok=True)
++        df = pd.DataFrame(
++            {"open": [100.0, 101.0]}, index=pd.date_range("2026-01-01", periods=2)
++        )
++        df.to_csv(path)
++        s = _load_dxy_series(tmp_path / "fred", factor_asof_lag=1)
++        assert s is None
++
++    def test_returns_pct_change_with_lag(self, tmp_path: Path) -> None:
++        path = tmp_path / "fred" / "DXY.csv"
++        _write_dxy_csv(path, n_days=10)
++        s = _load_dxy_series(tmp_path / "fred", factor_asof_lag=1)
++        assert s is not None
++        # pct_change + shift(1) → 最初 2 日は dropna で除外
++        assert len(s) == 8
++
++
++# ---------------------------------------------------------------------------
++# T036-7: _aggregate_daily_pnl + _compute_fsp_stats
++# ---------------------------------------------------------------------------
++
++
++class TestAggregateAndStats:
++    def test_aggregate_zero_pnl_when_no_trades(self) -> None:
++        date_range = pd.date_range("2026-01-01", periods=5, freq="D")
++        empty = pd.DataFrame(columns=["close_time", "pnl"])
++        s = _aggregate_daily_pnl(empty, date_range)
++        assert (s == 0.0).all()
++        assert len(s) == 5
++
++    def test_aggregate_sums_intraday_trades(self) -> None:
++        date_range = pd.date_range("2026-01-01", periods=3, freq="D")
++        trades = pd.DataFrame(
++            {
++                "close_time": pd.to_datetime(
++                    [
++                        "2026-01-01 09:00",
++                        "2026-01-01 12:00",
++                        "2026-01-02 10:00",
++                    ]
++                ),
++                "pnl": [100.0, 50.0, -30.0],
++            }
++        )
++        s = _aggregate_daily_pnl(trades, date_range)
++        assert s.iloc[0] == 150.0  # 1/1
++        assert s.iloc[1] == -30.0  # 1/2
++        assert s.iloc[2] == 0.0  # 1/3
++
++    def test_compute_fsp_stats_returns_none_on_short_series(self) -> None:
++        empty = pd.Series(dtype=float)
++        out = _compute_fsp_stats(empty, empty, window_days=60)
++        assert out["fsp_explained_variance"] is None
++
++    def test_compute_fsp_stats_perfect_correlation_yields_high_r2(self) -> None:
++        n = 100
++        idx = pd.date_range("2026-01-01", periods=n, freq="D")
++        factor = pd.Series(np.linspace(0, 1, n), index=idx)
++        # PnL = 2 × factor + 0 (perfect linear)
++        pnl = 2.0 * factor
++        out = _compute_fsp_stats(pnl, factor, window_days=10)
++        assert out["fsp_explained_variance"] is not None
++        assert out["fsp_explained_variance"] > 0.99
++        assert out["fsp_idio_ratio"] is not None
++        assert out["fsp_idio_ratio"] < 0.01
++
++    def test_rolling_spearman_window_size(self) -> None:
++        n = 30
++        a = pd.Series(np.arange(n, dtype=float))
++        b = pd.Series(np.arange(n, dtype=float))
++        out = rolling_spearman(a, b, window=10)
++        # 最初 9 要素は nan、残りは 1.0 (完全 monotonic)
++        assert out.iloc[8] != out.iloc[8] or pd.isna(out.iloc[8])
++        assert out.iloc[9] == pytest.approx(1.0)
++        assert out.iloc[-1] == pytest.approx(1.0)
++
++
++# ---------------------------------------------------------------------------
++# T036-8: H1 evaluation queries
++# ---------------------------------------------------------------------------
++
++
++class TestH1Evaluation:
++    def test_h1_zero_when_empty_eligible(self) -> None:
++        df = pd.DataFrame({"fsp_runtime_mode": [None, None]})
++        assert evaluate_h1(df) == 0.0
++
++    def test_h1_active_ratio_among_eligible(self) -> None:
++        df = pd.DataFrame(
++            {
++                "fsp_runtime_mode": [
++                    "active",
++                    "skipped_conditioning_mismatch",
++                    "active",
++                    "skipped_disabled",  # eligible 外
++                    "skipped_multi_pair_run",  # eligible 外
++                ]
++            }
++        )
++        # eligible = active + mismatch = 3 件、active 2 → 2/3
++        assert evaluate_h1(df) == pytest.approx(2.0 / 3.0)
++
++    def test_key_integrity_failure_rate(self) -> None:
++        df = pd.DataFrame(
++            {
++                "fsp_runtime_mode": [
++                    "active",
++                    "skipped_conditioning_mismatch",
++                    "active",
++                    "skipped_no_factor_data",  # eligible 外
++                ]
++            }
++        )
++        # eligible = 3 件、mismatch 1 → 1/3
++        assert evaluate_key_integrity_failure_rate(df) == pytest.approx(1.0 / 3.0)
++
++
++# ---------------------------------------------------------------------------
++# T036-9: Integration — run_fsp_updater 6 path
++# ---------------------------------------------------------------------------
++
++
++class TestRunFspUpdaterIntegration:
++    def _setup(self, tmp_path: Path, n_rows: int = 3) -> tuple[Path, Path]:
++        archive = tmp_path / "archive.parquet"
++        _write_archive(archive, _make_archive_table(n_rows=n_rows))
++        fred = tmp_path / "fred"
++        return archive, fred
++
++    def test_skipped_multi_pair_run(self, tmp_path: Path) -> None:
++        archive, fred = self._setup(tmp_path)
++        cfg = FspConfig(enabled=True)
++        mode = run_fsp_updater(
++            archive_path=archive,
++            fred_data_dir=fred,
++            fsp_cfg=cfg,
++            run_id="r",
++            is_multi_pair=True,
++        )
++        assert mode == "skipped_multi_pair_run"
++        df = _read_archive_with_fsp_compat(archive)
++        assert (df["fsp_runtime_mode"] == "skipped_multi_pair_run").all()
++
++    def test_skipped_disabled(self, tmp_path: Path) -> None:
++        archive, fred = self._setup(tmp_path)
++        cfg = FspConfig(enabled=False)
++        mode = run_fsp_updater(
++            archive_path=archive,
++            fred_data_dir=fred,
++            fsp_cfg=cfg,
++            run_id="r",
++        )
++        assert mode == "skipped_disabled"
++
++    def test_skipped_no_factor_data(self, tmp_path: Path) -> None:
++        archive, fred = self._setup(tmp_path)
++        cfg = FspConfig(enabled=True)
++        # fred dir 不在 → DXY.csv も無い
++        mode = run_fsp_updater(
++            archive_path=archive,
++            fred_data_dir=fred,
++            fsp_cfg=cfg,
++            run_id="r",
++        )
++        assert mode == "skipped_no_factor_data"
++
++    def test_skipped_window_too_short(self, tmp_path: Path) -> None:
++        archive, fred = self._setup(tmp_path)
++        # trade_count=80,81,82 だが window_days=200 で min_bars(82) < 200
++        _write_dxy_csv(fred / "DXY.csv", n_days=80)
++        cfg = FspConfig(enabled=True, window_days=200)
++        mode = run_fsp_updater(
++            archive_path=archive,
++            fred_data_dir=fred,
++            fsp_cfg=cfg,
++            run_id="r",
++        )
++        assert mode == "skipped_window_too_short"
++
++    def test_active_path_phase1_returns_conditioning_mismatch(
++        self, tmp_path: Path
++    ) -> None:
++        """Phase 1 実装では fsp_results が空 dict を返すため、active dispatch
++        で _check_key_integrity が conditioning_mismatch を返す (詳細設計 §11
++        notes)。"""
++        archive, fred = self._setup(tmp_path)
++        _write_dxy_csv(fred / "DXY.csv", n_days=80)
++        cfg = FspConfig(enabled=True, window_days=60)
++        mode = run_fsp_updater(
++            archive_path=archive,
++            fred_data_dir=fred,
++            fsp_cfg=cfg,
++            run_id="r",
++        )
++        # Phase 1 は trade ledger 統合前なので mismatch で書き戻し
++        assert mode == "skipped_conditioning_mismatch"
++
++    def test_idempotent_already_processed_rows(self, tmp_path: Path) -> None:
++        """全行が既処理 (fsp_runtime_mode が non-null) → no-op active を返す."""
++        archive, fred = self._setup(tmp_path)
++        _write_dxy_csv(fred / "DXY.csv", n_days=80)
++        cfg = FspConfig(enabled=True, window_days=60)
++        # 1 回目: mismatch で書き込まれる
++        run_fsp_updater(archive, fred, cfg, run_id="r")
++        # 2 回目: target_df.empty → active no-op
++        mode = run_fsp_updater(archive, fred, cfg, run_id="r")
++        assert mode == "active"
++
++    def test_archive_duplicate_keys_writes_mismatch(self, tmp_path: Path) -> None:
++        archive = tmp_path / "archive.parquet"
++        # 重複キーを意図的に作る
++        rows = []
++        for _ in range(2):
++            r = _create_row_template()
++            r.update(
++                {
++                    "run_id": "r",
++                    "lane_id": "lane",
++                    "generation": 0,
++                    "individual_name": "g0_i0",  # 重複
++                    "instrument": "USD_JPY",
++                    "genome_json": "{}",
++                }
++            )
++            r.pop("_max_stage_seen", None)
++            rows.append(r)
++        table = pa.Table.from_pylist(rows, schema=GENOMES_SCHEMA)
++        _write_archive(archive, table)
++        fred = tmp_path / "fred"
++        _write_dxy_csv(fred / "DXY.csv", n_days=80)
++        cfg = FspConfig(enabled=True, window_days=60)
++        mode = run_fsp_updater(archive, fred, cfg, run_id="r")
++        assert mode == "skipped_conditioning_mismatch"
+diff --git a/uv.lock b/uv.lock
+index 0eba568..658f718 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1,6 +1,14 @@
+ version = 1
+ revision = 3
+ requires-python = ">=3.11"
++resolution-markers = [
++    "python_full_version >= '3.14' and sys_platform == 'win32'",
++    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
++    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
++    "python_full_version < '3.14' and sys_platform == 'win32'",
++    "python_full_version < '3.14' and sys_platform == 'emscripten'",
++    "python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
++]
+ 
+ [[package]]
+ name = "alembic"
+@@ -680,6 +688,66 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/7a/c2/920ef838e2f0028c8262f16101ec09ebd5969864e5a64c4c05fad0617c56/packaging-26.1-py3-none-any.whl", hash = "sha256:5d9c0669c6285e491e0ced2eee587eaf67b670d94a19e94e3984a481aba6802f", size = 95831, upload-time = "2026-04-14T21:12:47.56Z" },
+ ]
+ 
++[[package]]
++name = "pandas"
++version = "3.0.2"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "numpy" },
++    { name = "python-dateutil" },
++    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/da/99/b342345300f13440fe9fe385c3c481e2d9a595ee3bab4d3219247ac94e9a/pandas-3.0.2.tar.gz", hash = "sha256:f4753e73e34c8d83221ba58f232433fca2748be8b18dbca02d242ed153945043", size = 4645855, upload-time = "2026-03-31T06:48:30.816Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/97/35/6411db530c618e0e0005187e35aa02ce60ae4c4c4d206964a2f978217c27/pandas-3.0.2-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:a727a73cbdba2f7458dc82449e2315899d5140b449015d822f515749a46cbbe0", size = 10326926, upload-time = "2026-03-31T06:46:08.29Z" },
++    { url = "https://files.pythonhosted.org/packages/c4/d3/b7da1d5d7dbdc5ef52ed7debd2b484313b832982266905315dad5a0bf0b1/pandas-3.0.2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:dbbd4aa20ca51e63b53bbde6a0fa4254b1aaabb74d2f542df7a7959feb1d760c", size = 9926987, upload-time = "2026-03-31T06:46:11.724Z" },
++    { url = "https://files.pythonhosted.org/packages/52/77/9b1c2d6070b5dbe239a7bc889e21bfa58720793fb902d1e070695d87c6d0/pandas-3.0.2-cp311-cp311-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:339dda302bd8369dedeae979cb750e484d549b563c3f54f3922cb8ff4978c5eb", size = 10757067, upload-time = "2026-03-31T06:46:14.903Z" },
++    { url = "https://files.pythonhosted.org/packages/20/17/ec40d981705654853726e7ac9aea9ddbb4a5d9cf54d8472222f4f3de06c2/pandas-3.0.2-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:61c2fd96d72b983a9891b2598f286befd4ad262161a609c92dc1652544b46b76", size = 11258787, upload-time = "2026-03-31T06:46:17.683Z" },
++    { url = "https://files.pythonhosted.org/packages/90/e3/3f1126d43d3702ca8773871a81c9f15122a1f412342cc56284ffda5b1f70/pandas-3.0.2-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:c934008c733b8bbea273ea308b73b3156f0181e5b72960790b09c18a2794fe1e", size = 11771616, upload-time = "2026-03-31T06:46:20.532Z" },
++    { url = "https://files.pythonhosted.org/packages/2e/cf/0f4e268e1f5062e44a6bda9f925806721cd4c95c2b808a4c82ebe914f96b/pandas-3.0.2-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:60a80bb4feacbef5e1447a3f82c33209c8b7e07f28d805cfd1fb951e5cb443aa", size = 12337623, upload-time = "2026-03-31T06:46:23.754Z" },
++    { url = "https://files.pythonhosted.org/packages/44/a0/97a6339859d4acb2536efb24feb6708e82f7d33b2ed7e036f2983fcced82/pandas-3.0.2-cp311-cp311-win_amd64.whl", hash = "sha256:ed72cb3f45190874eb579c64fa92d9df74e98fd63e2be7f62bce5ace0ade61df", size = 9897372, upload-time = "2026-03-31T06:46:26.703Z" },
++    { url = "https://files.pythonhosted.org/packages/8f/eb/781516b808a99ddf288143cec46b342b3016c3414d137da1fdc3290d8860/pandas-3.0.2-cp311-cp311-win_arm64.whl", hash = "sha256:f12b1a9e332c01e09510586f8ca9b108fd631fd656af82e452d7315ef6df5f9f", size = 9154922, upload-time = "2026-03-31T06:46:30.284Z" },
++    { url = "https://files.pythonhosted.org/packages/f3/b0/c20bd4d6d3f736e6bd6b55794e9cd0a617b858eaad27c8f410ea05d953b7/pandas-3.0.2-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:232a70ebb568c0c4d2db4584f338c1577d81e3af63292208d615907b698a0f18", size = 10347921, upload-time = "2026-03-31T06:46:33.36Z" },
++    { url = "https://files.pythonhosted.org/packages/35/d0/4831af68ce30cc2d03c697bea8450e3225a835ef497d0d70f31b8cdde965/pandas-3.0.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:970762605cff1ca0d3f71ed4f3a769ea8f85fc8e6348f6e110b8fea7e6eb5a14", size = 9888127, upload-time = "2026-03-31T06:46:36.253Z" },
++    { url = "https://files.pythonhosted.org/packages/61/a9/16ea9346e1fc4a96e2896242d9bc674764fb9049b0044c0132502f7a771e/pandas-3.0.2-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:aff4e6f4d722e0652707d7bcb190c445fe58428500c6d16005b02401764b1b3d", size = 10399577, upload-time = "2026-03-31T06:46:39.224Z" },
++    { url = "https://files.pythonhosted.org/packages/c4/a8/3a61a721472959ab0ce865ef05d10b0d6bfe27ce8801c99f33d4fa996e65/pandas-3.0.2-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:ef8b27695c3d3dc78403c9a7d5e59a62d5464a7e1123b4e0042763f7104dc74f", size = 10880030, upload-time = "2026-03-31T06:46:42.412Z" },
++    { url = "https://files.pythonhosted.org/packages/da/65/7225c0ea4d6ce9cb2160a7fb7f39804871049f016e74782e5dade4d14109/pandas-3.0.2-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:f8d68083e49e16b84734eb1a4dcae4259a75c90fb6e2251ab9a00b61120c06ab", size = 11409468, upload-time = "2026-03-31T06:46:45.2Z" },
++    { url = "https://files.pythonhosted.org/packages/fa/5b/46e7c76032639f2132359b5cf4c785dd8cf9aea5ea64699eac752f02b9db/pandas-3.0.2-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:32cc41f310ebd4a296d93515fcac312216adfedb1894e879303987b8f1e2b97d", size = 11936381, upload-time = "2026-03-31T06:46:48.293Z" },
++    { url = "https://files.pythonhosted.org/packages/7b/8b/721a9cff6fa6a91b162eb51019c6243b82b3226c71bb6c8ef4a9bd65cbc6/pandas-3.0.2-cp312-cp312-win_amd64.whl", hash = "sha256:a4785e1d6547d8427c5208b748ae2efb64659a21bd82bf440d4262d02bfa02a4", size = 9744993, upload-time = "2026-03-31T06:46:51.488Z" },
++    { url = "https://files.pythonhosted.org/packages/d5/18/7f0bd34ae27b28159aa80f2a6799f47fda34f7fb938a76e20c7b7fe3b200/pandas-3.0.2-cp312-cp312-win_arm64.whl", hash = "sha256:08504503f7101300107ecdc8df73658e4347586db5cfdadabc1592e9d7e7a0fd", size = 9056118, upload-time = "2026-03-31T06:46:54.548Z" },
++    { url = "https://files.pythonhosted.org/packages/bf/ca/3e639a1ea6fcd0617ca4e8ca45f62a74de33a56ae6cd552735470b22c8d3/pandas-3.0.2-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:b5918ba197c951dec132b0c5929a00c0bf05d5942f590d3c10a807f6e15a57d3", size = 10321105, upload-time = "2026-03-31T06:46:57.327Z" },
++    { url = "https://files.pythonhosted.org/packages/0b/77/dbc82ff2fb0e63c6564356682bf201edff0ba16c98630d21a1fb312a8182/pandas-3.0.2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:d606a041c89c0a474a4702d532ab7e73a14fe35c8d427b972a625c8e46373668", size = 9864088, upload-time = "2026-03-31T06:46:59.935Z" },
++    { url = "https://files.pythonhosted.org/packages/5c/2b/341f1b04bbca2e17e13cd3f08c215b70ef2c60c5356ef1e8c6857449edc7/pandas-3.0.2-cp313-cp313-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:710246ba0616e86891b58ab95f2495143bb2bc83ab6b06747c74216f583a6ac9", size = 10369066, upload-time = "2026-03-31T06:47:02.792Z" },
++    { url = "https://files.pythonhosted.org/packages/12/c5/cbb1ffefb20a93d3f0e1fdcda699fb84976210d411b008f97f48bf6ce27e/pandas-3.0.2-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5d3cfe227c725b1f3dff4278b43d8c784656a42a9325b63af6b1492a8232209e", size = 10876780, upload-time = "2026-03-31T06:47:06.205Z" },
++    { url = "https://files.pythonhosted.org/packages/98/fe/2249ae5e0a69bd0ddf17353d0a5d26611d70970111f5b3600cdc8be883e7/pandas-3.0.2-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:c3b723df9087a9a9a840e263ebd9f88b64a12075d1bf2ea401a5a42f254f084d", size = 11375181, upload-time = "2026-03-31T06:47:09.383Z" },
++    { url = "https://files.pythonhosted.org/packages/de/64/77a38b09e70b6464883b8d7584ab543e748e42c1b5d337a2ee088e0df741/pandas-3.0.2-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:a3096110bf9eac0070b7208465f2740e2d8a670d5cb6530b5bb884eca495fd39", size = 11928899, upload-time = "2026-03-31T06:47:12.686Z" },
++    { url = "https://files.pythonhosted.org/packages/5e/52/42855bf626868413f761addd574acc6195880ae247a5346477a4361c3acb/pandas-3.0.2-cp313-cp313-win_amd64.whl", hash = "sha256:07a10f5c36512eead51bc578eb3354ad17578b22c013d89a796ab5eee90cd991", size = 9746574, upload-time = "2026-03-31T06:47:15.64Z" },
++    { url = "https://files.pythonhosted.org/packages/88/39/21304ae06a25e8bf9fc820d69b29b2c495b2ae580d1e143146c309941760/pandas-3.0.2-cp313-cp313-win_arm64.whl", hash = "sha256:5fdbfa05931071aba28b408e59226186b01eb5e92bea2ab78b65863ca3228d84", size = 9047156, upload-time = "2026-03-31T06:47:18.595Z" },
++    { url = "https://files.pythonhosted.org/packages/72/20/7defa8b27d4f330a903bb68eea33be07d839c5ea6bdda54174efcec0e1d2/pandas-3.0.2-cp313-cp313t-macosx_10_13_x86_64.whl", hash = "sha256:dbc20dea3b9e27d0e66d74c42b2d0c1bed9c2ffe92adea33633e3bedeb5ac235", size = 10756238, upload-time = "2026-03-31T06:47:22.012Z" },
++    { url = "https://files.pythonhosted.org/packages/e9/95/49433c14862c636afc0e9b2db83ff16b3ad92959364e52b2955e44c8e94c/pandas-3.0.2-cp313-cp313t-macosx_11_0_arm64.whl", hash = "sha256:b75c347eff42497452116ce05ef461822d97ce5b9ff8df6edacb8076092c855d", size = 10408520, upload-time = "2026-03-31T06:47:25.197Z" },
++    { url = "https://files.pythonhosted.org/packages/3b/f8/462ad2b5881d6b8ec8e5f7ed2ea1893faa02290d13870a1600fe72ad8efc/pandas-3.0.2-cp313-cp313t-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:d1478075142e83a5571782ad007fb201ed074bdeac7ebcc8890c71442e96adf7", size = 10324154, upload-time = "2026-03-31T06:47:28.097Z" },
++    { url = "https://files.pythonhosted.org/packages/0a/65/d1e69b649cbcddda23ad6e4c40ef935340f6f652a006e5cbc3555ac8adb3/pandas-3.0.2-cp313-cp313t-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5880314e69e763d4c8b27937090de570f1fb8d027059a7ada3f7f8e98bdcb677", size = 10714449, upload-time = "2026-03-31T06:47:30.85Z" },
++    { url = "https://files.pythonhosted.org/packages/47/a4/85b59bc65b8190ea3689882db6cdf32a5003c0ccd5a586c30fdcc3ffc4fc/pandas-3.0.2-cp313-cp313t-musllinux_1_2_aarch64.whl", hash = "sha256:b5329e26898896f06035241a626d7c335daa479b9bbc82be7c2742d048e41172", size = 11338475, upload-time = "2026-03-31T06:47:34.026Z" },
++    { url = "https://files.pythonhosted.org/packages/1e/c4/bc6966c6e38e5d9478b935272d124d80a589511ed1612a5d21d36f664c68/pandas-3.0.2-cp313-cp313t-musllinux_1_2_x86_64.whl", hash = "sha256:81526c4afd31971f8b62671442a4b2b51e0aa9acc3819c9f0f12a28b6fcf85f1", size = 11786568, upload-time = "2026-03-31T06:47:36.941Z" },
++    { url = "https://files.pythonhosted.org/packages/e8/74/09298ca9740beed1d3504e073d67e128aa07e5ca5ca2824b0c674c0b8676/pandas-3.0.2-cp313-cp313t-win_amd64.whl", hash = "sha256:7cadd7e9a44ec13b621aec60f9150e744cfc7a3dd32924a7e2f45edff31823b0", size = 10488652, upload-time = "2026-03-31T06:47:40.612Z" },
++    { url = "https://files.pythonhosted.org/packages/bb/40/c6ea527147c73b24fc15c891c3fcffe9c019793119c5742b8784a062c7db/pandas-3.0.2-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:db0dbfd2a6cdf3770aa60464d50333d8f3d9165b2f2671bcc299b72de5a6677b", size = 10326084, upload-time = "2026-03-31T06:47:43.834Z" },
++    { url = "https://files.pythonhosted.org/packages/95/25/bdb9326c3b5455f8d4d3549fce7abcf967259de146fe2cf7a82368141948/pandas-3.0.2-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:0555c5882688a39317179ab4a0ed41d3ebc8812ab14c69364bbee8fb7a3f6288", size = 9914146, upload-time = "2026-03-31T06:47:46.67Z" },
++    { url = "https://files.pythonhosted.org/packages/8d/77/3a227ff3337aa376c60d288e1d61c5d097131d0ac71f954d90a8f369e422/pandas-3.0.2-cp314-cp314-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:01f31a546acd5574ef77fe199bc90b55527c225c20ccda6601cf6b0fd5ed597c", size = 10444081, upload-time = "2026-03-31T06:47:49.681Z" },
++    { url = "https://files.pythonhosted.org/packages/15/88/3cdd54fa279341afa10acf8d2b503556b1375245dccc9315659f795dd2e9/pandas-3.0.2-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:deeca1b5a931fdf0c2212c8a659ade6d3b1edc21f0914ce71ef24456ca7a6535", size = 10897535, upload-time = "2026-03-31T06:47:53.033Z" },
++    { url = "https://files.pythonhosted.org/packages/06/9d/98cc7a7624f7932e40f434299260e2917b090a579d75937cb8a57b9d2de3/pandas-3.0.2-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:0f48afd9bb13300ffb5a3316973324c787054ba6665cda0da3fbd67f451995db", size = 11446992, upload-time = "2026-03-31T06:47:56.193Z" },
++    { url = "https://files.pythonhosted.org/packages/9a/cd/19ff605cc3760e80602e6826ddef2824d8e7050ed80f2e11c4b079741dc3/pandas-3.0.2-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:6c4d8458b97a35717b62469a4ea0e85abd5ed8687277f5ccfc67f8a5126f8c53", size = 11968257, upload-time = "2026-03-31T06:47:59.137Z" },
++    { url = "https://files.pythonhosted.org/packages/db/60/aba6a38de456e7341285102bede27514795c1eaa353bc0e7638b6b785356/pandas-3.0.2-cp314-cp314-win_amd64.whl", hash = "sha256:b35d14bb5d8285d9494fe93815a9e9307c0876e10f1e8e89ac5b88f728ec8dcf", size = 9865893, upload-time = "2026-03-31T06:48:02.038Z" },
++    { url = "https://files.pythonhosted.org/packages/08/71/e5ec979dd2e8a093dacb8864598c0ff59a0cee0bbcdc0bfec16a51684d4f/pandas-3.0.2-cp314-cp314-win_arm64.whl", hash = "sha256:63d141b56ef686f7f0d714cfb8de4e320475b86bf4b620aa0b7da89af8cbdbbb", size = 9188644, upload-time = "2026-03-31T06:48:05.045Z" },
++    { url = "https://files.pythonhosted.org/packages/f1/6c/7b45d85db19cae1eb524f2418ceaa9d85965dcf7b764ed151386b7c540f0/pandas-3.0.2-cp314-cp314t-macosx_10_15_x86_64.whl", hash = "sha256:140f0cffb1fa2524e874dde5b477d9defe10780d8e9e220d259b2c0874c89d9d", size = 10776246, upload-time = "2026-03-31T06:48:07.789Z" },
++    { url = "https://files.pythonhosted.org/packages/a8/3e/7b00648b086c106e81766f25322b48aa8dfa95b55e621dbdf2fdd413a117/pandas-3.0.2-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:ae37e833ff4fed0ba352f6bdd8b73ba3ab3256a85e54edfd1ab51ae40cca0af8", size = 10424801, upload-time = "2026-03-31T06:48:10.897Z" },
++    { url = "https://files.pythonhosted.org/packages/da/6e/558dd09a71b53b4008e7fc8a98ec6d447e9bfb63cdaeea10e5eb9b2dabe8/pandas-3.0.2-cp314-cp314t-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:4d888a5c678a419a5bb41a2a93818e8ed9fd3172246555c0b37b7cc27027effd", size = 10345643, upload-time = "2026-03-31T06:48:13.7Z" },
++    { url = "https://files.pythonhosted.org/packages/be/e3/921c93b4d9a280409451dc8d07b062b503bbec0531d2627e73a756e99a82/pandas-3.0.2-cp314-cp314t-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b444dc64c079e84df91baa8bf613d58405645461cabca929d9178f2cd392398d", size = 10743641, upload-time = "2026-03-31T06:48:16.659Z" },
++    { url = "https://files.pythonhosted.org/packages/56/ca/fd17286f24fa3b4d067965d8d5d7e14fe557dd4f979a0b068ac0deaf8228/pandas-3.0.2-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:4544c7a54920de8eeacaa1466a6b7268ecfbc9bc64ab4dbb89c6bbe94d5e0660", size = 11361993, upload-time = "2026-03-31T06:48:19.475Z" },
++    { url = "https://files.pythonhosted.org/packages/e4/a5/2f6ed612056819de445a433ca1f2821ac3dab7f150d569a59e9cc105de1d/pandas-3.0.2-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:734be7551687c00fbd760dc0522ed974f82ad230d4a10f54bf51b80d44a08702", size = 11815274, upload-time = "2026-03-31T06:48:22.695Z" },
++    { url = "https://files.pythonhosted.org/packages/00/2f/b622683e99ec3ce00b0854bac9e80868592c5b051733f2cf3a868e5fea26/pandas-3.0.2-cp314-cp314t-win_amd64.whl", hash = "sha256:57a07209bebcbcf768d2d13c9b78b852f9a15978dac41b9e6421a81ad4cdd276", size = 10888530, upload-time = "2026-03-31T06:48:25.806Z" },
++    { url = "https://files.pythonhosted.org/packages/cb/2b/f8434233fab2bd66a02ec014febe4e5adced20e2693e0e90a07d118ed30e/pandas-3.0.2-cp314-cp314t-win_arm64.whl", hash = "sha256:5371b72c2d4d415d08765f32d689217a43227484e81b2305b52076e328f6f482", size = 9455341, upload-time = "2026-03-31T06:48:28.418Z" },
++]
++
+ [[package]]
+ name = "pathspec"
+ version = "1.0.4"
+@@ -1012,6 +1080,18 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/5a/cc/06253936f4a7fa2e0f48dfe6d851d9c56df896a9ab09ac019d70b760619c/pytest_mock-3.15.1-py3-none-any.whl", hash = "sha256:0a25e2eb88fe5168d535041d09a4529a188176ae608a6d249ee65abc0949630d", size = 10095, upload-time = "2025-09-16T16:37:25.734Z" },
+ ]
+ 
++[[package]]
++name = "python-dateutil"
++version = "2.9.0.post0"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "six" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/66/c0/0c8b6ad9f17a802ee498c46e004a0eb49bc148f2fd230864601a86dcf6db/python-dateutil-2.9.0.post0.tar.gz", hash = "sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3", size = 342432, upload-time = "2024-03-01T18:36:20.211Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl", hash = "sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427", size = 229892, upload-time = "2024-03-01T18:36:18.57Z" },
++]
++
+ [[package]]
+ name = "python-dotenv"
+ version = "1.2.2"
+@@ -1156,6 +1236,15 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/63/b6/aeadee5443e49baa2facd51131159fd6301cc4ccfc1541e4df7b021c37dd/ruff-0.15.11-py3-none-win_arm64.whl", hash = "sha256:063fed18cc1bbe0ee7393957284a6fe8b588c6a406a285af3ee3f46da2391ee4", size = 11032614, upload-time = "2026-04-16T18:46:34.487Z" },
+ ]
+ 
++[[package]]
++name = "six"
++version = "1.17.0"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
++]
++
+ [[package]]
+ name = "sqlalchemy"
+ version = "2.0.49"
+@@ -1420,6 +1509,7 @@ dependencies = [
+     { name = "diskcache" },
+     { name = "httpx" },
+     { name = "numpy" },
++    { name = "pandas" },
+     { name = "psycopg", extra = ["binary"] },
+     { name = "pyarrow" },
+     { name = "pydantic" },
+@@ -1449,6 +1539,7 @@ requires-dist = [
+     { name = "diskcache" },
+     { name = "httpx" },
+     { name = "numpy", specifier = ">=1.26" },
++    { name = "pandas", specifier = ">=2.2" },
+     { name = "psycopg", extras = ["binary"], specifier = ">=3.1" },
+     { name = "pyarrow", specifier = ">=24.0.0" },
+     { name = "pydantic", specifier = ">=2" },

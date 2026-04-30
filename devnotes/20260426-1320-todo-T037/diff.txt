@@ -1,0 +1,338 @@
+diff --git a/src/alpha_factory/archive.py b/src/alpha_factory/archive.py
+index e735e81..17a853f 100644
+--- a/src/alpha_factory/archive.py
++++ b/src/alpha_factory/archive.py
+@@ -179,13 +179,19 @@ def _compute_n_nodes(genome: Genome) -> int:
+     return sum(len(c.directional) + len(c.local_gate) for c in genome.clauses)
+ 
+ 
+-def _compute_active_clause_placeholder() -> int:
+-    """**Phase 2 placeholder**: runtime 発火 clause 数取得経路が未整備のため
+-    ``0`` を返す。
++def _read_active_clause_from_payload(payload: Mapping[str, object]) -> int:
++    """T037: Stage A payload から ``active_clause`` (runtime fired clause idx 数)
++    を取り出す。
+ 
+-    将来 ``DslStrategy`` / engine 側に発火カウンタを追加し、
+-    ``collect_stage_a`` の引数で受け渡すよう拡張予定（別 TODO）。
++    payload に key が無い / 非数値 / 負値の場合は 0 (defensive)。
++    archive ``active_clause`` 列は non-null int32 契約のため、不明時も 0 で埋める。
++    Stage A 経路 (``evaluate_stage_a``) では必ず int を入れる契約 (T037 完了)。
+     """
++    v = payload.get("active_clause")
++    if isinstance(v, bool):
++        return 0  # bool は数値として扱わない (archive 規約)
++    if isinstance(v, int):
++        return v if v >= 0 else 0
+     return 0
+ 
+ 
+@@ -366,7 +372,9 @@ class GenomeArchive:
+         row["sharpe_calc_version"] = "v2_trade_level"
+         row["sharpe"] = None  # v2 archive では legacy sharpe は埋めない
+         row["n_nodes"] = _compute_n_nodes(genome)
+-        row["active_clause"] = _compute_active_clause_placeholder()
++        # T037: placeholder (常時 0) を撤廃、Stage A payload の runtime fired
++        # clause 数を読み取る。`evaluate_stage_a` が必ず int を入れる契約。
++        row["active_clause"] = _read_active_clause_from_payload(payload)
+         row["genome_json"] = json.dumps(genome_to_dict(genome), sort_keys=True)
+         self._mark_stage(row, "A")
+ 
+diff --git a/src/alpha_factory/stage_gate.py b/src/alpha_factory/stage_gate.py
+index fa34b44..447e280 100644
+--- a/src/alpha_factory/stage_gate.py
++++ b/src/alpha_factory/stage_gate.py
+@@ -279,6 +279,11 @@ def evaluate_stage_a(
+     fitness_pen: float | None = None
+     sharpe_raw: float | None = None
+     trade_count = 0
++    # T037: Stage A backtest 中に runtime fired した clause idx 数 (observation
++    # only, archive `active_clause` 列に記録される)。例外時 / strategy 未生成時は
++    # 0 (測定不能を表すが、archive 既存契約 (non-null int32) との整合のため 0
++    # を入れる)。
++    active_clause_count: int = 0
+     exception_caught = False
+ 
+     try:
+@@ -295,6 +300,10 @@ def evaluate_stage_a(
+         sharpe_raw = (
+             float(bt.trade_sharpe_raw) if bt.trade_sharpe_raw is not None else None
+         )
++        # T037: backtest 完了後の strategy.active_clause_indices を集計。
++        # backtest 経路で必ず prepare()→on_bar が呼ばれているはずだが、
++        # defensive に len() 経由で取り出す。
++        active_clause_count = len(strategy.active_clause_indices)
+     except Exception as exc:
+         logger.warning(
+             "stage_a.system_failure",
+@@ -347,6 +356,8 @@ def evaluate_stage_a(
+             "trade_count": trade_count,
+             # T-sharpe Phase 1A: payload key を "sharpe_raw" → "trade_sharpe_raw"
+             "trade_sharpe_raw": sharpe_raw,
++            # T037: runtime fired clause idx 数 (observation only)
++            "active_clause": active_clause_count,
+         },
+     }
+     return StageResult(
+diff --git a/src/dsl/strategy.py b/src/dsl/strategy.py
+index d5ea551..7b13e65 100644
+--- a/src/dsl/strategy.py
++++ b/src/dsl/strategy.py
+@@ -21,7 +21,7 @@ import numpy as np
+ 
+ from src.broker.orders import OrderSignal, PortfolioSnapshot
+ from src.domain.price import PriceBar
+-from src.dsl.composite import compute_composite
++from src.dsl.composite import compute_clause_score
+ from src.dsl.genome import Genome, SignalConfig
+ 
+ # SignalCacheKey: (primitive_id, sorted params tuple)
+@@ -175,11 +175,25 @@ class DslStrategy:
+         # paper trading / live feed では常に None のまま (P8 Verified)。
+         self._prepared: PreparedSignals | None = None
+         self._bar_count = 0
++        # T037: runtime fired clause idx 集合 (compute_clause_score != 0.0 が
++        # 1 度でも起きた clause)。observability only、entry/exit/composite には
++        # 影響しない。詳細: devnotes/20260425-0958-signal-active-clause-metric/
++        self._active_clause_indices: set[int] = set()
+ 
+     @property
+     def genome(self) -> Genome:
+         return self._genome
+ 
++    @property
++    def active_clause_indices(self) -> frozenset[int]:
++        """T037: backtest 中に compute_clause_score != 0.0 だった clause idx 集合。
++
++        observability only、entry/exit/composite/fitness には影響しない。
++        backtest 開始時 (`prepare()` または on_bar 初回) に空集合からスタート、
++        各 bar で値を蓄積する。再 `prepare()` 時は集合をリセットする。
++        """
++        return frozenset(self._active_clause_indices)
++
+     def warmup_bars(self) -> int:
+         return self._warmup
+ 
+@@ -202,6 +216,9 @@ class DslStrategy:
+         # 再 prepare() 時の stale state 除去 (Round 1 Warning 対応)
+         self._prepared = None
+         self._bar_count = 0
++        # T037: 再 prepare() で active clause counter もリセット
++        # (新規 backtest 開始 = 集合空 が契約)。
++        self._active_clause_indices.clear()
+ 
+         if not hasattr(self._evaluator, "evaluate_all_bars"):
+             return
+@@ -292,7 +309,24 @@ class DslStrategy:
+                     )
+                 values_per_clause.append(vals)
+ 
+-        composite = compute_composite(self._genome.clauses, values_per_clause)
++        # T037: per-clause score を取得して active_clause_indices に集計しつつ
++        # compute_composite と同じ加重合成を行う (composite の数値は変えない)。
++        # 観察用の追加処理であり entry/exit/composite/fitness の計算結果は
++        # compute_composite() を直接呼んでいた頃と完全に同一であることを契約とする。
++        clauses = self._genome.clauses
++        clause_scores: list[float] = [
++            compute_clause_score(c, v)
++            for c, v in zip(clauses, values_per_clause, strict=True)
++        ]
++        for ci, cs in enumerate(clause_scores):
++            if cs != 0.0:
++                self._active_clause_indices.add(ci)
++        num = 0.0
++        denom = 0.0
++        for clause, cs in zip(clauses, clause_scores, strict=True):
++            num += clause.weight * cs
++            denom += abs(clause.weight)
++        composite = 0.0 if denom == 0.0 else num / denom
+         pos_cfg = self._genome.position
+ 
+         # 保有あり: exit 判定のみ（無保有のみ entry を試みる = ドテン禁止）
+diff --git a/tests/alpha_factory/test_archive.py b/tests/alpha_factory/test_archive.py
+index 918e85e..de85f9d 100644
+--- a/tests/alpha_factory/test_archive.py
++++ b/tests/alpha_factory/test_archive.py
+@@ -15,9 +15,9 @@ from src.alpha_factory.archive import (
+     _MAX_STAGE_KEY,
+     GENOMES_SCHEMA,
+     GenomeArchive,
+-    _compute_active_clause_placeholder,
+     _compute_n_nodes,
+     _create_row_template,
++    _read_active_clause_from_payload,
+ )
+ from src.alpha_factory.stage_gate import CrossPairResult, StageResult
+ from src.dsl.genome import (
+@@ -68,6 +68,8 @@ def _stage_a_result(
+         "trade_count": 25,
+         # T-sharpe Phase 1A: payload key を sharpe_raw → trade_sharpe_raw にリネーム
+         "trade_sharpe_raw": 0.3,
++        # T037: stage_a payload に active_clause が必ず入る契約。テストでも default で付与。
++        "active_clause": 0,
+     }
+     payload.update(payload_overrides)
+     return StageResult(
+@@ -269,13 +271,39 @@ def test_collect_stage_a_n_nodes_computed() -> None:
+     assert _compute_n_nodes(g) == 4
+ 
+ 
+-def test_collect_stage_a_active_clause_placeholder() -> None:
++def test_collect_stage_a_active_clause_from_payload() -> None:
++    """T037: archive `active_clause` 列は Stage A payload の値を書き写す。"""
+     arc = _make_archive()
+-    arc.collect_stage_a(_stub_genome(), "lane", 0, _stage_a_result(),
+-                         instrument="USD_JPY")
++    arc.collect_stage_a(
++        _stub_genome(), "lane", 0,
++        _stage_a_result(active_clause=3),
++        instrument="USD_JPY",
++    )
++    row = arc._rows[("lane", 0, "g0_i0")]
++    assert row["active_clause"] == 3
++
++
++def test_collect_stage_a_active_clause_zero_when_payload_missing() -> None:
++    """T037: payload に active_clause が無い場合は 0 (defensive)."""
++    arc = _make_archive()
++    # _stage_a_result の default に active_clause=0 が入るが、明示削除して検証
++    sa = _stage_a_result()
++    payload = sa.metrics["payload"]
++    assert isinstance(payload, dict)
++    payload.pop("active_clause", None)
++    arc.collect_stage_a(_stub_genome(), "lane", 0, sa, instrument="USD_JPY")
+     row = arc._rows[("lane", 0, "g0_i0")]
+     assert row["active_clause"] == 0
+-    assert _compute_active_clause_placeholder() == 0
++
++
++def test_read_active_clause_from_payload_handles_invalid_inputs() -> None:
++    """T037: payload helper は bool/non-int/負値 を 0 にクリップ."""
++    assert _read_active_clause_from_payload({"active_clause": 5}) == 5
++    assert _read_active_clause_from_payload({"active_clause": 0}) == 0
++    assert _read_active_clause_from_payload({"active_clause": -1}) == 0
++    assert _read_active_clause_from_payload({"active_clause": True}) == 0
++    assert _read_active_clause_from_payload({"active_clause": "3"}) == 0
++    assert _read_active_clause_from_payload({}) == 0
+ 
+ 
+ def test_collect_stage_a_genome_json_roundtrip() -> None:
+diff --git a/tests/alpha_factory/test_stage_gate.py b/tests/alpha_factory/test_stage_gate.py
+index d059af8..591fc42 100644
+--- a/tests/alpha_factory/test_stage_gate.py
++++ b/tests/alpha_factory/test_stage_gate.py
+@@ -348,8 +348,14 @@ class TestStageA:
+             "trade_count",
+             # T-sharpe Phase 1A: payload key を sharpe_raw → trade_sharpe_raw に
+             "trade_sharpe_raw",
++            # T037: runtime fired clause 数 (active_clause)
++            "active_clause",
+         ):
+             assert key in payload
++        # T037: active_clause は int (>=0)
++        ac = payload["active_clause"]
++        assert isinstance(ac, int)
++        assert ac >= 0
+ 
+     def test_no_trades_reason(self) -> None:
+         """Constant 0.0 では entry シグナルが発生しない → trade_count == 0."""
+diff --git a/tests/dsl/test_strategy.py b/tests/dsl/test_strategy.py
+index e391083..9669fc4 100644
+--- a/tests/dsl/test_strategy.py
++++ b/tests/dsl/test_strategy.py
+@@ -295,3 +295,95 @@ def test_session_close_before_time_no_force() -> None:
+     # 20:59
+     bar = make_bar(20 * 60 + 59, bid_close="154.0", ask_close="154.01")
+     assert strat.on_bar(bar, _long_snapshot(entry_time)) == []
++
++
++# ---- T037: active_clause_indices (runtime fired clause counter) -------------
++
++
++def _mk_two_clause_genome() -> Genome:
++    """2 clause × 1 directional の genome (T037 active_clause テスト用)."""
++    return Genome(
++        name="g_two",
++        units=1000,
++        clauses=(
++            ClauseConfig(
++                directional=(SignalConfig(name="F1", weight=1.0),),
++                local_gate=(),
++                weight=1.0,
++            ),
++            ClauseConfig(
++                directional=(SignalConfig(name="F2", weight=1.0),),
++                local_gate=(),
++                weight=1.0,
++            ),
++        ),
++        position=PositionConfig(
++            entry_threshold=0.3,
++            exit_threshold=0.1,
++            max_pos=1,
++            time_stop_min=0,
++        ),
++        risk=RiskConfig(stop_atr=2.0, take_atr=3.0),
++    )
++
++
++def test_active_clause_indices_initially_empty() -> None:
++    """T037: backtest 開始前は空集合."""
++    g = _mk_two_clause_genome()
++    evaluator = ScriptedEvaluator({0: {"F1": 0.5, "F2": 0.0}})
++    strat = DslStrategy(g, evaluator)
++    assert strat.active_clause_indices == frozenset()
++
++
++def test_active_clause_indices_records_fired_clause_idx() -> None:
++    """T037: clause_score != 0.0 だった clause idx が集合に入る.
++
++    clause0 は F1=0.5 で score 0.5 (発火)、clause1 は F2=0.0 で score 0.0 (不発)。
++    """
++    g = _mk_two_clause_genome()
++    evaluator = ScriptedEvaluator({0: {"F1": 0.5, "F2": 0.0}})
++    strat = DslStrategy(g, evaluator)
++    strat.on_bar(_bar(0), _empty_snapshot())
++    assert strat.active_clause_indices == frozenset({0})
++
++
++def test_active_clause_indices_excludes_never_fired_clause() -> None:
++    """T037: 全期間で clause_score=0 だった clause は集合に入らない."""
++    g = _mk_two_clause_genome()
++    evaluator = ScriptedEvaluator(
++        {
++            0: {"F1": 0.5, "F2": 0.0},
++            1: {"F1": -0.4, "F2": 0.0},  # clause1 は連続不発
++        }
++    )
++    strat = DslStrategy(g, evaluator)
++    strat.on_bar(_bar(0), _empty_snapshot())
++    strat.on_bar(_bar(1), _empty_snapshot())
++    assert strat.active_clause_indices == frozenset({0})
++
++
++def test_active_clause_indices_accumulates_across_bars() -> None:
++    """T037: 異なる bar で異なる clause が発火した場合は両方記録される."""
++    g = _mk_two_clause_genome()
++    evaluator = ScriptedEvaluator(
++        {
++            0: {"F1": 0.5, "F2": 0.0},  # clause0 のみ
++            1: {"F1": 0.0, "F2": 0.4},  # clause1 のみ
++        }
++    )
++    strat = DslStrategy(g, evaluator)
++    strat.on_bar(_bar(0), _empty_snapshot())
++    strat.on_bar(_bar(1), _empty_snapshot())
++    assert strat.active_clause_indices == frozenset({0, 1})
++
++
++def test_active_clause_indices_returns_frozenset_immutable() -> None:
++    """T037: 返り値は frozenset (外部から mutate 不能)."""
++    g = _mk_two_clause_genome()
++    evaluator = ScriptedEvaluator({0: {"F1": 0.5, "F2": 0.0}})
++    strat = DslStrategy(g, evaluator)
++    strat.on_bar(_bar(0), _empty_snapshot())
++    s = strat.active_clause_indices
++    assert isinstance(s, frozenset)
++    # 外部参照からは mutate 不能 (frozenset は add/remove なし)
++    assert not hasattr(s, "add")

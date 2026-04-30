@@ -1,0 +1,787 @@
+diff --git a/config/alpha_factory/default.yaml b/config/alpha_factory/default.yaml
+index bde89b3..3b7e164 100644
+--- a/config/alpha_factory/default.yaml
++++ b/config/alpha_factory/default.yaml
+@@ -54,10 +54,15 @@ ga:
+     enable_fallback_when_all_infeasible: true   # 全個体 infeasible で旧 4 要素にフォールバック
+ 
+ # 使命達成判定 — 全てを満たす個体が出現すれば使命達成
++# T042 Phase 0: sharpe_min は **annualized Sharpe** スケール (S_annual ≈ S_trade ×
++# sqrt(λ_day × 252) で換算後の値で比較する)。GA fitness や payload に出る
++# trade_sharpe_raw とはスケールが異なる。
++# 詳細: docs/alpha_factory/sharpe-rescale.md
++# 学術引用: Andrew W. Lo (2002), "The Statistics of Sharpe Ratios".
+ live_criteria:
+-  sharpe_min: 1.0
+-  total_pnl_min: 50000  # 50k JPY over dataset window
+-  max_drawdown_max: 0.2  # 20%
++  sharpe_min: 1.0           # annualized Sharpe (T042 換算後比較)
++  total_pnl_min: 50000      # 50k JPY over dataset window
++  max_drawdown_max: 0.2     # 20%
+   trade_count_min: 50
+   trade_count_max: 5000
+ 
+@@ -99,7 +104,14 @@ stage_gate:
+     wf_test_days: 10
+     wf_step_days: 10
+     wf_embargo_days: 1
+-    median_oos_sharpe_min: 0.20
++    # T042 Phase 0: trade-level スケール (per-fold trade_sharpe_raw との比較)。
++    # Stage B は per-fold WF OOS の中央値を判定するため annualized でなく
++    # trade-level 値を使う (Stage A threshold と同じスケール)。
++    # 旧 0.20 は v1 bar-level 想定の legacy 値で、Run 14-16 replay
++    # (reports/sharpe-rescale/) では trade-level median 0.05〜0.19。
++    # 0.05 で 50%程度 fold が pass する想定で出発、calibrate-gate では
++    # 制御していないため Phase 1 の per-fold 分布測定に基づき再校正予定。
++    median_oos_sharpe_min: 0.05  # trade-level (T042 再校正)
+     positive_fold_min: 0.60
+     dsr_min: 0.0                # monitor_only (Phase 4 で hard 化)
+   stage_c:
+diff --git a/docs/alpha_factory/mission-score.md b/docs/alpha_factory/mission-score.md
+index a172d8e..d52b57d 100644
+--- a/docs/alpha_factory/mission-score.md
++++ b/docs/alpha_factory/mission-score.md
+@@ -15,12 +15,12 @@
+ 
+ 各軸 `i` ∈ {sharpe, total_pnl, max_drawdown, trade_count} について `lower_i` / `target_i` を定義:
+ 
+-| 軸 | lower | target | 向き |
+-|----|------|--------|------|
+-| sharpe | 0.0 | `live_criteria.sharpe_min` | 大きいほど良い |
+-| total_pnl | 0.0 | `live_criteria.total_pnl_min` | 大きいほど良い |
+-| max_drawdown_frac | `live_criteria.max_drawdown_max` | 0.0 | **小さいほど良い (逆向き)** |
+-| trade_count | 0 | `live_criteria.trade_count_min` | 大きいほど良い、ただし `> trade_count_max` で score=0 (範囲制約) |
++| 軸 | lower | target | 向き | スケール (T042 後) |
++|----|------|--------|------|------------------|
++| sharpe | 0.0 | `live_criteria.sharpe_min` | 大きいほど良い | **annualized** (`_annualize_trade_sharpe` 経由)、[sharpe-rescale.md](sharpe-rescale.md) |
++| total_pnl | 0.0 | `live_criteria.total_pnl_min` | 大きいほど良い | 通貨単位（JPY） |
++| max_drawdown_frac | `live_criteria.max_drawdown_max` | 0.0 | **小さいほど良い (逆向き)** | fraction (0-1) |
++| trade_count | 0 | `live_criteria.trade_count_min` | 大きいほど良い、ただし `> trade_count_max` で score=0 (範囲制約) | trade 数 |
+ 
+ ### 軸別スコア (clip + 線形正規化)
+ 
+diff --git a/docs/alpha_factory/sharpe-rescale.md b/docs/alpha_factory/sharpe-rescale.md
+new file mode 100644
+index 0000000..20c5e98
+--- /dev/null
++++ b/docs/alpha_factory/sharpe-rescale.md
+@@ -0,0 +1,107 @@
++# Sharpe スケール変換 (trade-level → annualized)
++
++**TODO**: T042 (Phase 0)
++**実装**: `src/alpha_factory/stage_gate.py::_annualize_trade_sharpe`
++**関連**: `scripts/alpha_factory/replay_sharpe_rescale.py`、`docs/alpha_factory/mission-score.md`、`docs/alpha_factory/stage-gates.md`
++**起点監査**: [audit-codex-round-2.md §3-1](../../devnotes/20260426-1010-ga-audit-r16/audit-codex-round-2.md)
++
++## 問題
++
++GA fitness と Stage A/B 内部評価は **trade-level Sharpe (v2)** = `trade_sharpe_raw = μ_trade / σ_trade` に統一されている一方、`live_criteria.sharpe_min=1.0` は **bar-level annualized Sharpe** スケール前提のまま放置されていた（[stage_gate.py:574-577](../../src/alpha_factory/stage_gate.py#L574-L577) のコード自身が「Phase 1B replay で再校正する」と宣言）。Run 1〜16 で Stage A pass=0 / Stage C pass=0 が常時発生していた構造的原因の一つ。
++
++Run 14-16 archive replay 観測（`reports/sharpe-rescale/`）:
++| Run | trade_sharpe_raw median | q85 | max | annualized max |
++|----:|------------------------:|----:|----:|---------------:|
++| 14 | 0.047 | 0.140 | 0.140 | 2.23 |
++| 15 | -0.020 | 0.041 | 0.184 | 3.01 |
++| 16 | 0.186 | 0.341 | 0.341 | 4.86 |
++
++すべての Run で **annualized では best 個体が live_criteria.sharpe_min=1.0 を超える** が、trade-level スケールのまま比較すると常時 fail していた。
++
++## 換算式（Phase 0 minimum）
++
++```
++S_annual ≈ S_trade × sqrt(λ_day × 252)
++```
++
++- `S_trade`: trade-level Sharpe ratio (`bt.trade_sharpe_raw`)
++- `λ_day = trade_count / window_days`: 1 営業日あたり平均 trade 数
++- `252`: 1 営業年営業日数
++
++実装: [`stage_gate.py::_annualize_trade_sharpe`](../../src/alpha_factory/stage_gate.py)
++
++## scope 外（Phase 1+ で導入予定）
++
++完全な Lo (2002) 公式は **自己相関補正係数** を含む:
++```
++S_annual = S_trade × sqrt(λ_day × 252) / sqrt(adj_corr)
++adj_corr = 1 + 2 × Σ_{k=1}^{q} (1 - k/q) × ρ_k
++```
++`ρ_k` は trade returns の lag-k 自己相関。
++
++Phase 0 では archive スキーマに trade-level 時系列を持たないため `adj_corr=1` 固定で運用。Phase 1 で trade-level returns を archive に格納する設計を行った時点で導入する。
++
++学術引用:
++- Andrew W. Lo (2002), "The Statistics of Sharpe Ratios", *Financial Analysts Journal* 58(4), 36-52.
++
++## 実装の境界条件
++
++`_annualize_trade_sharpe` は以下のとき `None` を返す（caller 側で「換算不能 = lc.sharpe 判定不能 = 失格」扱い）:
++- `trade_sharpe_raw` が None / NaN / inf
++- `trade_count <= 0`
++- `window_days <= 0`
++
++これは「base 評価で trade を出せず Sharpe 計算不能だった個体」を defensive に lc.sharpe pass から除外する。
++
++## 適用箇所
++
++| 比較対象 | 評価スケール | window |
++|---------|------------|--------|
++| `live_criteria.sharpe_min` (= 1.0) | **annualized** | `stage_c.stage_c_holdout_days` (60 日) |
++| `stage_a.threshold` | trade-level (fitness_pen) | calibrate-gate で動的調整 |
++| `stage_b.median_oos_sharpe_min` | trade-level (per-fold) | `wf_test_days` |
++
++**`live_criteria.sharpe_min` のみ annualized で比較**。Stage A/B threshold は内部の calibrate gate or 経験的設定で動的に決まるため trade-level のまま。
++
++## 北極星制約との整合（AGENTS.md 禁止事項 #4）
++
++「閾値の不当な緩和」に **抵触しない**:
++
++- `live_criteria.sharpe_min=1.0` の **数値は不変**、annualized Sharpe を比較対象に変えただけ
++- 「年率 1.0 以上の戦略を見つける」という mission の意味的内容は変わらない
++- 換算式は学術文献 (Lo 2002) を引用、第三者検証可能
++- 換算根拠は本 docs に固定、calibrate-gate の自動調整外（手動調整禁止）
++
++## yaml の現状（Phase 0 完了時）
++
++```yaml
++live_criteria:
++  sharpe_min: 1.0          # annualized (T042 換算後比較)
++  total_pnl_min: 50000
++  max_drawdown_max: 0.2
++  trade_count_min: 50
++  trade_count_max: 5000
++
++stage_gate:
++  stage_a:
++    threshold: 0.0          # trade-level (calibrate-gate 管理)
++  stage_b:
++    median_oos_sharpe_min: 0.05   # trade-level (T042 で 0.20 → 0.05 に再校正)
++```
++
++## replay スクリプト
++
++```bash
++# Run 16 archive を換算
++uv run python scripts/alpha_factory/replay_sharpe_rescale.py \
++    --parquet .cache/alpha_factory/runs/genomes_run_20260425_235717.parquet \
++    --window-days 60 \
++    --target-pass-rate 0.15 \
++    --output reports/sharpe-rescale/run-16-distribution.json
++```
++
++出力 JSON は trade-level / annualized の population 分布、推奨閾値（target_pass_rate=0.15 達成時の 85%ile）を含む。
++
++## 変更履歴
++
++- 2026-04-26: T042 Phase 0 初期実装。Codex Round 2 §3-1 で換算式合意（Lo 2002）。stage_b.median_oos_sharpe_min を v1 bar-level 想定 0.20 → trade-level 経験値 0.05 に再校正。Stage C lc.sharpe を annualized 比較に切替。
+diff --git a/docs/alpha_factory/stage-gates.md b/docs/alpha_factory/stage-gates.md
+index bcab4ed..4026bb2 100644
+--- a/docs/alpha_factory/stage-gates.md
++++ b/docs/alpha_factory/stage-gates.md
+@@ -23,6 +23,8 @@ session close は engine 不変条件として fitness に反映される。
+ 
+ 本ドキュメントで使用する用語: [Stage A](terminology.md#stage-a), [Stage B](terminology.md#stage-b), [Stage C](terminology.md#stage-c), [Walk-Forward](terminology.md#walk-forward), [IS / OOS](terminology.md#is-oos), [DSR](terminology.md#dsr), [(ii-lite)](terminology.md#ii-lite), [TC](terminology.md#tc), [StageResult](terminology.md#stage-result), [WF Fold](terminology.md#wf-fold), [Embargo](terminology.md#embargo), [Reason Code](terminology.md#reason-code), [CrossPairResult](terminology.md#cross-pair-result)
+ 
++**重要 (T042)**: `live_criteria.sharpe_min` は **annualized Sharpe** スケール、Stage A/B threshold は **trade-level Sharpe** スケール。Stage C 内部で `_annualize_trade_sharpe` により換算してから比較する。詳細: [sharpe-rescale.md](sharpe-rescale.md)
++
+ ## 主要定義
+ 
+ ### Stage A — Fast Screen
+diff --git a/scripts/alpha_factory/replay_sharpe_rescale.py b/scripts/alpha_factory/replay_sharpe_rescale.py
+new file mode 100644
+index 0000000..9847b4a
+--- /dev/null
++++ b/scripts/alpha_factory/replay_sharpe_rescale.py
+@@ -0,0 +1,233 @@
++"""T042: trade-level Sharpe → annualized Sharpe 換算 replay (Phase 0)。
++
++archive Parquet (genomes_*.parquet) を読み、population 統計と換算後の
++annualized Sharpe 分布を計算して JSON に書き出す。
++
++換算式 (Phase 0 minimum, no autocorrelation correction):
++
++    S_annual ≈ S_trade × sqrt(λ_day × 252)
++
++ただし λ_day = trade_count / window_days_a (Stage A 観測 window)。
++完全 Lo (2002) 式の自己相関補正 (adj_corr) は Phase 1+ で trade-level
++時系列を archive に格納できる段階で導入する (詳細:
++docs/alpha_factory/sharpe-rescale.md)。
++
++学術引用:
++- Andrew W. Lo (2002), "The Statistics of Sharpe Ratios",
++  Financial Analysts Journal 58(4), 36-52. trade-level → annualized 換算と
++  自己相関補正の標準的定式化。
++
++USAGE:
++    uv run python scripts/alpha_factory/replay_sharpe_rescale.py \\
++        --parquet .cache/alpha_factory/runs/genomes_run_20260425_235717.parquet \\
++        --window-days 60 \\
++        --target-pass-rate 0.15 \\
++        --output reports/sharpe-rescale/run-16-distribution.json
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import math
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any
++
++# Stage A 観測 window のデフォルト (config/alpha_factory/default.yaml と同期)。
++# replay 専用ヘルパで yaml 読みは強制しない (CI/解析用途で軽量)。
++DEFAULT_WINDOW_DAYS_A: int = 60
++TRADING_DAYS_PER_YEAR: int = 252
++
++
++@dataclass(frozen=True)
++class AnnualizationResult:
++    """個体ごとの換算結果."""
++
++    trade_sharpe_raw: float
++    trade_count: int
++    lambda_day: float
++    sharpe_annualized: float
++
++
++def annualize_trade_sharpe(
++    trade_sharpe_raw: float,
++    trade_count: int,
++    window_days: int,
++) -> float | None:
++    """trade-level Sharpe を annualized Sharpe に換算する。
++
++    Args:
++        trade_sharpe_raw: trade-level Sharpe ratio (μ_trade / σ_trade)。
++        trade_count: 観測 window 内の trade 数。
++        window_days: 観測 window 日数 (Stage A は 60)。
++
++    Returns:
++        年率換算 Sharpe。trade_count <= 0 または window_days <= 0、
++        trade_sharpe_raw が NaN/inf の場合 None。
++    """
++    if window_days <= 0 or trade_count <= 0:
++        return None
++    if trade_sharpe_raw is None:
++        return None
++    if not math.isfinite(trade_sharpe_raw):
++        return None
++    lambda_day = trade_count / window_days
++    return trade_sharpe_raw * math.sqrt(lambda_day * TRADING_DAYS_PER_YEAR)
++
++
++def annualize_population(
++    rows: list[dict[str, Any]],
++    window_days: int,
++) -> list[AnnualizationResult]:
++    """archive 行の population 全体を換算した結果を返す。
++
++    trade_count <= 0 または trade_sharpe_raw が None/NaN の行はスキップ。
++    """
++    results: list[AnnualizationResult] = []
++    for r in rows:
++        ts = r.get("trade_sharpe_raw")
++        tc = r.get("trade_count")
++        if ts is None or tc is None or tc <= 0:
++            continue
++        if not isinstance(ts, int | float):
++            continue
++        if not math.isfinite(float(ts)):
++            continue
++        s_ann = annualize_trade_sharpe(float(ts), int(tc), window_days)
++        if s_ann is None:
++            continue
++        lambda_day = int(tc) / window_days
++        results.append(
++            AnnualizationResult(
++                trade_sharpe_raw=float(ts),
++                trade_count=int(tc),
++                lambda_day=lambda_day,
++                sharpe_annualized=s_ann,
++            )
++        )
++    return results
++
++
++def _quantiles(values: list[float]) -> dict[str, float]:
++    if not values:
++        return {}
++    s = sorted(values)
++    n = len(s)
++
++    def q(p: float) -> float:
++        idx = max(0, min(n - 1, round((n - 1) * p)))
++        return s[idx]
++
++    return {
++        "n": n,
++        "min": s[0],
++        "q25": q(0.25),
++        "median": q(0.50),
++        "q75": q(0.75),
++        "q85": q(0.85),
++        "q95": q(0.95),
++        "max": s[-1],
++        "mean": sum(s) / n,
++    }
++
++
++def summarize(
++    results: list[AnnualizationResult],
++    target_pass_rate: float,
++) -> dict[str, Any]:
++    """換算結果の population 統計と target_pass_rate 達成しきい値を出す。"""
++    trade_sharpes = [r.trade_sharpe_raw for r in results]
++    annualized = [r.sharpe_annualized for r in results]
++    lambda_days = [r.lambda_day for r in results]
++
++    summary: dict[str, Any] = {
++        "n_individuals": len(results),
++        "trade_sharpe_raw": _quantiles(trade_sharpes),
++        "sharpe_annualized": _quantiles(annualized),
++        "lambda_day": _quantiles(lambda_days),
++        "target_pass_rate": target_pass_rate,
++    }
++
++    if results:
++        # target_pass_rate=0.15 なら 85%ile (上位 15% が pass する閾値)
++        n = len(results)
++        s_sorted = sorted(trade_sharpes)
++        pass_idx = round((n - 1) * (1.0 - target_pass_rate))
++        summary["recommended_stage_a_threshold_trade_level"] = s_sorted[pass_idx]
++        a_sorted = sorted(annualized)
++        summary["recommended_threshold_annualized"] = a_sorted[pass_idx]
++    return summary
++
++
++def _read_archive(parquet_path: Path) -> list[dict[str, Any]]:
++    """Parquet を Python list[dict] にロード。pyarrow 必須。"""
++    import pyarrow.parquet as pq
++
++    table = pq.read_table(parquet_path)
++    return list(table.to_pylist())
++
++
++def _parse_args(argv: list[str] | None) -> argparse.Namespace:
++    p = argparse.ArgumentParser(
++        description="Trade-level Sharpe → annualized 換算 replay (T042)",
++    )
++    p.add_argument(
++        "--parquet",
++        type=Path,
++        required=True,
++        help="archive Parquet path (genomes_*.parquet)",
++    )
++    p.add_argument(
++        "--window-days",
++        type=int,
++        default=DEFAULT_WINDOW_DAYS_A,
++        help="Stage A 観測 window 日数 (default: 60)",
++    )
++    p.add_argument(
++        "--target-pass-rate",
++        type=float,
++        default=0.15,
++        help="Stage A target_pass_rate (default: 0.15)",
++    )
++    p.add_argument(
++        "--output",
++        type=Path,
++        default=None,
++        help="出力 JSON path (省略時 stdout)",
++    )
++    return p.parse_args(argv)
++
++
++def main(argv: list[str] | None = None) -> int:
++    args = _parse_args(argv)
++
++    if not args.parquet.exists():
++        print(f"[error] parquet not found: {args.parquet}")
++        return 2
++
++    rows = _read_archive(args.parquet)
++    results = annualize_population(rows, window_days=args.window_days)
++    summary = summarize(results, target_pass_rate=args.target_pass_rate)
++    summary["source_parquet"] = str(args.parquet)
++    summary["window_days"] = args.window_days
++    summary["formula"] = (
++        "S_annual ≈ S_trade × sqrt((trade_count / window_days) × 252)"
++    )
++    summary["formula_caveat"] = (
++        "no autocorrelation correction (Phase 0 minimum). "
++        "Lo (2002) 完全式は trade-level 時系列を archive に格納する Phase 1+ で導入。"
++    )
++
++    payload = json.dumps(summary, ensure_ascii=False, indent=2)
++    if args.output is None:
++        print(payload)
++    else:
++        args.output.parent.mkdir(parents=True, exist_ok=True)
++        args.output.write_text(payload, encoding="utf-8")
++        print(f"[ok] wrote {args.output}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/src/alpha_factory/stage_gate.py b/src/alpha_factory/stage_gate.py
+index 1f30ca4..e1dff78 100644
+--- a/src/alpha_factory/stage_gate.py
++++ b/src/alpha_factory/stage_gate.py
+@@ -21,6 +21,7 @@ Alpha Factory の Genome 評価パイプラインの中核。3 つの Stage を
+ 
+ from __future__ import annotations
+ 
++import math
+ import statistics as _stats
+ import time as _time
+ from collections.abc import Mapping
+@@ -527,6 +528,43 @@ def evaluate_stage_b(
+ # ---------------------------------------------------------------------------
+ 
+ 
++# T042: trade-level Sharpe → annualized Sharpe 換算 (Phase 0 minimum)。
++# - Stage C の live_criteria.sharpe_min (= 1.0 annualized) と GA fitness が
++#   trade-level Sharpe (v2) で乖離していた問題を解消する。
++# - 換算式: S_annual ≈ S_trade × sqrt(λ_day × 252) / sqrt(adj_corr)
++#   Phase 0 では adj_corr=1 (no autocorrelation correction)、λ_day=trade_count/window。
++# - 学術引用: Andrew W. Lo (2002), "The Statistics of Sharpe Ratios",
++#   Financial Analysts Journal 58(4), 36-52.
++# - 詳細: docs/alpha_factory/sharpe-rescale.md
++TRADING_DAYS_PER_YEAR: Final[int] = 252
++
++
++def _annualize_trade_sharpe(
++    trade_sharpe_raw: float | None,
++    trade_count: int,
++    window_days: int,
++) -> float | None:
++    """trade-level Sharpe を annualized Sharpe に換算する。
++
++    入力が None / 非有限 / trade_count<=0 / window_days<=0 のいずれかなら
++    None を返す (caller 側で「換算不能 = lc.sharpe 判定不能 = 失格」扱いを期待)。
++
++    Args:
++        trade_sharpe_raw: trade-level Sharpe ratio (μ_trade / σ_trade)。
++        trade_count: 観測 window 内の trade 数。
++        window_days: 観測 window 日数。
++
++    Returns:
++        年率換算 Sharpe、または None。
++    """
++    if trade_sharpe_raw is None or trade_count <= 0 or window_days <= 0:
++        return None
++    if not math.isfinite(trade_sharpe_raw):
++        return None
++    lambda_day = trade_count / window_days
++    return trade_sharpe_raw * math.sqrt(lambda_day * TRADING_DAYS_PER_YEAR)
++
++
+ # T043: mission_score (live_criteria 4 軸 soft 合算)
+ # - 詳細設計: devnotes/20260426-1030-phase0-mission-score/detailed-design.md
+ # - 各軸 i: score_i = clip((metric - lower) / (target - lower), 0, 1)
+@@ -665,8 +703,10 @@ def evaluate_stage_c(
+             trade_count_min_for_sharpe=stage_config.trade_count_min_for_sharpe,
+         )
+         # T-sharpe Phase 1A: trade_sharpe_raw (v2) を使用
+-        # NOTE: live_criteria.sharpe_min=1.0 は v1 bar-level Sharpe スケール前提。
+-        # Phase 1B replay で v2 trade-level スケールに再校正する。
++        # T042 Phase 0 完了: live_criteria.sharpe_min=1.0 は **annualized** Sharpe
++        # スケールで意味を保ち、trade-level base_sharpe は下流で _annualize_trade_sharpe
++        # により stage_c.holdout_days を window として年率換算してから lc 判定する
++        # (詳細: docs/alpha_factory/sharpe-rescale.md、Lo 2002 引用)。
+         base_sharpe = (
+             float(bt.trade_sharpe_raw) if bt.trade_sharpe_raw is not None else None
+         )
+@@ -686,9 +726,18 @@ def evaluate_stage_c(
+         base_failed = True
+         reasons.append("system_failure")
+ 
++    # T042: trade-level base_sharpe を annualized 換算してから live_criteria 判定。
++    # holdout_days = stage_c.stage_c_holdout_days (config) を window として用いる。
++    base_sharpe_annualized = _annualize_trade_sharpe(
++        base_sharpe, base_trade_count, stage_config.stage_c_holdout_days
++    )
++
+     # live_criteria 判定 (base が成功した場合のみ意味を持つ)
+     lc_pass: dict[str, bool] = {
+-        "sharpe": base_sharpe is not None and base_sharpe >= float(lc["sharpe_min"]),
++        "sharpe": (
++            base_sharpe_annualized is not None
++            and base_sharpe_annualized >= float(lc["sharpe_min"])
++        ),
+         "total_pnl": base_total_pnl >= float(lc["total_pnl_min"]),
+         "max_drawdown": base_max_dd_frac <= float(lc["max_drawdown_max"]),
+         "trade_count_min": base_trade_count >= int(lc["trade_count_min"]),
+@@ -821,9 +870,10 @@ def evaluate_stage_c(
+     passed = len(reasons) == 0
+     elapsed = _time.perf_counter() - start
+ 
+-    # T043: mission_score (4 軸 soft 合算スコア、observation only / GA fitness 不変)
++    # T043 + T042: mission_score (4 軸 soft 合算)。sharpe 軸は live_criteria.sharpe_min
++    # と同じ annualized スケールで評価する (T042 で base_sharpe_annualized を導入)。
+     mission_score = _compute_mission_score(
+-        sharpe=base_sharpe,
++        sharpe=base_sharpe_annualized,
+         total_pnl=base_total_pnl,
+         max_drawdown_frac=base_max_dd_frac,
+         trade_count=base_trade_count,
+@@ -839,6 +889,9 @@ def evaluate_stage_c(
+             # T-sharpe Phase 1A: payload "sharpe" → "trade_sharpe_raw" にリネーム
+             # base_sharpe には trade_sharpe_raw (v2) が入っている
+             "trade_sharpe_raw": base_sharpe,
++            # T042: 年率換算 Sharpe を別 key で露出 (live_criteria 比較用、報告用)。
++            # base 評価の trade を出せず換算不能なら None。
++            "trade_sharpe_annualized": base_sharpe_annualized,
+             "total_pnl": base_total_pnl,
+             "max_drawdown_frac": base_max_dd_frac,
+             "trade_count": base_trade_count,
+diff --git a/tests/alpha_factory/test_stage_gate.py b/tests/alpha_factory/test_stage_gate.py
+index 0d13190..20a4b9c 100644
+--- a/tests/alpha_factory/test_stage_gate.py
++++ b/tests/alpha_factory/test_stage_gate.py
+@@ -21,9 +21,11 @@ from typing import Any, ClassVar, cast
+ import pytest
+ 
+ from src.alpha_factory.stage_gate import (
++    TRADING_DAYS_PER_YEAR,
+     CrossPairResult,
+     StageGateConfig,
+     StageResult,
++    _annualize_trade_sharpe,
+     _compute_mission_score,
+     evaluate_stage_a,
+     evaluate_stage_b,
+@@ -1309,3 +1311,93 @@ class TestT043MissionScore:
+         # base が trade を出さない場合は None になる (defensive)
+         ms = payload["mission_score"]
+         assert ms is None or (isinstance(ms, float) and 0.1 <= ms <= 1.0)
++
++
++# T042: trade-level → annualized Sharpe 換算 ===================================
++
++
++class TestT042AnnualizeTradeSharpe:
++    """live_criteria.sharpe_min (annualized) と GA fitness (trade-level) の
++    スケール乖離を解消する換算ヘルパ。"""
++
++    def test_basic_formula(self) -> None:
++        """S_annual = S_trade × sqrt(λ_day × 252)、λ_day = trade_count / window."""
++        s = _annualize_trade_sharpe(0.2, trade_count=60, window_days=60)
++        assert s is not None
++        assert s == pytest.approx(0.2 * (TRADING_DAYS_PER_YEAR ** 0.5), abs=1e-9)
++
++    def test_returns_none_when_sharpe_is_none(self) -> None:
++        assert _annualize_trade_sharpe(None, 60, 60) is None
++
++    def test_returns_none_when_trade_count_zero(self) -> None:
++        assert _annualize_trade_sharpe(0.5, 0, 60) is None
++
++    def test_returns_none_when_window_zero(self) -> None:
++        assert _annualize_trade_sharpe(0.5, 60, 0) is None
++
++    def test_returns_none_when_sharpe_nan(self) -> None:
++        assert _annualize_trade_sharpe(float("nan"), 60, 60) is None
++
++    def test_returns_none_when_sharpe_inf(self) -> None:
++        assert _annualize_trade_sharpe(float("inf"), 60, 60) is None
++
++
++class TestT042StageCLiveCriteriaAnnualized:
++    """Stage C の live_criteria.sharpe 判定が annualized で行われること。"""
++
++    def test_payload_exposes_trade_sharpe_annualized(self) -> None:
++        bars = _make_continuous_bars(3, bars_per_day=4)
++        ev = ConstantPrimitiveEvaluator(value=0.0)
++        cfg = _backtest_config(max_spread_bps=Decimal("10"))
++        res = evaluate_stage_c(
++            _one_clause_genome(),
++            bars,
++            usd_jpy_meta(),
++            cfg,
++            ev,
++            StageGateConfig(),
++        )
++        payload = cast(dict[str, Any], _envelope(res)["payload"])
++        # base が trade を出さない場合 None、出した場合 float
++        assert "trade_sharpe_annualized" in payload
++        a = payload["trade_sharpe_annualized"]
++        assert a is None or isinstance(a, float)
++
++    def test_lc_sharpe_passes_when_annualized_above_threshold(self) -> None:
++        """trade-level Sharpe を annualized 換算した値で sharpe_min と比較する。
++
++        相応に高い oscillating 価格 + alternating evaluator で trade を出させ、
++        annualized Sharpe が sharpe_min を超える設定で lc_pass['sharpe']=True
++        になることを確認する。
++
++        live_criteria を緩めて sharpe_min=0.5 (annualized) にし、他軸も緩める。
++        """
++        bars = _make_oscillating_bars(5, bars_per_day=4)
++        ev = _AlternatingEvaluator()
++        relaxed_lc = {
++            "sharpe_min": 0.5,  # annualized 0.5 (緩い)
++            "total_pnl_min": -1e9,
++            "max_drawdown_max": 1.0,
++            "trade_count_min": 0,
++            "trade_count_max": 1_000_000,
++        }
++        stage_cfg = StageGateConfig(
++            live_criteria=relaxed_lc,
++            spread_stress_min_total_pnl=-1e9,
++            spread_stress_min_sharpe=-1e9,
++            trade_count_min_for_sharpe=2,
++        )
++        res = evaluate_stage_c(
++            _one_clause_genome(),
++            bars,
++            usd_jpy_meta(),
++            _backtest_config(),
++            ev,
++            stage_cfg,
++        )
++        payload = cast(dict[str, Any], _envelope(res)["payload"])
++        # trade を出していれば annualized が計算され lc.sharpe_pass が True か False か明確
++        if payload["trade_sharpe_annualized"] is not None:
++            ann = float(payload["trade_sharpe_annualized"])
++            expected = ann >= 0.5
++            assert payload["live_criteria_pass"]["sharpe"] is expected
+diff --git a/tests/scripts/test_replay_sharpe_rescale.py b/tests/scripts/test_replay_sharpe_rescale.py
+new file mode 100644
+index 0000000..471ab15
+--- /dev/null
++++ b/tests/scripts/test_replay_sharpe_rescale.py
+@@ -0,0 +1,132 @@
++"""T042: trade-level → annualized Sharpe 換算 replay テスト."""
++
++from __future__ import annotations
++
++import math
++
++import pytest
++
++from scripts.alpha_factory.replay_sharpe_rescale import (
++    TRADING_DAYS_PER_YEAR,
++    AnnualizationResult,
++    annualize_population,
++    annualize_trade_sharpe,
++    summarize,
++)
++
++
++class TestAnnualizeTradeSharpe:
++    """trade-level → annualized 換算式の単体検証."""
++
++    def test_basic_conversion_formula(self) -> None:
++        """S_annual = S_trade × sqrt(λ_day × 252).
++
++        例: S_trade=0.2, trade_count=60, window_days=60 → λ_day=1.0
++        S_annual = 0.2 × sqrt(252) ≈ 3.1749
++        """
++        result = annualize_trade_sharpe(
++            trade_sharpe_raw=0.2, trade_count=60, window_days=60
++        )
++        assert result is not None
++        assert result == pytest.approx(0.2 * math.sqrt(TRADING_DAYS_PER_YEAR), abs=1e-9)
++
++    def test_higher_frequency_amplifies_sharpe(self) -> None:
++        """λ_day が増えると annualized Sharpe も増える (頻度効果).
++
++        Stage A 60 日で trade=600 → λ=10/day → S_annual = S_trade×sqrt(2520)
++        """
++        s_low = annualize_trade_sharpe(0.1, trade_count=60, window_days=60)
++        s_high = annualize_trade_sharpe(0.1, trade_count=600, window_days=60)
++        assert s_low is not None
++        assert s_high is not None
++        assert s_high > s_low
++        # ratio = sqrt(10) ≈ 3.16
++        assert s_high / s_low == pytest.approx(math.sqrt(10.0), abs=1e-9)
++
++    def test_zero_trade_count_returns_none(self) -> None:
++        assert annualize_trade_sharpe(0.5, trade_count=0, window_days=60) is None
++
++    def test_negative_trade_count_returns_none(self) -> None:
++        assert annualize_trade_sharpe(0.5, trade_count=-1, window_days=60) is None
++
++    def test_zero_window_days_returns_none(self) -> None:
++        assert annualize_trade_sharpe(0.5, trade_count=60, window_days=0) is None
++
++    def test_nan_sharpe_returns_none(self) -> None:
++        assert annualize_trade_sharpe(float("nan"), 60, 60) is None
++
++    def test_inf_sharpe_returns_none(self) -> None:
++        assert annualize_trade_sharpe(float("inf"), 60, 60) is None
++
++    def test_negative_sharpe_preserves_sign(self) -> None:
++        """負の Sharpe は負のまま annualize される (絶対値は scale)."""
++        s = annualize_trade_sharpe(-0.3, trade_count=60, window_days=60)
++        assert s is not None
++        assert s < 0
++        assert s == pytest.approx(-0.3 * math.sqrt(252.0), abs=1e-9)
++
++
++class TestAnnualizePopulation:
++    """archive list 全体換算の挙動."""
++
++    def test_filters_invalid_rows(self) -> None:
++        rows = [
++            {"trade_sharpe_raw": 0.2, "trade_count": 60},
++            {"trade_sharpe_raw": None, "trade_count": 60},  # invalid
++            {"trade_sharpe_raw": 0.1, "trade_count": 0},  # invalid
++            {"trade_sharpe_raw": float("nan"), "trade_count": 60},  # invalid
++            {"trade_sharpe_raw": -0.05, "trade_count": 30},  # ok (negative ok)
++        ]
++        results = annualize_population(rows, window_days=60)
++        assert len(results) == 2
++        assert all(isinstance(r, AnnualizationResult) for r in results)
++
++    def test_empty_population(self) -> None:
++        assert annualize_population([], window_days=60) == []
++
++    def test_lambda_day_calculation(self) -> None:
++        rows = [
++            {"trade_sharpe_raw": 0.1, "trade_count": 120},
++        ]
++        results = annualize_population(rows, window_days=60)
++        assert len(results) == 1
++        assert results[0].lambda_day == pytest.approx(2.0, abs=1e-9)
++
++
++class TestSummarize:
++    """population 統計と target_pass_rate 算出."""
++
++    def test_recommended_threshold_at_target_pass_rate(self) -> None:
++        """target_pass_rate=0.15 で 85%ile が出る."""
++        # 100 個体、trade_sharpe_raw 0.00, 0.01, 0.02, ..., 0.99
++        results = [
++            AnnualizationResult(
++                trade_sharpe_raw=i / 100.0,
++                trade_count=60,
++                lambda_day=1.0,
++                sharpe_annualized=(i / 100.0) * math.sqrt(252.0),
++            )
++            for i in range(100)
++        ]
++        s = summarize(results, target_pass_rate=0.15)
++        # idx = round((n-1) × (1 - 0.15)) = round(99 × 0.85) = 84 → values[84] = 0.84
++        assert s["recommended_stage_a_threshold_trade_level"] == pytest.approx(
++            0.84, abs=1e-9
++        )
++
++    def test_empty_results(self) -> None:
++        s = summarize([], target_pass_rate=0.15)
++        assert s["n_individuals"] == 0
++        assert s["trade_sharpe_raw"] == {}
++        assert "recommended_stage_a_threshold_trade_level" not in s
++
++    def test_quantile_keys_present(self) -> None:
++        results = [
++            AnnualizationResult(0.1, 60, 1.0, 0.1 * math.sqrt(252)),
++            AnnualizationResult(0.2, 60, 1.0, 0.2 * math.sqrt(252)),
++            AnnualizationResult(0.3, 60, 1.0, 0.3 * math.sqrt(252)),
++        ]
++        s = summarize(results, target_pass_rate=0.15)
++        for k in ("n", "min", "median", "q75", "q85", "q95", "max", "mean"):
++            assert k in s["trade_sharpe_raw"], f"missing {k}"
++            assert k in s["sharpe_annualized"], f"missing {k}"

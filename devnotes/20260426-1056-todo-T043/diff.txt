@@ -1,0 +1,554 @@
+diff --git a/docs/alpha_factory/mission-score.md b/docs/alpha_factory/mission-score.md
+new file mode 100644
+index 0000000..a172d8e
+--- /dev/null
++++ b/docs/alpha_factory/mission-score.md
+@@ -0,0 +1,86 @@
++# mission_score — live_criteria 4 軸 soft 合算スコア
++
++**TODO**: T043 (Phase 0)
++**実装**: `src/alpha_factory/stage_gate.py::_compute_mission_score`
++**Archive 列**: `mission_score: float | None` (`GENOMES_SCHEMA`)
++**起点監査**: [audit-codex-round-2.md §3-4](../../devnotes/20260426-1010-ga-audit-r16/audit-codex-round-2.md)
++
++## 目的
++
++`live_criteria` の 4 軸 hard pass/fail のみでは「使命達成までの距離」が 0/1 でしか測れない。Run 14 (pnl=0) と Run 15 (pnl=8,660 / sharpe=0.069) のどちらが mission に近いかを判定不能、という問題が Run 1〜16 監査で観測された。`mission_score` は **連続値の進捗指標**として archive と report に記録する観測専用スコア。
++
++**重要**: `mission_score` は **GA fitness や `stage_c.passed` には影響しない**。当面は observation only。Phase 1 以降で GA fitness 組み込みを再評価する。
++
++## 数式
++
++各軸 `i` ∈ {sharpe, total_pnl, max_drawdown, trade_count} について `lower_i` / `target_i` を定義:
++
++| 軸 | lower | target | 向き |
++|----|------|--------|------|
++| sharpe | 0.0 | `live_criteria.sharpe_min` | 大きいほど良い |
++| total_pnl | 0.0 | `live_criteria.total_pnl_min` | 大きいほど良い |
++| max_drawdown_frac | `live_criteria.max_drawdown_max` | 0.0 | **小さいほど良い (逆向き)** |
++| trade_count | 0 | `live_criteria.trade_count_min` | 大きいほど良い、ただし `> trade_count_max` で score=0 (範囲制約) |
++
++### 軸別スコア (clip + 線形正規化)
++
++正方向軸（sharpe / total_pnl / trade_count）:
++```
++score_i = clip((metric_i - lower_i) / (target_i - lower_i), 0, 1)
++```
++
++逆方向軸（max_drawdown_frac）:
++```
++score_i = clip((lower_i - metric_i) / (lower_i - target_i), 0, 1)
++```
++
++### floor 0.1 にスケール（log 表示可能化）
++```
++score_i' = 0.1 + 0.9 × score_i      ∈ [0.1, 1.0]
++```
++
++### 幾何平均
++```
++mission_score = (Π_i score_i')^(1/4)   ∈ [0.1, 1.0]
++```
++
++幾何平均を採用する理由は、1 軸が 0 score（floor=0.1）に落ちると合成全体が引き下げられ、**「全軸での合成達成の困難さ」を反映**するため。算術平均だと一軸の超過で他軸の不足を打ち消せてしまう。
++
++## 性質
++
++- 全軸 target 達成 → `mission_score = 1.0`
++- 全軸 lower 以下 → `mission_score = 0.1`（log 表示で `log(0.1) = -1`）
++- 1 軸が 0 score、他 3 軸 target 達成 → `(0.1 × 1.0³)^(1/4) ≈ 0.5623`
++- `Sharpe = None`（base 評価で trade を出せず計算不能）→ `mission_score = None`（report で「未計測」表示）
++
++## 北極星制約との整合
++
++AGENTS.md 禁止事項 #2「見た目の数値をよくしようとする改善」に **抵触しない**。
++
++- hard `live_criteria` は不変
++- GA fitness (`sharpe`) も不変
++- `mission_score` は archive / report への観測指標追加のみ
++- 「mission_score を上げる」ことは GA selection に直結しないため hack を誘発しない
++
++将来 `mission_score` を GA fitness に組み込む場合は、別 TODO で改めて設計レビューする（北極星制約との整合性を再確認）。
++
++## report 表示
++
++`scripts/alpha_factory/generate_run_report.py` が以下を出力:
++
++- `mission_score` 分布（n / mean / median / std / min / max）
++- best mission_score 個体の identifier (`individual_name`, generation, instrument)
++- Stage C 評価で Sharpe=None の個体（trade を出していない）は計測対象外として明示
++
++## 学術背景
++
++連続的な多目的スコアリングの選択は文献に複数の流儀があり、本実装は以下の方針で固定:
++
++- **Min-max 正規化 + 幾何平均**: 各目的を [0, 1] に正規化した上で幾何平均を取る合成は、Multi-objective optimization の Achievement Scalarizing Function（要確認: Wierzbicki 1980 系列）と発想を共有する。
++- **floor 0.1 スケーリング**: 完全 0 を避けることで log 表示可能化と微小改善の visibility 確保。Bailey & López de Prado (2014) "The Deflated Sharpe Ratio" のような Sharpe ベース連続スコアと組み合わせ可能（要確認）。
++
++具体的な重み付けや凸性制御は Phase 1 で再評価する。
++
++## 変更履歴
++
++- 2026-04-26: T043 初期実装（Phase 0）。Codex Round 2 §3-4 で数式合意。
+diff --git a/scripts/alpha_factory/generate_run_report.py b/scripts/alpha_factory/generate_run_report.py
+index a4da8cc..f28e544 100644
+--- a/scripts/alpha_factory/generate_run_report.py
++++ b/scripts/alpha_factory/generate_run_report.py
+@@ -417,6 +417,41 @@ def main(argv: list[str] | None = None) -> int:
+         lines.append(f"- n_nodes: {_fmt_stats(nn)}")
+     lines.append("")
+ 
++    # T043: mission_score 分布 (Stage C 評価された個体のみ)
++    lines.append("## mission_score 分布 (T043 / observation only)")
++    lines.append("")
++    lines.append(
++        "> live_criteria 4 軸 (sharpe/total_pnl/max_drawdown/trade_count) の "
++        "soft 合算スコア (幾何平均、[0.1, 1.0])。GA fitness や stage_c.passed には "
++        "影響しない (詳細: docs/alpha_factory/mission-score.md)。"
++    )
++    lines.append("")
++    if archive_rows is None:
++        lines.append("- archive Parquet なし、計算スキップ")
++    else:
++        ms_values = [r.get("mission_score") for r in archive_rows]
++        ms_present = [v for v in ms_values if v is not None]
++        if not ms_present:
++            lines.append(
++                "- mission_score=計測対象 0 件 (Stage C base 評価で Sharpe を出した "
++                "個体が無いため未計測)"
++            )
++        else:
++            ms_stats = _basic_stats(ms_values)
++            lines.append(f"- mission_score: {_fmt_stats(ms_stats)}")
++            best_ms = max(ms_present)
++            best_row = next(
++                r for r in archive_rows
++                if r.get("mission_score") == best_ms
++            )
++            lines.append(
++                f"- best mission_score: **{best_ms:.4f}** "
++                f"(`{best_row.get('individual_name', '?')}`, "
++                f"gen={best_row.get('generation', '?')}, "
++                f"instrument={best_row.get('instrument', '?')})"
++            )
++    lines.append("")
++
+     # fold_sign_ratio / dsr 分布
+     lines.append("## fold_sign_ratio / dsr 分布")
+     lines.append("")
+diff --git a/src/alpha_factory/archive.py b/src/alpha_factory/archive.py
+index 0436b84..e735e81 100644
+--- a/src/alpha_factory/archive.py
++++ b/src/alpha_factory/archive.py
+@@ -88,6 +88,10 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
+         pa.field("n_fold_effective", pa.int64(), nullable=True),
+         pa.field("positive_fold_ratio_effective", pa.float64(), nullable=True),
+         pa.field("stage_b_reason_codes", pa.string(), nullable=True),
++        # T043: live_criteria 4 軸 soft 合算スコア (Stage C base 評価から計算)。
++        # 観測指標として archive/report に記録。GA fitness や stage_c.passed には影響しない。
++        # 詳細: docs/alpha_factory/mission-score.md
++        pa.field("mission_score", pa.float64(), nullable=True),
+     ]
+ )
+ 
+@@ -150,6 +154,8 @@ def _create_row_template() -> dict[str, Any]:
+         "n_fold_effective": None,
+         "positive_fold_ratio_effective": None,
+         "stage_b_reason_codes": None,
++        # T043: mission_score (Stage C 評価時のみ書き込み、それ以外は None)
++        "mission_score": None,
+     }
+ 
+ 
+@@ -490,6 +496,9 @@ class GenomeArchive:
+             row["ii_lite_pass"] = None
+         else:
+             row["ii_lite_pass"] = bool(cp_result.passed)
++        # T043: mission_score を payload から書き写す (stage_gate 側で計算済)。
++        # base 評価が trade を出さず Sharpe=None だった場合は None になる。
++        row["mission_score"] = _opt_float(payload, "mission_score")
+         self._mark_stage(row, "C")
+ 
+     def mark_graduated(
+diff --git a/src/alpha_factory/stage_gate.py b/src/alpha_factory/stage_gate.py
+index 3eb2253..1f30ca4 100644
+--- a/src/alpha_factory/stage_gate.py
++++ b/src/alpha_factory/stage_gate.py
+@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
+ from datetime import datetime
+ from decimal import Decimal
+ from types import MappingProxyType
+-from typing import ClassVar, Literal, Protocol, TypedDict, cast
++from typing import ClassVar, Final, Literal, Protocol, TypedDict, cast
+ 
+ import structlog
+ 
+@@ -527,6 +527,95 @@ def evaluate_stage_b(
+ # ---------------------------------------------------------------------------
+ 
+ 
++# T043: mission_score (live_criteria 4 軸 soft 合算)
++# - 詳細設計: devnotes/20260426-1030-phase0-mission-score/detailed-design.md
++# - 各軸 i: score_i = clip((metric - lower) / (target - lower), 0, 1)
++#   ただし max_drawdown は逆向き (小さいほど高 score)、trade_count は範囲外で 0
++# - 0 を避けて log 表示可能化: score_i' = 0.1 + 0.9 * score_i
++# - 幾何平均: mission_score = (Π score_i')^(1/4)  -> [0.1, 1.0]
++# - GA fitness や stage_c.passed には影響しない (observation only)
++_MISSION_SCORE_FLOOR: Final[float] = 0.1
++_MISSION_SCORE_RANGE: Final[float] = 0.9  # = 1.0 - _MISSION_SCORE_FLOOR
++
++
++def _compute_mission_score(
++    *,
++    sharpe: float | None,
++    total_pnl: float,
++    max_drawdown_frac: float,
++    trade_count: int,
++    live_criteria: Mapping[str, float | int],
++) -> float | None:
++    """live_criteria 4 軸の soft 合算スコア (幾何平均, [0.1, 1.0])。
++
++    sharpe が None (= base 評価が trade を出せず Sharpe 計算不能) の場合は
++    score 計算不能として None を返す (報告側で「未計測」表示)。
++    その他の軸は数値必須 (Stage C base 評価が成功していれば自動で揃う)。
++    """
++    if sharpe is None:
++        return None
++
++    # sharpe: lower=0, target=sharpe_min (T042 換算後値が入る想定)
++    sharpe_target = float(live_criteria["sharpe_min"])
++    sharpe_lower = 0.0
++    sharpe_score = _axis_score(sharpe, sharpe_lower, sharpe_target)
++
++    # total_pnl: lower=0, target=total_pnl_min
++    pnl_target = float(live_criteria["total_pnl_min"])
++    pnl_lower = 0.0
++    pnl_score = _axis_score(total_pnl, pnl_lower, pnl_target)
++
++    # max_drawdown_frac: lower=max_drawdown_max (高 dd = 0 score), target=0 (低 dd = 1 score)
++    dd_lower = float(live_criteria["max_drawdown_max"])
++    dd_target = 0.0
++    dd_score = _axis_score_inverted(max_drawdown_frac, dd_lower, dd_target)
++
++    # trade_count: lower=0, target=trade_count_min。範囲外 (>max) は 0 score
++    tc_target = float(live_criteria["trade_count_min"])
++    tc_max = float(live_criteria["trade_count_max"])
++    tc_score = (
++        0.0
++        if trade_count > tc_max
++        else _axis_score(float(trade_count), 0.0, tc_target)
++    )
++
++    # 0 を避けて floor 0.1 にスケール
++    floor = _MISSION_SCORE_FLOOR
++    rng = _MISSION_SCORE_RANGE
++    s = [floor + rng * x for x in (sharpe_score, pnl_score, dd_score, tc_score)]
++
++    # 幾何平均
++    product = 1.0
++    for v in s:
++        product *= v
++    return product ** (1.0 / 4.0)
++
++
++def _axis_score(metric: float, lower: float, target: float) -> float:
++    """min-max 正規化 + clip([0, 1])。target == lower で metric>=target なら 1.0、
++    target < lower (= 設定不整合) は 0.0 を返す (defensive)。"""
++    if target <= lower:
++        return 1.0 if metric >= target else 0.0
++    raw = (metric - lower) / (target - lower)
++    if raw < 0.0:
++        return 0.0
++    if raw > 1.0:
++        return 1.0
++    return raw
++
++
++def _axis_score_inverted(metric: float, lower: float, target: float) -> float:
++    """逆向き軸 (drawdown 等、小さいほど良い)。lower > target を期待。"""
++    if lower <= target:
++        return 1.0 if metric <= target else 0.0
++    raw = (lower - metric) / (lower - target)
++    if raw < 0.0:
++        return 0.0
++    if raw > 1.0:
++        return 1.0
++    return raw
++
++
+ def evaluate_stage_c(
+     genome: Genome,
+     bars_holdout: list[PriceBar],
+@@ -548,6 +637,10 @@ def evaluate_stage_c(
+     drawdown は **fraction (0-1)** に統一して比較
+     (``BacktestMetrics.max_drawdown_pct`` は percent → ``/100`` 換算)。
+ 
++    payload には observation 用に ``mission_score`` (T043) を含める。
++    ``mission_score`` は live_criteria 4 軸の soft 合算で、GA fitness や
++    ``passed`` 判定には影響しない。
++
+     Returns:
+         StageResult(stage="C", ...)。
+     """
+@@ -728,6 +821,15 @@ def evaluate_stage_c(
+     passed = len(reasons) == 0
+     elapsed = _time.perf_counter() - start
+ 
++    # T043: mission_score (4 軸 soft 合算スコア、observation only / GA fitness 不変)
++    mission_score = _compute_mission_score(
++        sharpe=base_sharpe,
++        total_pnl=base_total_pnl,
++        max_drawdown_frac=base_max_dd_frac,
++        trade_count=base_trade_count,
++        live_criteria=lc,
++    )
++
+     metrics_envelope: dict[str, object] = {
+         "stage": "C",
+         "genome_name": genome.name,
+@@ -740,6 +842,7 @@ def evaluate_stage_c(
+             "total_pnl": base_total_pnl,
+             "max_drawdown_frac": base_max_dd_frac,
+             "trade_count": base_trade_count,
++            "mission_score": mission_score,
+             "live_criteria_pass": lc_pass,
+             "intraday_compliant": intraday_compliant,
+             "overnight_violations": overnight_violations,
+diff --git a/tests/alpha_factory/test_archive.py b/tests/alpha_factory/test_archive.py
+index 663cbc2..918e85e 100644
+--- a/tests/alpha_factory/test_archive.py
++++ b/tests/alpha_factory/test_archive.py
+@@ -164,10 +164,11 @@ def _make_archive() -> GenomeArchive:
+ # ---------------------------------------------------------------------------
+ 
+ 
+-def test_schema_has_33_columns() -> None:
++def test_schema_has_34_columns() -> None:
+     # T-sharpe Phase 1A: trade_sharpe_raw + sharpe_calc_version (28→30)
+     # T035: n_fold_effective + positive_fold_ratio_effective + stage_b_reason_codes (30→33)
+-    assert len(GENOMES_SCHEMA.names) == 33
++    # T043: mission_score (33→34)
++    assert len(GENOMES_SCHEMA.names) == 34
+     expected = {
+         "run_id", "run_number", "generation", "individual_name",
+         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
+@@ -181,6 +182,8 @@ def test_schema_has_33_columns() -> None:
+         # T035: Stage B 観察可能性
+         "n_fold_effective", "positive_fold_ratio_effective",
+         "stage_b_reason_codes",
++        # T043: live_criteria 4 軸 soft 合算スコア
++        "mission_score",
+     }
+     assert set(GENOMES_SCHEMA.names) == expected
+ 
+@@ -202,6 +205,8 @@ def test_template_default_values() -> None:
+         # T035
+         "n_fold_effective", "positive_fold_ratio_effective",
+         "stage_b_reason_codes",
++        # T043: mission_score (Stage C 評価時のみ書き込み)
++        "mission_score",
+     ):
+         assert t[k] is None, f"{k} should default to None"
+     # non-null bool -> False
+@@ -376,6 +381,45 @@ def test_collect_stage_c_ii_lite_pass_false() -> None:
+     assert row["ii_lite_pass"] is False
+ 
+ 
++# T043: mission_score 伝搬テスト ===============================================
++
++
++def test_collect_stage_c_writes_mission_score_from_payload() -> None:
++    """Stage C payload に mission_score があれば archive 行に書き写される。"""
++    arc = _make_archive()
++    g = _stub_genome()
++    arc.collect_stage_a(g, "lane", 0, _stage_a_result(),
++                         instrument="USD_JPY")
++    arc.collect_stage_c(
++        g, "lane", 0,
++        _stage_c_result(mission_score=0.42),
++    )
++    row = arc._rows[("lane", 0, "g0_i0")]
++    assert row["mission_score"] == pytest.approx(0.42, abs=1e-9)
++
++
++def test_collect_stage_c_mission_score_none_when_payload_missing() -> None:
++    """payload に mission_score が無ければ None (Stage A のみで終わる行と同等)."""
++    arc = _make_archive()
++    g = _stub_genome()
++    arc.collect_stage_a(g, "lane", 0, _stage_a_result(),
++                         instrument="USD_JPY")
++    # _stage_c_result は default で mission_score を入れていない
++    arc.collect_stage_c(g, "lane", 0, _stage_c_result())
++    row = arc._rows[("lane", 0, "g0_i0")]
++    assert row["mission_score"] is None
++
++
++def test_collect_stage_a_only_leaves_mission_score_none() -> None:
++    """Stage C を呼ばなければ mission_score は default の None のまま."""
++    arc = _make_archive()
++    g = _stub_genome()
++    arc.collect_stage_a(g, "lane", 0, _stage_a_result(),
++                         instrument="USD_JPY")
++    row = arc._rows[("lane", 0, "g0_i0")]
++    assert row["mission_score"] is None
++
++
+ # ---------------------------------------------------------------------------
+ # 15-16 mark_graduated
+ # ---------------------------------------------------------------------------
+@@ -690,6 +734,8 @@ def test_schema_nullable_attributes() -> None:
+         # T035
+         "n_fold_effective", "positive_fold_ratio_effective",
+         "stage_b_reason_codes",
++        # T043: Stage C 評価時のみ書き込まれるため nullable
++        "mission_score",
+     }
+     for f in GENOMES_SCHEMA:
+         if f.name in nullable_cols:
+diff --git a/tests/alpha_factory/test_stage_gate.py b/tests/alpha_factory/test_stage_gate.py
+index e878eff..0d13190 100644
+--- a/tests/alpha_factory/test_stage_gate.py
++++ b/tests/alpha_factory/test_stage_gate.py
+@@ -16,7 +16,7 @@ from __future__ import annotations
+ from collections.abc import Mapping
+ from datetime import UTC, datetime, timedelta
+ from decimal import Decimal
+-from typing import Any, cast
++from typing import Any, ClassVar, cast
+ 
+ import pytest
+ 
+@@ -24,6 +24,7 @@ from src.alpha_factory.stage_gate import (
+     CrossPairResult,
+     StageGateConfig,
+     StageResult,
++    _compute_mission_score,
+     evaluate_stage_a,
+     evaluate_stage_b,
+     evaluate_stage_c,
+@@ -1186,3 +1187,125 @@ class TestT035StageBObservability:
+             assert payload["positive_fold_ratio_effective"] is None
+         else:
+             assert isinstance(payload["positive_fold_ratio_effective"], float)
++
++
++# T043: mission_score 4 軸 soft 合算 ===========================================
++
++
++class TestT043MissionScore:
++    """live_criteria 4 軸の soft 合算スコア (observation only)。"""
++
++    LC_DEFAULT: ClassVar[dict[str, float]] = {
++        "sharpe_min": 1.0,
++        "total_pnl_min": 50000.0,
++        "max_drawdown_max": 0.2,
++        "trade_count_min": 50.0,
++        "trade_count_max": 5000.0,
++    }
++
++    def test_returns_none_when_sharpe_is_none(self) -> None:
++        """base 評価が trade を出せず Sharpe=None なら mission_score=None."""
++        score = _compute_mission_score(
++            sharpe=None,
++            total_pnl=10000.0,
++            max_drawdown_frac=0.05,
++            trade_count=30,
++            live_criteria=self.LC_DEFAULT,
++        )
++        assert score is None
++
++    def test_all_axes_at_target_returns_one(self) -> None:
++        """全軸 target 達成で mission_score = 1.0 (幾何平均上限)."""
++        score = _compute_mission_score(
++            sharpe=1.0,
++            total_pnl=50000.0,
++            max_drawdown_frac=0.0,
++            trade_count=50,
++            live_criteria=self.LC_DEFAULT,
++        )
++        assert score is not None
++        assert score == pytest.approx(1.0, abs=1e-9)
++
++    def test_all_axes_at_lower_returns_floor(self) -> None:
++        """全軸 lower 以下で mission_score = floor (=0.1) ^ 1 = 0.1."""
++        score = _compute_mission_score(
++            sharpe=0.0,
++            total_pnl=0.0,
++            max_drawdown_frac=0.2,  # = max_drawdown_max (lower)
++            trade_count=0,
++            live_criteria=self.LC_DEFAULT,
++        )
++        assert score is not None
++        assert score == pytest.approx(0.1, abs=1e-9)
++
++    def test_score_above_target_clipped_to_one(self) -> None:
++        """target 超過は 1.0 にクリップされ、scaled 0.1〜1.0 の幾何平均。"""
++        score = _compute_mission_score(
++            sharpe=2.0,  # > target=1.0
++            total_pnl=100000.0,  # > target=50000
++            max_drawdown_frac=0.0,
++            trade_count=100,  # > target=50, < max=5000
++            live_criteria=self.LC_DEFAULT,
++        )
++        assert score is not None
++        assert score == pytest.approx(1.0, abs=1e-9)
++
++    def test_trade_count_above_max_yields_zero_axis(self) -> None:
++        """trade_count > max は 0 score → 幾何平均が大幅減 (1 軸 floor で全体下落)."""
++        score = _compute_mission_score(
++            sharpe=1.0,
++            total_pnl=50000.0,
++            max_drawdown_frac=0.0,
++            trade_count=10000,  # > trade_count_max=5000
++            live_criteria=self.LC_DEFAULT,
++        )
++        assert score is not None
++        # 1 軸 0 (= scaled 0.1)、他 3 軸 1 (= scaled 1.0) → (0.1*1*1*1)^(1/4)
++        expected = (0.1 * 1.0 * 1.0 * 1.0) ** (1.0 / 4.0)
++        assert score == pytest.approx(expected, abs=1e-9)
++
++    def test_partial_progress_returns_intermediate_value(self) -> None:
++        """部分達成: sharpe=0.5 (半分), pnl=25000 (半分), dd=0.1 (半分), tc=25 (半分)
++        → 各軸 score=0.5, scaled=0.55, geomean ≈ 0.55."""
++        score = _compute_mission_score(
++            sharpe=0.5,
++            total_pnl=25000.0,
++            max_drawdown_frac=0.1,
++            trade_count=25,
++            live_criteria=self.LC_DEFAULT,
++        )
++        assert score is not None
++        assert score == pytest.approx(0.55, abs=1e-9)
++
++    def test_drawdown_above_lower_yields_zero_axis(self) -> None:
++        """max_drawdown_frac > max_drawdown_max は dd 軸 0 score (clip)."""
++        score = _compute_mission_score(
++            sharpe=1.0,
++            total_pnl=50000.0,
++            max_drawdown_frac=0.5,  # >> max=0.2
++            trade_count=50,
++            live_criteria=self.LC_DEFAULT,
++        )
++        assert score is not None
++        # dd 軸 = 0 (scaled 0.1)、他 3 軸 = 1 (scaled 1.0)
++        expected = (0.1 * 1.0 * 1.0 * 1.0) ** (1.0 / 4.0)
++        assert score == pytest.approx(expected, abs=1e-9)
++
++    def test_evaluate_stage_c_payload_includes_mission_score(self) -> None:
++        """evaluate_stage_c の payload に mission_score キーが含まれること。"""
++        bars = _make_continuous_bars(3, bars_per_day=4)
++        ev = ConstantPrimitiveEvaluator(value=0.0)
++        cfg = _backtest_config(max_spread_bps=Decimal("10"))
++        res = evaluate_stage_c(
++            _one_clause_genome(),
++            bars,
++            usd_jpy_meta(),
++            cfg,
++            ev,
++            StageGateConfig(),
++        )
++        payload = cast(dict[str, Any], _envelope(res)["payload"])
++        assert "mission_score" in payload
++        # base が trade を出さない場合は None になる (defensive)
++        ms = payload["mission_score"]
++        assert ms is None or (isinstance(ms, float) and 0.1 <= ms <= 1.0)

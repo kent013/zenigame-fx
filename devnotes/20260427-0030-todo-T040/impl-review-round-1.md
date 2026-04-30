@@ -1,0 +1,5 @@
+- [Critical] `HistoryRecord.live_criteria_gap` は `float | None` と定義されており、設計ドキュメントでも単一の数値を想定していますが、実装では `MonitoringMetrics` 由来の辞書をそのまま書き出しています（`scripts/alpha_factory/calibrate_gate.py:388-409` と `src/alpha_factory/calibrate_gate.py:389-407`）。この結果、JSONL にはオブジェクトが出力される一方で、`src/alpha_factory/calibrate_gate_history.py:33-55` と `docs/alpha_factory/concepts/calibrate-gate.md:49-70`、さらに `tests/alpha_factory/test_calibrate_gate_history.py:31-52` は「スカラー値」を前提にしており、SSoT として宣言したスキーマと乖離します。設計・ドキュメント・型注釈・テストすべてが食い違っているため、下流のツールや将来の解析コードがドキュメント通りに float を期待すると即時に壊れる状態です。スキーマの整合性（辞書を正式スキーマにするか、単一値に正規化して保存するか）とそれに合わせたドキュメント／テストの修正が必要です。
+
+- [Suggestion] ドキュメントのアラート閾値表では `n_tighten >= 4 / N` のように比率表現になっていますが、CLI 実装は絶対回数（デフォルト 4 回・3 回）をそのまま比較しています（`docs/alpha_factory/concepts/calibrate-gate.md:78-83`, `scripts/alpha_factory/calibrate_gate_drift.py:100-133`）。ウィンドウサイズを変えたときの挙動が読み手に誤解されやすいので、表記を実装に合わせて「回数」で明記するか、もしくは実装側を比率判定に揃えるか検討すると良さそうです。
+
+全体判定: CHANGES_REQUESTED

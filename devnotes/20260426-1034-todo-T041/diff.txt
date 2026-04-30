@@ -1,0 +1,105 @@
+diff --git a/config/alpha_factory/default.yaml b/config/alpha_factory/default.yaml
+index d1a59a4..bde89b3 100644
+--- a/config/alpha_factory/default.yaml
++++ b/config/alpha_factory/default.yaml
+@@ -15,6 +15,20 @@ backtest:
+   initial_cash: "1000000"
+   leverage: 25
+   units: 10000
++  # T041 Phase 0 / Stage C unblock:
++  # @why: max_spread_bps 未設定のとき stage_gate.evaluate_stage_c は
++  # `spread_stress_skipped` 理由を必ず追加し Stage C を fail-closed する
++  # (src/alpha_factory/stage_gate.py:630-632)。Run 1〜16 の Stage C pass=0 は
++  # この未設定が上流原因。AGENTS.md「絶対制約: スワップ・スプレッドを
++  # fitness に反映」遵守のため Phase 0 で導入。
++  # 値根拠: EUR_JPY tier1 broker (OANDA) の典型 spread 1.0〜2.0 pips ≈
++  # 6〜12 bps の保守的中央値 10 bps (≈ 1.4 pips)。Stage C stress 1.5x で
++  # base 15 bps (≈ 2.1 pips) で評価される。
++  # 通貨ペア別 override は Phase 1 で per_pair_overrides として検討。
++  max_spread_bps: "10"
++  # @why: 明示 0 でイントラデイ前提を表現 (overnight 持ち越し設計禁止)。
++  # holding cost 反映は将来別タスクで設計。
++  holding_cost_per_day_bps: "0"
+ 
+ ga:
+   population_size: 40
+diff --git a/docs/alpha_factory/stage-gates.md b/docs/alpha_factory/stage-gates.md
+index 425bb24..bcab4ed 100644
+--- a/docs/alpha_factory/stage-gates.md
++++ b/docs/alpha_factory/stage-gates.md
+@@ -128,7 +128,7 @@ display 用に `reason_if_failed` property (`";".join(reason_codes)`) を提供
+ | C | `live_criteria.trade_count<min` | trade_count < trade_count_min |
+ | C | `live_criteria.trade_count>max` | trade_count > trade_count_max |
+ | C | `intraday_constraint_violation` | 日跨ぎ trade が存在 |
+-| C | `spread_stress_skipped` | max_spread_bps=None で stress 評価不能 (fail-closed) |
++| C | `spread_stress_skipped` | max_spread_bps=None で stress 評価不能 (fail-closed)。**T041 (Phase 0) で `config/alpha_factory/default.yaml::backtest.max_spread_bps=10` を設定し、production パスで本 reason は出ない状態に解消済**。Run 1〜16 で本 reason が常時付与され Stage C pass=0 だった構造的原因。 |
+ | C | `spread_stress.sharpe<min` | stress 後 sharpe < spread_stress_min_sharpe |
+ | C | `spread_stress.total_pnl<min` | stress 後 total_pnl < spread_stress_min_total_pnl |
+ | C | `spread_stress.trade_count<min` | stress 後 trade_count < live_criteria.trade_count_min |
+diff --git a/tests/alpha_factory/test_config.py b/tests/alpha_factory/test_config.py
+index 5e8e22c..78877c1 100644
+--- a/tests/alpha_factory/test_config.py
++++ b/tests/alpha_factory/test_config.py
+@@ -181,6 +181,29 @@ def test_load_config_yaml_without_feasibility_section_uses_defaults(
+     assert cfg.ga.feasibility.apply_from_generation == 0
+ 
+ 
++def test_default_yaml_loads_max_spread_bps_for_stage_c(tmp_path: Path) -> None:
++    """T041: 既定 default.yaml が backtest.max_spread_bps を Decimal で読み込み、
++    holding_cost_per_day_bps が Decimal('0') として明示される。
++
++    Stage C stress (`evaluate_stage_c`) は max_spread_bps が None だと
++    spread_stress_skipped で fail-closed するため、production yaml で値が
++    確実に伝搬していることを保護する unit test。
++    """
++    from decimal import Decimal
++
++    repo_yaml = (
++        Path(__file__).resolve().parents[2]
++        / "config"
++        / "alpha_factory"
++        / "default.yaml"
++    )
++    cfg = load_config(repo_yaml)
++    assert cfg.backtest.max_spread_bps is not None
++    assert isinstance(cfg.backtest.max_spread_bps, Decimal)
++    assert cfg.backtest.max_spread_bps > Decimal("0")
++    assert cfg.backtest.holding_cost_per_day_bps == Decimal("0")
++
++
+ def test_strict_bool_string_false_is_false() -> None:
+     """`bool("false")` の罠を回避."""
+     from src.alpha_factory.config import _strict_bool
+diff --git a/tests/alpha_factory/test_stage_gate.py b/tests/alpha_factory/test_stage_gate.py
+index c7f1688..e878eff 100644
+--- a/tests/alpha_factory/test_stage_gate.py
++++ b/tests/alpha_factory/test_stage_gate.py
+@@ -679,6 +679,28 @@ class TestStageC:
+         payload = _payload(res)
+         assert payload["stress"]["skipped"] is True
+ 
++    def test_max_spread_bps_set_does_not_skip_stress(self) -> None:
++        """max_spread_bps を明示設定すると spread_stress_skipped は出ず stress を実評価する.
++
++        T041: Stage C を spread_stress_skipped 常時 fail 状態から開放する規約の
++        retest。base が trade を出さなくても stress の skip フラグは立たないこと
++        を unit test で固定。
++        """
++        bars = _make_continuous_bars(3, bars_per_day=4)
++        ev = ConstantPrimitiveEvaluator(value=0.0)
++        cfg = _backtest_config(max_spread_bps=Decimal("10"))
++        res = evaluate_stage_c(
++            _one_clause_genome(),
++            bars,
++            usd_jpy_meta(),
++            cfg,
++            ev,
++            StageGateConfig(),
++        )
++        assert "spread_stress_skipped" not in res.reason_codes
++        payload = _payload(res)
++        assert payload["stress"]["skipped"] is False
++
+     def test_drawdown_unit_is_fraction(self) -> None:
+         """payload.max_drawdown_frac は fraction (0-1) スケール."""
+         bars = _make_continuous_bars(3, bars_per_day=4)

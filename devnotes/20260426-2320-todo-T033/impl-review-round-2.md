@@ -1,0 +1,2 @@
+CHANGES_REQUESTED  
+- `scripts/alpha_factory/generate_run_report.py:654` ここで `int(tc_val)` を直接呼び出すと、sidecar の `trade_count` が `NaN` や非数値文字列の場合に `ValueError` でレポート生成全体が失敗します。既存ロジックでも `_as_int_safe` を用いて防御しているため、同じヘルパを使ってガードしてください。

@@ -1,0 +1,1078 @@
+diff --git a/docs/alpha_factory/diagnostics-sidecar.md b/docs/alpha_factory/diagnostics-sidecar.md
+new file mode 100644
+index 0000000..4506829
+--- /dev/null
++++ b/docs/alpha_factory/diagnostics-sidecar.md
+@@ -0,0 +1,100 @@
++# Stage A Diagnostics Sidecar (T033 / Phase A)
++
++**TODO**: T033 (cost-pnl-ledger-eventsource Phase A)
++**実装**:
++- [`src/alpha_factory/diagnostics_collector.py`](../../src/alpha_factory/diagnostics_collector.py)
++- [`src/alpha_factory/diagnostics_sidecar.py`](../../src/alpha_factory/diagnostics_sidecar.py)
++**設計**: `devnotes/20260425-0937-cost-pnl-ledger-eventsource/` (Round 4 APPROVED)
++
++## 目的
++
++Run 9 で `trade_count > 0 ∧ archive.total_pnl == 0.0` が観測された問題への対応。
++
++archive Parquet では Stage A 段階で `total_pnl` が転記されない設計のため、Stage A で落ちた個体は `archive.total_pnl == 0.0` のように見えてしまう。これが
++- (a) Stage A 投影仕様 (落ちた = まだ書かれていない)
++- (b) 実 PnL=0 (シグナル不発で trade なし)
++- (c) コスト過大計上
++
++のどれによる 0 なのか、post-RUN 分析で切り分けが困難だった。
++
++**FSP は archive Parquet schema を touch せず、sidecar Parquet として観測情報を出力**する (北極星制約: archive 28+ カラム fixed schema を尊重)。
++
++## アウトプット
++
++| パス | 内容 |
++|------|------|
++| `reports/run-reports/run-{N}/diagnostics/stage_a_provenance.parquet` | per-individual Stage A diagnostics |
++| `summary.json::diagnostics_sidecar` | 上記 sidecar への相対 path (書き込み成功時のみ) |
++
++## sidecar Parquet schema (`STAGE_A_PROVENANCE_SCHEMA`)
++
++| 列 | 型 | nullable | 意味 |
++|----|----|---------|------|
++| `lane_id` | string | NO | Tier1 lane id (`tier1_{instrument}` etc.) |
++| `generation` | int32 | NO | 世代番号 |
++| `individual_name` | string | NO | genome name |
++| `metric_stage` | string | NO | post-hoc 確定 enum (下記) |
++| `trade_count` | int32 | NO | Stage A backtest 中の trade 数 |
++| `total_pnl_stage_a` | float64 | NO | Stage A backtest 中の total_pnl (NaN/Inf は 0.0 に正規化) |
++| `sharpe_stage_a` | float64 | YES | trade_sharpe_raw (None = 計算不能) |
++| `stage_a_pass` | bool | NO | Stage A 通過 |
++| `stage_b_pass` | bool | YES | None = 未評価 |
++| `stage_c_pass` | bool | YES | None = 未評価 |
++
++主キー: `(lane_id, generation, individual_name)` (archive と整合)。
++
++### `metric_stage` enum
++
++「到達した最高通過段」(pass-based)。`DiagnosticsCollector.derive_metric_stage` で flush 時に決定。
++
++| value | 条件 |
++|-------|------|
++| `stage_a_only` | Stage A 不通過 |
++| `stage_a_evaluated` | Stage A 通過、Stage B 未評価 / 不通過 |
++| `stage_b_evaluated` | Stage B 通過、Stage C 未評価 / 不通過 |
++| `stage_c_evaluated` | Stage C 通過 |
++
++## ライフサイクル
++
++1. `run_ga.py` で run-level `DiagnosticsCollector()` を生成
++2. `LaneManager(diagnostics_collector=...)` に optional 渡し
++3. 各 stage 評価点で `record_stage_a/b/c` を呼ぶ (collector が None なら no-op)
++4. GA 完了時 `write_stage_a_provenance(collector, path)` で flush
++5. 書き込み成功時のみ `summary.json::diagnostics_sidecar` に相対 path を記録
++6. `generate_run_report.py` が sidecar を optional で読み「Stage A provenance 分布」セクションを出力 (sidecar 不在時は "not available")
++
++## 北極星制約・禁止事項チェック
++
++| 禁止事項 | 該当性 |
++|---------|------|
++| 1. 評価期間延長 | 該当なし (post-RUN observability) |
++| 2. 見た目の数値改善 | 該当なし (archive 観測のみ追加、live_criteria/fitness 不変) |
++| 3. GA hack | 該当なし (selection / breed には影響無し) |
++| 4. live_criteria 緩和 | 該当なし |
++| 5. 過剰な複雑化 | Phase A は sidecar diagnostics に限定 |
++| 6. 取引回数削減 | 該当なし |
++| 7. オーバーナイト前提 | 該当なし |
++| 8. archive スキーマ伝搬漏れ | **archive schema は touch しない (sidecar 別 Parquet)** |
++
++## fail-open 契約
++
++- `write_stage_a_provenance` の I/O 失敗時は warning ログのみ、GA は完走する
++- summary.json の `diagnostics_sidecar` field は **書き込み成功時のみ** 出力 (consumer は missing field を無視できる)
++- run-report は sidecar 不在時に「not available」明記 (固定セクション、契約ぶれ回避)
++
++## CI invariant
++
++- I1: sidecar 行数 == backtest 評価された個体数
++- I2: `metric_stage` の値が enum 内 (`to_rows` で assert)
++- I3: `total_pnl_stage_a` が finite (NaN/Inf は collector で 0.0 に正規化)
++
++## Phase A スコープ外 (将来 TODO)
++
++- Phase B: コスト分解 (spread/swap/holding cost) の sidecar 拡張
++- Phase C: CI invariant ハーネス (`summary.diagnostics.invariant_violations`)
++- archive Parquet schema 拡張 (28+ カラム fixed を尊重)
++- production GA での invariant penalty (fitness への寄与)
++
++## 変更履歴
++
++- 2026-04-26: T033 Phase A 初期実装。collector + sidecar writer + run_ga 統合 + run-report 拡張 + テスト 28 件。
+diff --git a/scripts/alpha_factory/generate_run_report.py b/scripts/alpha_factory/generate_run_report.py
+index f28e544..af71f3f 100644
+--- a/scripts/alpha_factory/generate_run_report.py
++++ b/scripts/alpha_factory/generate_run_report.py
+@@ -607,6 +607,62 @@ def main(argv: list[str] | None = None) -> int:
+         )
+     lines.append("")
+ 
++    # T033: Stage A provenance (sidecar diagnostics) — 固定セクション
++    # sidecar 不在時は "not available" を明記 (契約ぶれ回避)
++    lines.append("## Stage A provenance 分布 (T033 / sidecar)")
++    lines.append("")
++    lines.append(
++        "> Stage A 落ち個体の `total_pnl_stage_a` 分布を可視化 "
++        "(`reports/run-reports/run-{N}/diagnostics/stage_a_provenance.parquet`)。"
++        "archive `total_pnl=0.0` が「Stage A 落ち = 投影仕様」「実 PnL=0」「コスト過大」"
++        "のいずれかを切り分けるための観測指標 (詳細: docs/alpha_factory/diagnostics-sidecar.md)。"
++    )
++    lines.append("")
++    sidecar_path_str = summary.get("diagnostics_sidecar")
++    sidecar_path = (
++        Path(sidecar_path_str) if sidecar_path_str else None
++    )
++    if sidecar_path and not sidecar_path.is_absolute():
++        sidecar_path = REPO_ROOT / sidecar_path
++    if sidecar_path is None or not sidecar_path.exists():
++        lines.append("- Stage A provenance: not available (sidecar 不在)")
++    else:
++        try:
++            import pyarrow.parquet as _pq
++            sidecar_rows = list(_pq.read_table(sidecar_path).to_pylist())
++        except Exception as exc:
++            lines.append(f"- sidecar 読み込みエラー: {exc}")
++            sidecar_rows = None
++        if sidecar_rows is not None:
++            stage_counts: dict[str, int] = {}
++            stage_a_only_pnls: list[float] = []
++            for r in sidecar_rows:
++                ms = r.get("metric_stage", "")
++                stage_counts[ms] = stage_counts.get(ms, 0) + 1
++                if ms == "stage_a_only":
++                    pnl = r.get("total_pnl_stage_a")
++                    if pnl is not None:
++                        stage_a_only_pnls.append(float(pnl))
++            lines.append(f"- sidecar 行数: {len(sidecar_rows)}")
++            lines.append(
++                "- metric_stage 分布: "
++                + ", ".join(
++                    f"{k}={v}"
++                    for k, v in sorted(stage_counts.items())
++                )
++            )
++            if stage_a_only_pnls:
++                stats = _basic_stats(stage_a_only_pnls)
++                lines.append(
++                    "- Stage A 落ち個体の `total_pnl_stage_a` 分布: "
++                    + _fmt_stats(stats)
++                )
++            else:
++                lines.append(
++                    "- Stage A 落ち個体: 0 件 (Stage A 通過個体のみ)"
++                )
++    lines.append("")
++
+     # archive Top-5 個体一覧 (Best とは別物)
+     lines.append("## Archive Top-5 個体一覧")
+     lines.append("")
+diff --git a/scripts/alpha_factory/run_ga.py b/scripts/alpha_factory/run_ga.py
+index 7352e79..10c2e6f 100644
+--- a/scripts/alpha_factory/run_ga.py
++++ b/scripts/alpha_factory/run_ga.py
+@@ -55,6 +55,11 @@ from src.alpha_factory.config import (
+     StageWindowsConfig,
+     load_config,
+ )
++from src.alpha_factory.diagnostics_collector import DiagnosticsCollector
++from src.alpha_factory.diagnostics_sidecar import (
++    sidecar_relative_path,
++    write_stage_a_provenance,
++)
+ from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
+ from src.alpha_factory.swim_lane import (
+     GRADUATION_LANE_ID,
+@@ -682,6 +687,7 @@ def _write_reports(
+     lane_manager: LaneManager,
+     cross_pair_mode: str,
+     now: datetime,
++    diagnostics_sidecar_path: Path | None = None,
+ ) -> None:
+     run_dir.mkdir(parents=True, exist_ok=True)
+ 
+@@ -783,6 +789,15 @@ def _write_reports(
+         "graduation_count": lane_manager.promote_graduates(),
+         "archive_parquet": str(archive_path),
+     }
++    # T033: 書き込み成功時のみ summary に sidecar path を追加
++    # (consumer は missing field を無視できる契約)
++    if diagnostics_sidecar_path is not None:
++        try:
++            summary["diagnostics_sidecar"] = str(
++                diagnostics_sidecar_path.relative_to(REPO_ROOT)
++            )
++        except ValueError:
++            summary["diagnostics_sidecar"] = str(diagnostics_sidecar_path)
+     (run_dir / "summary.json").write_text(
+         json.dumps(summary, ensure_ascii=False, indent=2),
+         encoding="utf-8",
+@@ -872,6 +887,10 @@ def main(argv: list[str] | None = None) -> int:
+     primitive_evaluator = RegistryEvaluator(pair=cfg.dataset.instrument)
+     bt_factory = _make_bt_factory(cfg.dataset, cfg.backtest)
+ 
++    # T033: Stage A/B/C diagnostics を蓄積する run-level collector。
++    # GA 完了後 sidecar Parquet として flush する。
++    diagnostics_collector = DiagnosticsCollector()
++
+     tier1_lane = Tier1Lane(
+         lane_id=lane_id,
+         instrument=cfg.dataset.instrument,
+@@ -893,6 +912,7 @@ def main(argv: list[str] | None = None) -> int:
+         primitive_evaluator=primitive_evaluator,
+         archive=archive,
+         backtest_config_factory=bt_factory,
++        diagnostics_collector=diagnostics_collector,
+     )
+     cross_pair_mode = (
+         "enabled" if graduation_lane.pair_bars
+@@ -975,6 +995,16 @@ def main(argv: list[str] | None = None) -> int:
+     )
+     best_genome = genomes_by_name[best_name]
+ 
++    # T033: Stage A diagnostics sidecar を _write_reports の前に flush して、
++    # 書き込み成功時のみ summary.json に diagnostics_sidecar field を追加する。
++    # --no-report 時は sidecar も skip (reports/ ディレクトリを触らない契約と整合)。
++    sidecar_path_written: Path | None = None
++    if not args.no_report:
++        sidecar_path = REPO_ROOT / sidecar_relative_path(run_number)
++        sidecar_path_written = write_stage_a_provenance(
++            diagnostics_collector, sidecar_path
++        )
++
+     if not args.no_report:
+         _write_reports(
+             run_dir=run_dir,
+@@ -993,6 +1023,7 @@ def main(argv: list[str] | None = None) -> int:
+             lane_manager=lane_manager,
+             cross_pair_mode=cross_pair_mode,
+             now=now,
++            diagnostics_sidecar_path=sidecar_path_written,
+         )
+     else:
+         logger.info(
+diff --git a/src/alpha_factory/diagnostics_collector.py b/src/alpha_factory/diagnostics_collector.py
+new file mode 100644
+index 0000000..2b98969
+--- /dev/null
++++ b/src/alpha_factory/diagnostics_collector.py
+@@ -0,0 +1,193 @@
++"""T033: Per-individual diagnostics collector for sidecar emission.
++
++Stage A/B/C 評価結果を generation 中に蓄積し、GA 完了時に sidecar Parquet として
++flush する。production GA 経路から fail-open で利用される。
++
++archive Parquet schema は touch しない。post-RUN で
++``reports/run-reports/run-{N}/diagnostics/stage_a_provenance.parquet`` に出力する。
++
++詳細: devnotes/20260425-0937-cost-pnl-ledger-eventsource/
++"""
++
++from __future__ import annotations
++
++import math
++from dataclasses import dataclass
++from typing import Any, Final
++
++from src.alpha_factory.stage_gate import StageResult
++
++__all__ = [
++    "VALID_METRIC_STAGES",
++    "DiagnosticsCollector",
++    "IndividualDiagnostics",
++]
++
++# metric_stage の解釈: 「到達した最高通過段」(pass-based)
++# stage_a_only      = Stage A 不通過 (または Stage B/C 未評価)
++# stage_a_evaluated = Stage A 通過 (Stage B 未評価 / 不通過)
++# stage_b_evaluated = Stage B 通過 (Stage C 未評価 / 不通過)
++# stage_c_evaluated = Stage C 通過
++VALID_METRIC_STAGES: Final[frozenset[str]] = frozenset(
++    {
++        "stage_a_only",
++        "stage_a_evaluated",
++        "stage_b_evaluated",
++        "stage_c_evaluated",
++    }
++)
++
++
++@dataclass
++class IndividualDiagnostics:
++    """Per-individual diagnostics record (mutable during a generation)."""
++
++    lane_id: str
++    generation: int
++    individual_name: str
++    trade_count: int = 0
++    total_pnl_stage_a: float = 0.0
++    sharpe_stage_a: float | None = None
++    stage_a_pass: bool = False
++    stage_b_pass: bool | None = None  # None = not evaluated
++    stage_c_pass: bool | None = None  # None = not evaluated
++
++
++class DiagnosticsCollector:
++    """In-memory collector for per-individual stage diagnostics.
++
++    Lifecycle:
++    - Created in run_ga.py with run-level scope
++    - Updated by stage_gate / swim_lane after each StageResult is produced
++    - Flushed to Parquet sidecar at GA completion (writer は別モジュール)
++
++    主キー: ``(lane_id, generation, individual_name)`` の複合キー
++    (既存 archive と整合)。同一キーの再記録は last-write-wins。
++    """
++
++    def __init__(self) -> None:
++        self._records: dict[tuple[str, int, str], IndividualDiagnostics] = {}
++
++    def _key(
++        self, lane_id: str, generation: int, individual_name: str
++    ) -> tuple[str, int, str]:
++        return (lane_id, generation, individual_name)
++
++    def record_stage_a(
++        self,
++        lane_id: str,
++        generation: int,
++        individual_name: str,
++        result: StageResult,
++    ) -> None:
++        """Stage A 結果を記録。同一キー再記録は last-write-wins (idempotent)."""
++        payload_obj: Any = (
++            result.metrics.get("payload", {})
++            if hasattr(result, "metrics")
++            else {}
++        )
++        if not isinstance(payload_obj, dict):
++            payload: dict[str, Any] = {}
++        else:
++            payload = payload_obj
++        # Defensive read: payload may lack new fields if older code path
++        trade_count = int(payload.get("trade_count", 0) or 0)
++        total_pnl_raw = payload.get("total_pnl", 0.0)
++        try:
++            total_pnl = float(total_pnl_raw) if total_pnl_raw is not None else 0.0
++        except (TypeError, ValueError):
++            total_pnl = 0.0
++        if not math.isfinite(total_pnl):
++            total_pnl = 0.0
++        sharpe_raw = payload.get("trade_sharpe_raw")
++        sharpe_stage_a: float | None = None
++        if sharpe_raw is not None:
++            try:
++                v = float(sharpe_raw)
++                if math.isfinite(v):
++                    sharpe_stage_a = v
++            except (TypeError, ValueError):
++                sharpe_stage_a = None
++        self._records[self._key(lane_id, generation, individual_name)] = (
++            IndividualDiagnostics(
++                lane_id=lane_id,
++                generation=generation,
++                individual_name=individual_name,
++                trade_count=trade_count,
++                total_pnl_stage_a=total_pnl,
++                sharpe_stage_a=sharpe_stage_a,
++                stage_a_pass=bool(result.passed),
++            )
++        )
++
++    def record_stage_b(
++        self,
++        lane_id: str,
++        generation: int,
++        individual_name: str,
++        passed: bool,
++    ) -> None:
++        """Stage B pass/fail を記録。Stage A 未記録なら no-op (defensive)."""
++        rec = self._records.get(
++            self._key(lane_id, generation, individual_name)
++        )
++        if rec is None:
++            return
++        rec.stage_b_pass = bool(passed)
++
++    def record_stage_c(
++        self,
++        lane_id: str,
++        generation: int,
++        individual_name: str,
++        passed: bool,
++    ) -> None:
++        """Stage C pass/fail を記録。Stage A 未記録なら no-op (defensive)."""
++        rec = self._records.get(
++            self._key(lane_id, generation, individual_name)
++        )
++        if rec is None:
++            return
++        rec.stage_c_pass = bool(passed)
++
++    def derive_metric_stage(self, rec: IndividualDiagnostics) -> str:
++        """post-hoc metric_stage 確定 (collector 側で flush 時に決定)."""
++        if rec.stage_c_pass is True:
++            return "stage_c_evaluated"
++        if rec.stage_b_pass is True:
++            return "stage_b_evaluated"
++        if rec.stage_a_pass:
++            return "stage_a_evaluated"
++        return "stage_a_only"
++
++    def to_rows(self) -> list[dict[str, Any]]:
++        """Materialize records as plain dicts for Parquet writing.
++
++        sidecar 出力の SSOT。CI invariant I2 を assert で保護
++        (metric_stage が enum 内であること)。
++        """
++        rows: list[dict[str, Any]] = []
++        for rec in self._records.values():
++            metric_stage = self.derive_metric_stage(rec)
++            assert metric_stage in VALID_METRIC_STAGES, (
++                f"metric_stage out of enum: {metric_stage!r} "
++                f"(rec={rec})"
++            )
++            rows.append(
++                {
++                    "lane_id": rec.lane_id,
++                    "generation": rec.generation,
++                    "individual_name": rec.individual_name,
++                    "metric_stage": metric_stage,
++                    "trade_count": rec.trade_count,
++                    "total_pnl_stage_a": rec.total_pnl_stage_a,
++                    "sharpe_stage_a": rec.sharpe_stage_a,
++                    "stage_a_pass": rec.stage_a_pass,
++                    "stage_b_pass": rec.stage_b_pass,
++                    "stage_c_pass": rec.stage_c_pass,
++                }
++            )
++        return rows
++
++    def __len__(self) -> int:
++        return len(self._records)
+diff --git a/src/alpha_factory/diagnostics_sidecar.py b/src/alpha_factory/diagnostics_sidecar.py
+new file mode 100644
+index 0000000..3530d7e
+--- /dev/null
++++ b/src/alpha_factory/diagnostics_sidecar.py
+@@ -0,0 +1,109 @@
++"""T033: Stage A diagnostics sidecar writer.
++
++DiagnosticsCollector が蓄積した per-individual records を
++``reports/run-reports/run-{N}/diagnostics/stage_a_provenance.parquet`` に
++出力する。production GA からは fail-open で呼ばれる
++(書き込みエラー時は warning ログのみ、GA は止めない)。
++
++詳細: devnotes/20260425-0937-cost-pnl-ledger-eventsource/
++"""
++
++from __future__ import annotations
++
++from collections.abc import Sequence
++from pathlib import Path
++from typing import Any, Final
++
++import pyarrow as pa
++import pyarrow.parquet as pq
++import structlog
++
++from src.alpha_factory.diagnostics_collector import DiagnosticsCollector
++
++logger = structlog.get_logger(__name__)
++
++__all__ = [
++    "STAGE_A_PROVENANCE_SCHEMA",
++    "build_sidecar_table",
++    "sidecar_relative_path",
++    "write_stage_a_provenance",
++]
++
++# sidecar Parquet schema (T033 SSOT)
++# 主キー: (lane_id, generation, individual_name)
++STAGE_A_PROVENANCE_SCHEMA: Final[pa.Schema] = pa.schema(
++    [
++        pa.field("lane_id", pa.string(), nullable=False),
++        pa.field("generation", pa.int32(), nullable=False),
++        pa.field("individual_name", pa.string(), nullable=False),
++        pa.field("metric_stage", pa.string(), nullable=False),
++        pa.field("trade_count", pa.int32(), nullable=False),
++        pa.field("total_pnl_stage_a", pa.float64(), nullable=False),
++        pa.field("sharpe_stage_a", pa.float64(), nullable=True),
++        pa.field("stage_a_pass", pa.bool_(), nullable=False),
++        pa.field("stage_b_pass", pa.bool_(), nullable=True),
++        pa.field("stage_c_pass", pa.bool_(), nullable=True),
++    ]
++)
++
++
++def sidecar_relative_path(run_number: int) -> Path:
++    """sidecar Parquet の相対 path SSOT.
++
++    summary.json の `diagnostics_sidecar` field と consumer (run-report skill)
++    が同じ path を参照できるよう一元化する。
++    """
++    return Path(
++        f"reports/run-reports/run-{run_number}/diagnostics/"
++        "stage_a_provenance.parquet"
++    )
++
++
++def build_sidecar_table(rows: Sequence[dict[str, Any]]) -> pa.Table:
++    """rows (DiagnosticsCollector.to_rows() 出力) から pyarrow Table を構築."""
++    return pa.Table.from_pylist(list(rows), schema=STAGE_A_PROVENANCE_SCHEMA)
++
++
++def write_stage_a_provenance(
++    collector: DiagnosticsCollector,
++    output_path: Path,
++) -> Path | None:
++    """sidecar Parquet を書き出す。
++
++    fail-open: I/O エラー / schema mismatch 時は warning + None 返却で
++    GA 完走を妨げない。
++
++    Args:
++        collector: GA run-level の DiagnosticsCollector。
++        output_path: 出力 Parquet path (絶対 or 相対)。
++
++    Returns:
++        書き込み成功時 ``output_path``、失敗時 ``None``。
++    """
++    rows = collector.to_rows()
++    if not rows:
++        logger.info(
++            "diagnostics_sidecar.empty",
++            reason="no_individuals_recorded",
++            output_path=str(output_path),
++        )
++        return None
++    try:
++        table = build_sidecar_table(rows)
++        output_path.parent.mkdir(parents=True, exist_ok=True)
++        pq.write_table(table, output_path)
++    except Exception as exc:
++        # fail-open: GA を止めない、warning のみ
++        logger.warning(
++            "diagnostics_sidecar.write_failure",
++            output_path=str(output_path),
++            error=str(exc),
++            error_type=type(exc).__name__,
++        )
++        return None
++    logger.info(
++        "diagnostics_sidecar.written",
++        output_path=str(output_path),
++        row_count=len(rows),
++    )
++    return output_path
+diff --git a/src/alpha_factory/stage_gate.py b/src/alpha_factory/stage_gate.py
+index e5afc1b..5152734 100644
+--- a/src/alpha_factory/stage_gate.py
++++ b/src/alpha_factory/stage_gate.py
+@@ -331,6 +331,10 @@ def evaluate_stage_a(
+     fitness_pen: float | None = None
+     sharpe_raw: float | None = None
+     trade_count = 0
++    # T033: Stage A backtest の total_pnl を payload に in-memory only で添加。
++    # archive Parquet には書かない (28+ カラム fixed schema を尊重)。
++    # post-RUN sidecar diagnostics (`stage_a_provenance.parquet`) で参照する。
++    total_pnl_a: float = 0.0
+     # T037: Stage A backtest 中に runtime fired した clause idx 数 (observation
+     # only, archive `active_clause` 列に記録される)。例外時 / strategy 未生成時は
+     # 0 (測定不能を表すが、archive 既存契約 (non-null int32) との整合のため 0
+@@ -352,6 +356,13 @@ def evaluate_stage_a(
+         sharpe_raw = (
+             float(bt.trade_sharpe_raw) if bt.trade_sharpe_raw is not None else None
+         )
++        # T033: total_pnl を sidecar diagnostics 用に保持 (size_norm 例外と独立)
++        try:
++            total_pnl_a = float(bt.total_pnl)
++            if not math.isfinite(total_pnl_a):
++                total_pnl_a = 0.0
++        except Exception:
++            total_pnl_a = 0.0
+         # T037: backtest 完了後の strategy.active_clause_indices を集計。
+         # backtest 経路で必ず prepare()→on_bar が呼ばれているはずだが、
+         # defensive に len() 経由で取り出す。
+@@ -416,6 +427,9 @@ def evaluate_stage_a(
+             "trade_sharpe_raw": sharpe_raw,
+             # T037: runtime fired clause idx 数 (observation only)
+             "active_clause": active_clause_count,
++            # T033: sidecar diagnostics 用 in-memory only field。
++            # archive Parquet には書かない (28+ カラム fixed schema 尊重)。
++            "total_pnl": total_pnl_a,
+         },
+     }
+     return StageResult(
+diff --git a/src/alpha_factory/swim_lane.py b/src/alpha_factory/swim_lane.py
+index d351940..4355dd6 100644
+--- a/src/alpha_factory/swim_lane.py
++++ b/src/alpha_factory/swim_lane.py
+@@ -37,7 +37,10 @@ from __future__ import annotations
+ import time as _time
+ from collections.abc import Callable, Mapping
+ from dataclasses import dataclass, field
+-from typing import Any, Literal
++from typing import TYPE_CHECKING, Any, Literal
++
++if TYPE_CHECKING:
++    from src.alpha_factory.diagnostics_collector import DiagnosticsCollector
+ 
+ import structlog
+ 
+@@ -212,6 +215,7 @@ class LaneManager:
+         backtest_config_factory: Callable[[str], BacktestConfig],
+         *,
+         deferred_promotion: bool = False,
++        diagnostics_collector: DiagnosticsCollector | None = None,
+     ) -> None:
+         if not tier1:
+             raise ValueError(
+@@ -275,6 +279,9 @@ class LaneManager:
+         self._archive = archive
+         self._bt_factory = backtest_config_factory
+         self._deferred_promotion = deferred_promotion
++        # T033: post-RUN sidecar diagnostics 用 collector (optional)。
++        # None なら record_* は no-op (production 経路の opt-in)。
++        self._diagnostics: DiagnosticsCollector | None = diagnostics_collector
+         # 冪等性ガード: 二重昇格を in-memory set で抑止
+         self._promoted_keys: set[tuple[str, int, str]] = set()
+         # health-check: factory が intraday 制約を満たすか確認
+@@ -491,6 +498,14 @@ class LaneManager:
+                 parent_a=parent_a,
+                 parent_b=parent_b,
+             )
++            # T033: sidecar diagnostics に Stage A 結果を記録
++            if self._diagnostics is not None:
++                self._diagnostics.record_stage_a(
++                    lane.lane_id,
++                    lane.generation_count,
++                    genome.name,
++                    a_result,
++                )
+             if not a_result.passed:
+                 continue
+             stage_a_pass += 1
+@@ -538,6 +553,14 @@ class LaneManager:
+                 lane.generation_count,
+                 b_result,
+             )
++            # T033: sidecar diagnostics に Stage B pass/fail を記録
++            if self._diagnostics is not None:
++                self._diagnostics.record_stage_b(
++                    lane.lane_id,
++                    lane.generation_count,
++                    genome.name,
++                    bool(b_result.passed),
++                )
+             if not b_result.passed:
+                 continue
+             stage_b_pass += 1
+@@ -559,6 +582,14 @@ class LaneManager:
+                 lane.generation_count,
+                 c_result,
+             )
++            # T033: sidecar diagnostics に Stage C pass/fail を記録
++            if self._diagnostics is not None:
++                self._diagnostics.record_stage_c(
++                    lane.lane_id,
++                    lane.generation_count,
++                    genome.name,
++                    bool(c_result.passed),
++                )
+             if c_result.passed:
+                 stage_c_pass += 1
+             # Graduation 判定 (Stage C 通過 AND cross-pair 通過の AND)
+diff --git a/tests/alpha_factory/test_diagnostics_collector.py b/tests/alpha_factory/test_diagnostics_collector.py
+new file mode 100644
+index 0000000..7584563
+--- /dev/null
++++ b/tests/alpha_factory/test_diagnostics_collector.py
+@@ -0,0 +1,234 @@
++"""T033: DiagnosticsCollector unit tests.
++
++詳細設計: devnotes/20260425-0937-cost-pnl-ledger-eventsource/detailed-design.md
++"""
++
++from __future__ import annotations
++
++from typing import Any
++
++import pytest
++
++from src.alpha_factory.diagnostics_collector import (
++    VALID_METRIC_STAGES,
++    DiagnosticsCollector,
++    IndividualDiagnostics,
++)
++from src.alpha_factory.stage_gate import StageResult
++
++
++def _make_stage_a_result(
++    *,
++    passed: bool = True,
++    trade_count: int = 50,
++    total_pnl: float = 1234.5,
++    trade_sharpe_raw: float | None = 0.3,
++) -> StageResult:
++    payload: dict[str, Any] = {
++        "trade_count": trade_count,
++        "total_pnl": total_pnl,
++        "trade_sharpe_raw": trade_sharpe_raw,
++        "fitness_pen": 0.27 if trade_sharpe_raw is not None else None,
++    }
++    return StageResult(
++        stage="A",
++        passed=passed,
++        metrics={"stage": "A", "payload": payload},
++    )
++
++
++class TestRecordStageA:
++    def test_records_stage_a_payload_correctly(self) -> None:
++        c = DiagnosticsCollector()
++        c.record_stage_a(
++            "lane",
++            0,
++            "g0_i0",
++            _make_stage_a_result(
++                passed=True, trade_count=42, total_pnl=999.5, trade_sharpe_raw=0.5
++            ),
++        )
++        assert len(c) == 1
++        rec = c._records[("lane", 0, "g0_i0")]
++        assert isinstance(rec, IndividualDiagnostics)
++        assert rec.trade_count == 42
++        assert rec.total_pnl_stage_a == pytest.approx(999.5)
++        assert rec.sharpe_stage_a == pytest.approx(0.5)
++        assert rec.stage_a_pass is True
++        assert rec.stage_b_pass is None  # not evaluated
++        assert rec.stage_c_pass is None
++
++    def test_handles_missing_payload_fields(self) -> None:
++        """旧 payload 形式でも crash せず default 値で記録."""
++        c = DiagnosticsCollector()
++        result = StageResult(
++            stage="A",
++            passed=False,
++            metrics={"stage": "A", "payload": {}},  # 空 payload
++        )
++        c.record_stage_a("lane", 0, "g0_i0", result)
++        rec = c._records[("lane", 0, "g0_i0")]
++        assert rec.trade_count == 0
++        assert rec.total_pnl_stage_a == 0.0
++        assert rec.sharpe_stage_a is None
++        assert rec.stage_a_pass is False
++
++    def test_handles_nonfinite_total_pnl(self) -> None:
++        """NaN/Inf total_pnl は 0.0 に正規化."""
++        c = DiagnosticsCollector()
++        c.record_stage_a(
++            "lane",
++            0,
++            "g0_i0",
++            _make_stage_a_result(total_pnl=float("nan")),
++        )
++        rec = c._records[("lane", 0, "g0_i0")]
++        assert rec.total_pnl_stage_a == 0.0
++
++        c.record_stage_a(
++            "lane",
++            0,
++            "g0_i1",
++            _make_stage_a_result(total_pnl=float("inf")),
++        )
++        rec2 = c._records[("lane", 0, "g0_i1")]
++        assert rec2.total_pnl_stage_a == 0.0
++
++    def test_handles_nonfinite_sharpe(self) -> None:
++        """NaN/Inf sharpe は None に正規化."""
++        c = DiagnosticsCollector()
++        c.record_stage_a(
++            "lane",
++            0,
++            "g0_i0",
++            _make_stage_a_result(trade_sharpe_raw=float("nan")),
++        )
++        rec = c._records[("lane", 0, "g0_i0")]
++        assert rec.sharpe_stage_a is None
++
++    def test_idempotent_on_duplicate_key_last_write_wins(self) -> None:
++        c = DiagnosticsCollector()
++        c.record_stage_a("lane", 0, "g0_i0", _make_stage_a_result(trade_count=10))
++        c.record_stage_a("lane", 0, "g0_i0", _make_stage_a_result(trade_count=99))
++        assert len(c) == 1
++        assert c._records[("lane", 0, "g0_i0")].trade_count == 99
++
++
++class TestRecordStageBStageC:
++    def test_record_stage_b_noop_without_stage_a(self) -> None:
++        """Stage A 未記録なら Stage B は no-op (defensive)."""
++        c = DiagnosticsCollector()
++        c.record_stage_b("lane", 0, "g0_i0", passed=True)
++        assert len(c) == 0  # 何も追加されない
++
++    def test_record_stage_c_noop_without_stage_a(self) -> None:
++        c = DiagnosticsCollector()
++        c.record_stage_c("lane", 0, "g0_i0", passed=True)
++        assert len(c) == 0
++
++    def test_record_stage_b_updates_existing(self) -> None:
++        c = DiagnosticsCollector()
++        c.record_stage_a("lane", 0, "g0_i0", _make_stage_a_result(passed=True))
++        c.record_stage_b("lane", 0, "g0_i0", passed=True)
++        rec = c._records[("lane", 0, "g0_i0")]
++        assert rec.stage_b_pass is True
++        assert rec.stage_c_pass is None
++
++    def test_record_stage_c_updates_existing(self) -> None:
++        c = DiagnosticsCollector()
++        c.record_stage_a("lane", 0, "g0_i0", _make_stage_a_result(passed=True))
++        c.record_stage_b("lane", 0, "g0_i0", passed=True)
++        c.record_stage_c("lane", 0, "g0_i0", passed=True)
++        rec = c._records[("lane", 0, "g0_i0")]
++        assert rec.stage_c_pass is True
++
++
++class TestDeriveMetricStage:
++    """metric_stage は post-hoc に flush 時確定 (stage_c > stage_b > stage_a > only)."""
++
++    def _record(
++        self,
++        *,
++        stage_a_pass: bool = False,
++        stage_b_pass: bool | None = None,
++        stage_c_pass: bool | None = None,
++    ) -> IndividualDiagnostics:
++        return IndividualDiagnostics(
++            lane_id="lane",
++            generation=0,
++            individual_name="g",
++            stage_a_pass=stage_a_pass,
++            stage_b_pass=stage_b_pass,
++            stage_c_pass=stage_c_pass,
++        )
++
++    def test_stage_a_only_when_stage_a_fails(self) -> None:
++        c = DiagnosticsCollector()
++        rec = self._record(stage_a_pass=False)
++        assert c.derive_metric_stage(rec) == "stage_a_only"
++
++    def test_stage_a_evaluated_when_stage_a_passes_no_b(self) -> None:
++        c = DiagnosticsCollector()
++        rec = self._record(stage_a_pass=True, stage_b_pass=None)
++        assert c.derive_metric_stage(rec) == "stage_a_evaluated"
++
++    def test_stage_a_evaluated_when_stage_a_passes_b_fails(self) -> None:
++        c = DiagnosticsCollector()
++        rec = self._record(stage_a_pass=True, stage_b_pass=False)
++        assert c.derive_metric_stage(rec) == "stage_a_evaluated"
++
++    def test_stage_b_evaluated_when_b_passes_no_c(self) -> None:
++        c = DiagnosticsCollector()
++        rec = self._record(
++            stage_a_pass=True, stage_b_pass=True, stage_c_pass=None
++        )
++        assert c.derive_metric_stage(rec) == "stage_b_evaluated"
++
++    def test_stage_b_evaluated_when_b_passes_c_fails(self) -> None:
++        c = DiagnosticsCollector()
++        rec = self._record(
++            stage_a_pass=True, stage_b_pass=True, stage_c_pass=False
++        )
++        assert c.derive_metric_stage(rec) == "stage_b_evaluated"
++
++    def test_stage_c_evaluated_when_c_passes(self) -> None:
++        c = DiagnosticsCollector()
++        rec = self._record(
++            stage_a_pass=True, stage_b_pass=True, stage_c_pass=True
++        )
++        assert c.derive_metric_stage(rec) == "stage_c_evaluated"
++
++
++class TestToRows:
++    def test_returns_dict_per_record_with_metric_stage(self) -> None:
++        c = DiagnosticsCollector()
++        c.record_stage_a("lane", 0, "g0_i0", _make_stage_a_result(passed=True))
++        c.record_stage_a(
++            "lane", 0, "g0_i1", _make_stage_a_result(passed=False)
++        )
++        rows = c.to_rows()
++        assert len(rows) == 2
++        names = {r["individual_name"] for r in rows}
++        assert names == {"g0_i0", "g0_i1"}
++        for r in rows:
++            assert r["metric_stage"] in VALID_METRIC_STAGES
++            assert "lane_id" in r
++            assert "trade_count" in r
++            assert "total_pnl_stage_a" in r
++            assert "sharpe_stage_a" in r
++            assert "stage_a_pass" in r
++            assert "stage_b_pass" in r
++            assert "stage_c_pass" in r
++
++    def test_empty_collector_returns_empty_rows(self) -> None:
++        c = DiagnosticsCollector()
++        assert c.to_rows() == []
++
++    def test_metric_stage_enum_invariant(self) -> None:
++        """to_rows は metric_stage が enum 内であることを assert (CI invariant I2)."""
++        c = DiagnosticsCollector()
++        c.record_stage_a("lane", 0, "g0_i0", _make_stage_a_result(passed=True))
++        c.record_stage_b("lane", 0, "g0_i0", passed=True)
++        c.record_stage_c("lane", 0, "g0_i0", passed=True)
++        rows = c.to_rows()
++        assert rows[0]["metric_stage"] == "stage_c_evaluated"
+diff --git a/tests/alpha_factory/test_diagnostics_sidecar.py b/tests/alpha_factory/test_diagnostics_sidecar.py
+new file mode 100644
+index 0000000..5f3f835
+--- /dev/null
++++ b/tests/alpha_factory/test_diagnostics_sidecar.py
+@@ -0,0 +1,143 @@
++"""T033: diagnostics_sidecar writer unit tests."""
++
++from __future__ import annotations
++
++from pathlib import Path
++from typing import Any
++
++import pyarrow.parquet as pq
++
++from src.alpha_factory.diagnostics_collector import DiagnosticsCollector
++from src.alpha_factory.diagnostics_sidecar import (
++    STAGE_A_PROVENANCE_SCHEMA,
++    build_sidecar_table,
++    sidecar_relative_path,
++    write_stage_a_provenance,
++)
++from src.alpha_factory.stage_gate import StageResult
++
++
++def _make_stage_a_result(
++    *, passed: bool = True, trade_count: int = 50, total_pnl: float = 1234.5
++) -> StageResult:
++    payload: dict[str, Any] = {
++        "trade_count": trade_count,
++        "total_pnl": total_pnl,
++        "trade_sharpe_raw": 0.3,
++    }
++    return StageResult(
++        stage="A",
++        passed=passed,
++        metrics={"stage": "A", "payload": payload},
++    )
++
++
++class TestSidecarRelativePath:
++    def test_path_format(self) -> None:
++        assert sidecar_relative_path(19) == Path(
++            "reports/run-reports/run-19/diagnostics/stage_a_provenance.parquet"
++        )
++
++    def test_different_run_numbers(self) -> None:
++        assert "run-100" in str(sidecar_relative_path(100))
++
++
++class TestBuildSidecarTable:
++    def test_schema_matches(self) -> None:
++        rows = [
++            {
++                "lane_id": "lane",
++                "generation": 0,
++                "individual_name": "g",
++                "metric_stage": "stage_a_only",
++                "trade_count": 10,
++                "total_pnl_stage_a": 1.5,
++                "sharpe_stage_a": 0.2,
++                "stage_a_pass": False,
++                "stage_b_pass": None,
++                "stage_c_pass": None,
++            }
++        ]
++        table = build_sidecar_table(rows)
++        assert table.schema == STAGE_A_PROVENANCE_SCHEMA
++
++    def test_schema_field_count(self) -> None:
++        assert len(STAGE_A_PROVENANCE_SCHEMA.names) == 10
++
++
++class TestWriteStageAProvenance:
++    def test_writes_parquet_with_collector_records(
++        self, tmp_path: Path
++    ) -> None:
++        c = DiagnosticsCollector()
++        c.record_stage_a(
++            "lane", 0, "g0_i0", _make_stage_a_result(passed=True)
++        )
++        out = tmp_path / "diag" / "stage_a_provenance.parquet"
++        result = write_stage_a_provenance(c, out)
++        assert result == out
++        assert out.exists()
++
++        # round-trip
++        loaded = pq.read_table(out).to_pylist()
++        assert len(loaded) == 1
++        assert loaded[0]["lane_id"] == "lane"
++        assert loaded[0]["individual_name"] == "g0_i0"
++        assert loaded[0]["metric_stage"] == "stage_a_evaluated"
++
++    def test_empty_collector_returns_none_no_write(
++        self, tmp_path: Path
++    ) -> None:
++        c = DiagnosticsCollector()
++        out = tmp_path / "stage_a_provenance.parquet"
++        result = write_stage_a_provenance(c, out)
++        assert result is None
++        assert not out.exists()
++
++    def test_creates_parent_directory(self, tmp_path: Path) -> None:
++        c = DiagnosticsCollector()
++        c.record_stage_a("lane", 0, "g", _make_stage_a_result(passed=True))
++        nested = tmp_path / "deep" / "nested" / "dir" / "out.parquet"
++        result = write_stage_a_provenance(c, nested)
++        assert result == nested
++        assert nested.exists()
++
++    def test_fail_open_on_io_error(self, tmp_path: Path) -> None:
++        """書き込み不能 path でも GA を止めず None を返す (fail-open)."""
++        c = DiagnosticsCollector()
++        c.record_stage_a("lane", 0, "g", _make_stage_a_result(passed=True))
++        # 既存ファイルをディレクトリ扱いさせる: 書き込み不能 path
++        bad = tmp_path / "file.txt"
++        bad.write_text("blocker")
++        # bad/ の下に書こうとする (file をディレクトリとして開けない)
++        target = bad / "stage_a_provenance.parquet"
++        result = write_stage_a_provenance(c, target)
++        assert result is None  # fail-open
++        # 例外は raise しない (caller の GA flow を止めない)
++
++
++class TestRowSchemaInvariant:
++    """sidecar 行数 == backtest 評価された個体数 (I1) 等の invariant."""
++
++    def test_row_count_matches_records(self, tmp_path: Path) -> None:
++        c = DiagnosticsCollector()
++        for i in range(5):
++            c.record_stage_a(
++                "lane", 0, f"g0_i{i}", _make_stage_a_result(passed=(i % 2 == 0))
++            )
++        out = tmp_path / "stage_a_provenance.parquet"
++        write_stage_a_provenance(c, out)
++        loaded = pq.read_table(out)
++        assert loaded.num_rows == 5
++        assert len(c) == 5
++
++    def test_total_pnl_finite_invariant(self, tmp_path: Path) -> None:
++        """I3: total_pnl_stage_a が finite (NaN/Inf は collector で 0.0 化)."""
++        c = DiagnosticsCollector()
++        c.record_stage_a(
++            "lane", 0, "g", _make_stage_a_result(total_pnl=float("nan"))
++        )
++        out = tmp_path / "stage_a_provenance.parquet"
++        write_stage_a_provenance(c, out)
++        loaded = pq.read_table(out).to_pylist()
++        assert loaded[0]["total_pnl_stage_a"] == 0.0

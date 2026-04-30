@@ -1,0 +1,1 @@
+APPROVED trade_count と total_pnl_stage_a に対する防御が追加され、既存フローへの副作用も見当たらないため問題ありません。

@@ -1,0 +1,1379 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 05e75b9..5b9cf7f 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -20,6 +20,7 @@ dependencies = [
+     "pyarrow>=24.0.0",
+     "ruamel-yaml>=0.19.1",
+     "psutil>=5.9",
++    "numba>=0.61",
+ ]
+ 
+ [dependency-groups]
+diff --git a/src/dsl/composite.py b/src/dsl/composite.py
+index 59f106a..ee8c3a6 100644
+--- a/src/dsl/composite.py
++++ b/src/dsl/composite.py
+@@ -7,6 +7,12 @@ Clause 合成式:
+     composite = Σ(cw_k × clause_score_k) / Σ|cw_k|
+ 
+ pure function 群。Genome dataclass に依存するが primitive evaluator には依存しない。
++
++T053 (devnotes/20260427-1723-composite-numba-jit) で Numba njit fused kernel
++`compute_composite_at_bar_jit` を追加。prepared path の per-bar 計算を kernel
++に集約し、dict 構築 / hashing / 二重 compute_clause_score 呼び出しを排除する。
++既存純 Python 関数 (compute_dir_score / compute_gate / compute_clause_score /
++compute_composite) は **削除しない** (unprepared path / リファレンス用)。
+ """
+ 
+ from __future__ import annotations
+@@ -14,6 +20,9 @@ from __future__ import annotations
+ import math
+ from collections.abc import Mapping, Sequence
+ 
++import numba
++import numpy as np
++
+ from src.dsl.genome import ClauseConfig, SignalConfig
+ 
+ 
+@@ -107,3 +116,128 @@ def compute_composite(
+ def is_close(a: float, b: float, *, abs_tol: float = 1e-9) -> bool:
+     """テスト用 helper: math.isclose の tolerance wrapper."""
+     return math.isclose(a, b, abs_tol=abs_tol)
++
++
++# ---------------------------------------------------------------------------
++# T053: Numba njit fused kernel
++# ---------------------------------------------------------------------------
++#
++# 純 Python 実装 (compute_composite + compute_clause_score) と同じ演算順序で
++# composite と per-clause score を 1 関数内で同時計算する fused kernel。
++#
++# 数値契約:
++#   - aggregate (composite 戻り値) は純 Python と np.allclose(atol=1e-6, rtol=0)
++#   - per-clause score (out_clause_scores) は exact `!= 0.0` parity (T037)
++#   - fastmath=False で IEEE 754 演算順序を厳守 (再結合最適化禁止)
++#
++# 例外契約:
++#   - kernel は per-bar に呼ばれるため n_clauses == 0 を **検証しない**
++#     (既存 compute_composite() は ValueError を raise する)。
++#     呼び出し側 (prepare()) で len(clauses) == 0 を事前検証する契約。
++#
++# math.isfinite semantics:
++#   - NaN, +inf, -inf を 0.0 に置換 (純 Python 実装の `if not math.isfinite(v)`
++#     と同等)。Numba njit 内では `not (v == v) or v == np.inf or v == -np.inf`
++#     で同等判定を構造的に再現。
++
++
++@numba.njit(cache=True, fastmath=False)
++def compute_composite_at_bar_jit(
++    idx: int,
++    clause_weights: np.ndarray,
++    dir_weights_flat: np.ndarray,
++    dir_offsets: np.ndarray,
++    dir_signal_idx: np.ndarray,
++    gate_offsets: np.ndarray,
++    gate_signal_idx: np.ndarray,
++    unique_signal_matrix: np.ndarray,
++    out_clause_scores: np.ndarray,
++) -> float:
++    """Numba njit 版 composite 計算 (per-bar fused kernel)。
++
++    Args:
++        idx: 対象 bar index。`0 <= idx < n_bars` 外なら全 signal 値を 0.0 として扱う
++            (純 Python prepared path の `arr[idx] if 0 <= idx < len(arr) else 0.0`
++            と同 semantics)。
++        clause_weights: float64[n_clauses] - 各 clause の weight。
++        dir_weights_flat: float64[total_dir] - directional weight を occurrence 順に連結。
++        dir_offsets: int64[n_clauses+1] - clause 境界 (CSR 形式)。
++        dir_signal_idx: int64[total_dir] - 各 directional occurrence の
++            unique_signal_matrix 行 index。
++        gate_offsets: int64[n_clauses+1] - clause 境界 (CSR 形式)。
++        gate_signal_idx: int64[total_gate] - gate occurrence の行 index。
++            **gate 側は weight を持たない** (既存 compute_gate 仕様維持: 値の積のみ)。
++        unique_signal_matrix: float64[n_unique_signals, n_bars] - unique
++            (name, params) ごとに 1 行の precomputed signal value。
++        out_clause_scores: float64[n_clauses] - **毎 bar に全 clause 分上書き**
++            される preallocated buffer。途中スキップ禁止。
++            T037 active_clause 判定は呼び出し側で exact `!= 0.0` で行う。
++
++    Returns:
++        composite score (float)。Σ|cw| == 0 で 0.0、n_clauses == 0 でも 0.0
++        を返すが本番では prepare() で事前に ValueError を raise する契約。
++    """
++    n_clauses = clause_weights.shape[0]
++    n_bars = unique_signal_matrix.shape[1]
++
++    # 純 Python prepared path と同 semantics:
++    #   v = arr[idx] if 0 <= idx < len(arr) else 0.0
++    bars_in_range = (idx >= 0) and (idx < n_bars)
++
++    composite_num = 0.0
++    composite_denom = 0.0
++
++    for ci in range(n_clauses):
++        # 1) dir_score = Σ(w × x) / Σ|w|
++        d_start = dir_offsets[ci]
++        d_end = dir_offsets[ci + 1]
++        dir_num = 0.0
++        dir_denom = 0.0
++        for k in range(d_start, d_end):
++            w = dir_weights_flat[k]
++            if bars_in_range:
++                v = unique_signal_matrix[dir_signal_idx[k], idx]
++                # math.isfinite と同等: NaN, +inf, -inf を 0.0 に
++                # NOTE: `v != v` は IEEE754 NaN 判定 (NaN は自身と != True)。
++                #       Numba njit 内で math.isfinite を使わないのは、
++                #       純 Python 実装と構造的に同 semantics を担保するため。
++                if v != v or v == np.inf or v == -np.inf:
++                    v = 0.0
++            else:
++                v = 0.0
++            dir_num += w * v
++            dir_denom += abs(w)
++        # Σ|w| == 0 ガード (純 Python compute_dir_score と同等)。
++        # ternary ではなく if/else にしているのは、Numba kernel での
++        # divide-by-zero 回避を構造的に明示するため。
++        if dir_denom == 0.0:  # noqa: SIM108
++            dir_score = 0.0
++        else:
++            dir_score = dir_num / dir_denom
++
++        # 2) gate = Π gate_j (weight 不使用 = 既存 compute_gate 仕様)
++        g_start = gate_offsets[ci]
++        g_end = gate_offsets[ci + 1]
++        gate = 1.0
++        for k in range(g_start, g_end):
++            if bars_in_range:
++                v = unique_signal_matrix[gate_signal_idx[k], idx]
++                # NOTE: `v != v` で NaN 判定 (上記 dir loop と同等理由)。
++                if v != v or v == np.inf or v == -np.inf:
++                    v = 0.0
++            else:
++                v = 0.0
++            gate *= v
++
++        # 3) clause_score = dir_score × gate を毎 bar 全 clause 上書き
++        cs = dir_score * gate
++        out_clause_scores[ci] = cs
++
++        # 4) composite = Σ(cw × cs) / Σ|cw|
++        cw = clause_weights[ci]
++        composite_num += cw * cs
++        composite_denom += abs(cw)
++
++    if composite_denom == 0.0:
++        return 0.0
++    return composite_num / composite_denom
+diff --git a/src/dsl/strategy.py b/src/dsl/strategy.py
+index 7da97d8..9a6d5db 100644
+--- a/src/dsl/strategy.py
++++ b/src/dsl/strategy.py
+@@ -12,7 +12,6 @@ primitive 評価は PrimitiveEvaluator Protocol 経由で行い、本 TODO で
+ 
+ from __future__ import annotations
+ 
+-import math
+ from dataclasses import dataclass
+ from datetime import datetime, time, timedelta
+ from typing import NamedTuple, Protocol
+@@ -21,7 +20,11 @@ import numpy as np
+ 
+ from src.broker.orders import OrderSignal, PortfolioSnapshot
+ from src.domain.price import PriceBar
+-from src.dsl.composite import compute_clause_score, compute_composite
++from src.dsl.composite import (
++    compute_clause_score,
++    compute_composite,
++    compute_composite_at_bar_jit,
++)
+ from src.dsl.genome import Genome, SignalConfig
+ 
+ # SignalCacheKey: (primitive_id, sorted params tuple)
+@@ -79,6 +82,23 @@ class PreparedSignals(NamedTuple):
+     ]
+     genome: Genome
+ 
++    # === T053: Numba JIT kernel 用 flat ndarray 群 ===
++    # devnotes/20260427-1723-composite-numba-jit/detailed-design.md 施策 3。
++    # arrays / clauses は維持しつつ並行で flat 表現を持つことで:
++    #   - prepared path: kernel に直接渡せる contiguous ndarray
++    #   - unprepared path: 既存 dict / tuple 表現がそのまま使える
++    # の両立を実現する。同データを 2 重保持するが clause 当たり数十 B 程度の
++    # offsets / weights + unique_signal_matrix のみ追加 (~9.4 MB / Stage A
++    # genome 想定、24GB × 6worker 制約に対し許容内)。
++    clause_weights: np.ndarray  # float64[n_clauses]
++    dir_weights_flat: np.ndarray  # float64[total_dir_occurrences]
++    dir_offsets: np.ndarray  # int64[n_clauses+1] CSR 形式
++    dir_signal_idx: np.ndarray  # int64[total_dir_occurrences] - unique_signal_matrix 行 index
++    gate_offsets: np.ndarray  # int64[n_clauses+1] CSR 形式
++    gate_signal_idx: np.ndarray  # int64[total_gate_occurrences]
++    unique_signal_matrix: np.ndarray  # float64[n_unique_signals, n_bars]
++    clause_score_buffer: np.ndarray  # float64[n_clauses] - kernel out, per-bar overwrite
++
+ 
+ class PrimitiveEvaluator(Protocol):
+     """primitive 評価関数の抽象。後続 TODO で実装される。
+@@ -223,6 +243,17 @@ class DslStrategy:
+         if not hasattr(self._evaluator, "evaluate_all_bars"):
+             return
+ 
++        # T053 Round 1 Critical 1: clauses 空の ValueError 契約を prepared
++        # path でも維持する (kernel 側は per-bar 検証しないため、ここで
++        # fail-fast。unprepared path は compute_composite() が per-bar に
++        # raise する既存挙動)。
++        if not self._genome.clauses:
++            raise ValueError(
++                "Genome.clauses must not be empty (compute_composite contract)"
++            )
++
++        n_bars = len(bars)
++
+         arrays: dict[SignalCacheKey, np.ndarray] = {}
+         clause_entries: list[
+             tuple[
+@@ -238,22 +269,91 @@ class DslStrategy:
+             for sig in clause.directional:
+                 key = _signal_cache_key(sig)
+                 if key not in arrays:
+-                    arrays[key] = self._evaluator.evaluate_all_bars(bars, sig)
++                    # T053 Round 1 Critical 3: 配列長不一致を fail-fast。
++                    # Round 2 Warning: list / Series も np.asarray で正規化
++                    # してから shape 検証。
++                    arr = np.asarray(
++                        self._evaluator.evaluate_all_bars(bars, sig),
++                        dtype=np.float64,
++                    )
++                    if arr.shape != (n_bars,):
++                        raise ValueError(
++                            f"evaluate_all_bars returned shape {arr.shape}, "
++                            f"expected ({n_bars},) for signal {sig.name}"
++                        )
++                    arrays[key] = arr
+                 dir_entries.append((sig.name, arrays[key]))
+ 
+             gate_entries: list[tuple[str, np.ndarray]] = []
+             for sig in clause.local_gate:
+                 key = _signal_cache_key(sig)
+                 if key not in arrays:
+-                    arrays[key] = self._evaluator.evaluate_all_bars(bars, sig)
++                    arr = np.asarray(
++                        self._evaluator.evaluate_all_bars(bars, sig),
++                        dtype=np.float64,
++                    )
++                    if arr.shape != (n_bars,):
++                        raise ValueError(
++                            f"evaluate_all_bars returned shape {arr.shape}, "
++                            f"expected ({n_bars},) for signal {sig.name}"
++                        )
++                    arrays[key] = arr
+                 gate_entries.append((sig.name, arrays[key]))
+ 
+             clause_entries.append((tuple(dir_entries), tuple(gate_entries)))
+ 
++        # === T053: flat ndarray 構築 (Numba kernel 用) ===
++        n_clauses = len(self._genome.clauses)
++
++        # unique signal matrix: arrays dict を行スタック。
++        # 順序を deterministic にするため key 順でソート。
++        unique_keys = sorted(arrays.keys())
++        key_to_row = {k: i for i, k in enumerate(unique_keys)}
++        n_unique = len(unique_keys)
++        unique_signal_matrix = np.empty((n_unique, n_bars), dtype=np.float64)
++        for k, row_idx in key_to_row.items():
++            # arrays[k] は既に float64 + shape (n_bars,) (上で正規化済み)。
++            # 念のため明示変換 (kernel との dtype 整合担保)。
++            unique_signal_matrix[row_idx, :] = arrays[k]
++
++        clause_weights = np.array(
++            [c.weight for c in self._genome.clauses], dtype=np.float64
++        )
++
++        dir_offsets_list: list[int] = [0]
++        dir_weights_list: list[float] = []
++        dir_signal_idx_list: list[int] = []
++        gate_offsets_list: list[int] = [0]
++        gate_signal_idx_list: list[int] = []
++
++        for clause in self._genome.clauses:
++            for sig in clause.directional:
++                dir_weights_list.append(sig.weight)
++                dir_signal_idx_list.append(key_to_row[_signal_cache_key(sig)])
++            dir_offsets_list.append(len(dir_weights_list))
++            for sig in clause.local_gate:
++                gate_signal_idx_list.append(key_to_row[_signal_cache_key(sig)])
++            gate_offsets_list.append(len(gate_signal_idx_list))
++
++        dir_weights_flat = np.array(dir_weights_list, dtype=np.float64)
++        dir_offsets = np.array(dir_offsets_list, dtype=np.int64)
++        dir_signal_idx = np.array(dir_signal_idx_list, dtype=np.int64)
++        gate_offsets = np.array(gate_offsets_list, dtype=np.int64)
++        gate_signal_idx = np.array(gate_signal_idx_list, dtype=np.int64)
++        clause_score_buffer = np.empty(n_clauses, dtype=np.float64)
++
+         self._prepared = PreparedSignals(
+             arrays=arrays,
+             clauses=tuple(clause_entries),
+             genome=self._genome,  # identity 比較用 (O(1))
++            clause_weights=clause_weights,
++            dir_weights_flat=dir_weights_flat,
++            dir_offsets=dir_offsets,
++            dir_signal_idx=dir_signal_idx,
++            gate_offsets=gate_offsets,
++            gate_signal_idx=gate_signal_idx,
++            unique_signal_matrix=unique_signal_matrix,
++            clause_score_buffer=clause_score_buffer,
+         )
+ 
+     def on_bar(
+@@ -282,23 +382,35 @@ class DslStrategy:
+                 return []
+             idx = len(self._bars) - 1
+ 
+-        # 各 clause の primitive 値を評価
+-        values_per_clause: list[dict[str, float]] = []
++        # T053: prepared path は Numba JIT fused kernel に集約。
++        # unprepared path (live feed / paper trading) は既存挙動を維持。
+         if prepared is not None:
+-            # fast path: flat list iteration (Cycle 2 / T029)
+-            for dir_entries, gate_entries in prepared.clauses:
+-                vals: dict[str, float] = {}
+-                for name, arr in dir_entries:
+-                    v = arr[idx] if 0 <= idx < len(arr) else 0.0
+-                    vals[name] = 0.0 if not math.isfinite(v) else float(v)
+-                for name, arr in gate_entries:
+-                    v = arr[idx] if 0 <= idx < len(arr) else 0.0
+-                    vals[name] = 0.0 if not math.isfinite(v) else float(v)
+-                values_per_clause.append(vals)
++            # fast path: Numba njit fused kernel (composite + per-clause score
++            # を 1 関数内で同時計算、dict 構築 / hashing / 二重 compute_clause_score
++            # 呼び出しを排除)。
++            composite = compute_composite_at_bar_jit(
++                idx,
++                prepared.clause_weights,
++                prepared.dir_weights_flat,
++                prepared.dir_offsets,
++                prepared.dir_signal_idx,
++                prepared.gate_offsets,
++                prepared.gate_signal_idx,
++                prepared.unique_signal_matrix,
++                prepared.clause_score_buffer,
++            )
++            # T037: per-clause score buffer から exact `!= 0.0` で集計
++            # (kernel が毎 bar 全 clause を上書きする契約)。
++            buf = prepared.clause_score_buffer
++            for ci in range(buf.shape[0]):
++                if buf[ci] != 0.0:
++                    self._active_clause_indices.add(ci)
+         else:
+-            # unprepared path (live feed / paper trading)
++            # unprepared path: 既存実装 (live feed / paper trading)。
++            # Numba 化のリスクを後段に隔離するため pure Python のまま維持。
++            values_per_clause: list[dict[str, float]] = []
+             for clause in self._genome.clauses:
+-                vals = {}
++                vals: dict[str, float] = {}
+                 for sig in clause.directional:
+                     vals[sig.name] = self._evaluator.evaluate(
+                         self._bars, idx, sig
+@@ -308,20 +420,18 @@ class DslStrategy:
+                         self._bars, idx, sig
+                     )
+                 values_per_clause.append(vals)
++            # T037: composite + active_clause を pure Python で計算。
++            # 同 clause について compute_clause_score を 2 回計算するが
++            # clause 数は 1-3 で重い処理ではない (既存挙動踏襲)。
++            composite = compute_composite(
++                self._genome.clauses, values_per_clause
++            )
++            for ci, (clause, vals) in enumerate(
++                zip(self._genome.clauses, values_per_clause, strict=True)
++            ):
++                if compute_clause_score(clause, vals) != 0.0:
++                    self._active_clause_indices.add(ci)
+ 
+-        # T037: composite の数値・例外契約は完全に compute_composite() に
+-        # 委譲し (clauses 空 / 長さ不一致は ValueError として伝搬)、それとは
+-        # 独立に per-clause score を別途 compute_clause_score で取得して
+-        # active_clause_indices に集計する (observability only、composite 計算
+-        # 結果には一切影響しない)。同 clause について compute_clause_score を
+-        # 2 回計算するが clause 数は 1-3 で重い処理ではない (Codex round-1
+-        # [Critical] 反映)。
+-        composite = compute_composite(self._genome.clauses, values_per_clause)
+-        for ci, (clause, vals) in enumerate(
+-            zip(self._genome.clauses, values_per_clause, strict=True)
+-        ):
+-            if compute_clause_score(clause, vals) != 0.0:
+-                self._active_clause_indices.add(ci)
+         pos_cfg = self._genome.position
+ 
+         # 保有あり: exit 判定のみ（無保有のみ entry を試みる = ドテン禁止）
+diff --git a/tests/dsl/test_composite_jit.py b/tests/dsl/test_composite_jit.py
+new file mode 100644
+index 0000000..120dea5
+--- /dev/null
++++ b/tests/dsl/test_composite_jit.py
+@@ -0,0 +1,579 @@
++"""T053: composite per-bar Numba JIT kernel の単体テスト。
++
++devnotes/20260427-1723-composite-numba-jit/detailed-design.md 施策 2 / 5。
++
++検証要件:
++  - V2: aggregate np.allclose(atol=1e-6, rtol=0) で純 Python と一致
++  - V3: T037 active_clause exact `!= 0.0` parity
++  - V13: ゼロ近傍ケース (+0.0 / -0.0 / 1e-320 / cancellation) で T037 完全一致
++  - kernel が NaN / +inf / -inf を 0.0 に置換する semantics (math.isfinite 同等)
++  - idx out-of-range で全 signal 値が 0 として扱われる
++  - clause_score_buffer が毎 bar 全 clause を上書き (途中スキップなし)
++"""
++
++from __future__ import annotations
++
++import numpy as np
++import pytest
++
++from src.dsl.composite import (
++    compute_clause_score,
++    compute_composite,
++    compute_composite_at_bar_jit,
++)
++from src.dsl.genome import ClauseConfig, SignalConfig
++
++
++def _build_flat_inputs_from_clauses(
++    clauses: tuple[ClauseConfig, ...],
++    signal_values: dict[str, np.ndarray],
++) -> dict[str, np.ndarray]:
++    """clauses + signal_name -> values array から kernel 入力 dict を構築する.
++
++    純 Python 実装と kernel を同じ入力で比較するための helper。
++    name の出現順を deterministic にするため、登場順に行を割り振る。
++    """
++    n_clauses = len(clauses)
++    if n_clauses == 0:
++        raise ValueError("clauses must not be empty for kernel input")
++    n_bars = next(iter(signal_values.values())).shape[0]
++
++    # name -> row idx (登場順)
++    name_to_row: dict[str, int] = {}
++    for clause in clauses:
++        for sig in (*clause.directional, *clause.local_gate):
++            if sig.name not in name_to_row:
++                name_to_row[sig.name] = len(name_to_row)
++
++    n_unique = len(name_to_row)
++    unique_signal_matrix = np.empty((n_unique, n_bars), dtype=np.float64)
++    for name, row in name_to_row.items():
++        unique_signal_matrix[row, :] = np.asarray(
++            signal_values[name], dtype=np.float64
++        )
++
++    clause_weights = np.array([c.weight for c in clauses], dtype=np.float64)
++
++    dir_offsets = [0]
++    dir_weights: list[float] = []
++    dir_signal_idx: list[int] = []
++    gate_offsets = [0]
++    gate_signal_idx: list[int] = []
++    for clause in clauses:
++        for sig in clause.directional:
++            dir_weights.append(sig.weight)
++            dir_signal_idx.append(name_to_row[sig.name])
++        dir_offsets.append(len(dir_weights))
++        for sig in clause.local_gate:
++            gate_signal_idx.append(name_to_row[sig.name])
++        gate_offsets.append(len(gate_signal_idx))
++
++    return {
++        "clause_weights": clause_weights,
++        "dir_weights_flat": np.array(dir_weights, dtype=np.float64),
++        "dir_offsets": np.array(dir_offsets, dtype=np.int64),
++        "dir_signal_idx": np.array(dir_signal_idx, dtype=np.int64),
++        "gate_offsets": np.array(gate_offsets, dtype=np.int64),
++        "gate_signal_idx": np.array(gate_signal_idx, dtype=np.int64),
++        "unique_signal_matrix": unique_signal_matrix,
++        "clause_score_buffer": np.empty(n_clauses, dtype=np.float64),
++    }
++
++
++def _python_composite_at_bar(
++    clauses: tuple[ClauseConfig, ...],
++    signal_values: dict[str, np.ndarray],
++    idx: int,
++) -> tuple[float, list[float]]:
++    """純 Python 実装で composite + per-clause score を計算する (oracle)."""
++    n_bars = next(iter(signal_values.values())).shape[0]
++    values_per_clause: list[dict[str, float]] = []
++    for clause in clauses:
++        vals: dict[str, float] = {}
++        for sig in clause.directional:
++            v = (
++                float(signal_values[sig.name][idx])
++                if 0 <= idx < n_bars
++                else 0.0
++            )
++            if not np.isfinite(v):
++                v = 0.0
++            vals[sig.name] = v
++        for sig in clause.local_gate:
++            v = (
++                float(signal_values[sig.name][idx])
++                if 0 <= idx < n_bars
++                else 0.0
++            )
++            if not np.isfinite(v):
++                v = 0.0
++            vals[sig.name] = v
++        values_per_clause.append(vals)
++    composite = compute_composite(clauses, values_per_clause)
++    clause_scores = [
++        compute_clause_score(c, vals)
++        for c, vals in zip(clauses, values_per_clause, strict=True)
++    ]
++    return composite, clause_scores
++
++
++# ---------------------------------------------------------------------------
++# property-based: random genome × random bars
++# ---------------------------------------------------------------------------
++
++
++def _random_clause(
++    rng: np.random.Generator,
++    name_prefix: str,
++    n_dir: int,
++    n_gate: int,
++) -> ClauseConfig:
++    return ClauseConfig(
++        directional=tuple(
++            SignalConfig(
++                name=f"{name_prefix}_d{i}",
++                weight=float(rng.uniform(-2.0, 2.0)),
++            )
++            for i in range(n_dir)
++        ),
++        local_gate=tuple(
++            SignalConfig(
++                name=f"{name_prefix}_g{i}",
++                weight=1.0,  # gate weight は kernel では使われない
++            )
++            for i in range(n_gate)
++        ),
++        weight=float(rng.uniform(-2.0, 2.0)),
++    )
++
++
++def test_jit_kernel_matches_python_impl_on_random_genomes() -> None:
++    rng = np.random.default_rng(20260427)
++    n_bars = 50
++
++    for trial in range(30):
++        n_clauses = int(rng.integers(1, 4))
++        clauses = tuple(
++            _random_clause(
++                rng,
++                f"c{ci}",
++                n_dir=int(rng.integers(1, 4)),
++                n_gate=int(rng.integers(0, 3)),
++            )
++            for ci in range(n_clauses)
++        )
++        signal_values: dict[str, np.ndarray] = {}
++        for clause in clauses:
++            for sig in (*clause.directional, *clause.local_gate):
++                if sig.name not in signal_values:
++                    signal_values[sig.name] = rng.uniform(-1.0, 1.0, size=n_bars)
++
++        kw = _build_flat_inputs_from_clauses(clauses, signal_values)
++
++        for idx in range(n_bars):
++            py_composite, py_clause_scores = _python_composite_at_bar(
++                clauses, signal_values, idx
++            )
++            jit_composite = compute_composite_at_bar_jit(
++                idx,
++                kw["clause_weights"],
++                kw["dir_weights_flat"],
++                kw["dir_offsets"],
++                kw["dir_signal_idx"],
++                kw["gate_offsets"],
++                kw["gate_signal_idx"],
++                kw["unique_signal_matrix"],
++                kw["clause_score_buffer"],
++            )
++            assert np.allclose(jit_composite, py_composite, atol=1e-6, rtol=0), (
++                f"trial={trial} idx={idx}: jit={jit_composite} vs py={py_composite}"
++            )
++            jit_clause_scores = list(kw["clause_score_buffer"])
++            assert np.allclose(
++                jit_clause_scores, py_clause_scores, atol=1e-6, rtol=0
++            )
++
++
++def test_jit_kernel_handles_nan_and_inf_inputs() -> None:
++    """NaN, +inf, -inf を 0.0 に置換する (math.isfinite 同等 semantics)."""
++    clauses = (
++        ClauseConfig(
++            directional=(
++                SignalConfig(name="d1", weight=1.0),
++                SignalConfig(name="d2", weight=1.0),
++            ),
++            local_gate=(SignalConfig(name="g1", weight=1.0),),
++            weight=1.0,
++        ),
++    )
++    signal_values = {
++        "d1": np.array([np.nan, np.inf, -np.inf, 0.5], dtype=np.float64),
++        "d2": np.array([np.nan, 0.0, 1.0, 0.5], dtype=np.float64),
++        "g1": np.array([np.nan, 1.0, 1.0, 1.0], dtype=np.float64),
++    }
++    kw = _build_flat_inputs_from_clauses(clauses, signal_values)
++
++    # idx=0: 全 signal が NaN → dir_score 0, gate 0 → composite 0
++    composite_at_0 = compute_composite_at_bar_jit(
++        0,
++        kw["clause_weights"],
++        kw["dir_weights_flat"],
++        kw["dir_offsets"],
++        kw["dir_signal_idx"],
++        kw["gate_offsets"],
++        kw["gate_signal_idx"],
++        kw["unique_signal_matrix"],
++        kw["clause_score_buffer"],
++    )
++    assert composite_at_0 == 0.0
++    assert kw["clause_score_buffer"][0] == 0.0
++
++    # idx=1: d1=+inf→0, d2=0, g1=1 → dir_score=0, gate=1, clause_score=0
++    composite_at_1 = compute_composite_at_bar_jit(
++        1,
++        kw["clause_weights"],
++        kw["dir_weights_flat"],
++        kw["dir_offsets"],
++        kw["dir_signal_idx"],
++        kw["gate_offsets"],
++        kw["gate_signal_idx"],
++        kw["unique_signal_matrix"],
++        kw["clause_score_buffer"],
++    )
++    assert composite_at_1 == 0.0
++
++    # 純 Python と完全一致するか確認 (idx=2: d1=-inf→0, d2=1, g1=1)
++    py_c, py_cs = _python_composite_at_bar(clauses, signal_values, 2)
++    composite_at_2 = compute_composite_at_bar_jit(
++        2,
++        kw["clause_weights"],
++        kw["dir_weights_flat"],
++        kw["dir_offsets"],
++        kw["dir_signal_idx"],
++        kw["gate_offsets"],
++        kw["gate_signal_idx"],
++        kw["unique_signal_matrix"],
++        kw["clause_score_buffer"],
++    )
++    assert np.allclose(composite_at_2, py_c, atol=1e-6, rtol=0)
++    assert np.allclose(
++        list(kw["clause_score_buffer"]), py_cs, atol=1e-6, rtol=0
++    )
++
++
++def test_jit_kernel_zero_clause_weight_returns_zero() -> None:
++    """全 clause weight = 0 で composite が 0.0 (Σ|cw| == 0 ガード)."""
++    clauses = (
++        ClauseConfig(
++            directional=(SignalConfig(name="d1", weight=1.0),),
++            local_gate=(),
++            weight=0.0,
++        ),
++        ClauseConfig(
++            directional=(SignalConfig(name="d2", weight=1.0),),
++            local_gate=(),
++            weight=0.0,
++        ),
++    )
++    signal_values = {
++        "d1": np.array([0.5, 0.5], dtype=np.float64),
++        "d2": np.array([0.5, 0.5], dtype=np.float64),
++    }
++    kw = _build_flat_inputs_from_clauses(clauses, signal_values)
++    composite = compute_composite_at_bar_jit(
++        0,
++        kw["clause_weights"],
++        kw["dir_weights_flat"],
++        kw["dir_offsets"],
++        kw["dir_signal_idx"],
++        kw["gate_offsets"],
++        kw["gate_signal_idx"],
++        kw["unique_signal_matrix"],
++        kw["clause_score_buffer"],
++    )
++    assert composite == 0.0
++
++
++def test_jit_kernel_zero_dir_weight_clause_zero() -> None:
++    """clause 内 dir_weight 全 0 で当該 clause score 0.0 (Σ|w| == 0 ガード)."""
++    clauses = (
++        ClauseConfig(
++            directional=(
++                SignalConfig(name="d1", weight=0.0),
++                SignalConfig(name="d2", weight=0.0),
++            ),
++            local_gate=(),
++            weight=1.0,
++        ),
++    )
++    signal_values = {
++        "d1": np.array([0.5], dtype=np.float64),
++        "d2": np.array([0.7], dtype=np.float64),
++    }
++    kw = _build_flat_inputs_from_clauses(clauses, signal_values)
++    composite = compute_composite_at_bar_jit(
++        0,
++        kw["clause_weights"],
++        kw["dir_weights_flat"],
++        kw["dir_offsets"],
++        kw["dir_signal_idx"],
++        kw["gate_offsets"],
++        kw["gate_signal_idx"],
++        kw["unique_signal_matrix"],
++        kw["clause_score_buffer"],
++    )
++    assert composite == 0.0
++    assert kw["clause_score_buffer"][0] == 0.0
++
++
++def test_jit_kernel_empty_gate_acts_as_passthrough() -> None:
++    """gate signal 0 個の clause で gate=1.0 (積の単位元)."""
++    clauses = (
++        ClauseConfig(
++            directional=(SignalConfig(name="d1", weight=1.0),),
++            local_gate=(),
++            weight=1.0,
++        ),
++    )
++    signal_values = {"d1": np.array([0.7], dtype=np.float64)}
++    kw = _build_flat_inputs_from_clauses(clauses, signal_values)
++    composite = compute_composite_at_bar_jit(
++        0,
++        kw["clause_weights"],
++        kw["dir_weights_flat"],
++        kw["dir_offsets"],
++        kw["dir_signal_idx"],
++        kw["gate_offsets"],
++        kw["gate_signal_idx"],
++        kw["unique_signal_matrix"],
++        kw["clause_score_buffer"],
++    )
++    # dir_score = 1*0.7 / 1 = 0.7, gate = 1.0, clause_score = 0.7,
++    # composite = 1*0.7 / 1 = 0.7
++    assert np.allclose(composite, 0.7, atol=1e-12, rtol=0)
++    assert kw["clause_score_buffer"][0] == 0.7
++
++
++@pytest.mark.parametrize("idx", [-1, -10, 5, 100])
++def test_jit_kernel_idx_out_of_range_returns_zero(idx: int) -> None:
++    """idx < 0 / idx >= n_bars で全 signal 値が 0 として扱われる."""
++    clauses = (
++        ClauseConfig(
++            directional=(SignalConfig(name="d1", weight=1.0),),
++            local_gate=(SignalConfig(name="g1", weight=1.0),),
++            weight=1.0,
++        ),
++    )
++    signal_values = {
++        "d1": np.array([0.5, 0.5, 0.5, 0.5, 0.5], dtype=np.float64),
++        "g1": np.array([1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float64),
++    }
++    kw = _build_flat_inputs_from_clauses(clauses, signal_values)
++    composite = compute_composite_at_bar_jit(
++        idx,
++        kw["clause_weights"],
++        kw["dir_weights_flat"],
++        kw["dir_offsets"],
++        kw["dir_signal_idx"],
++        kw["gate_offsets"],
++        kw["gate_signal_idx"],
++        kw["unique_signal_matrix"],
++        kw["clause_score_buffer"],
++    )
++    # out-of-range: dir_score = 0, gate = 0 (空でない gate)、clause_score = 0
++    assert composite == 0.0
++    assert kw["clause_score_buffer"][0] == 0.0
++
++
++def test_jit_kernel_clause_score_buffer_overwritten_every_bar() -> None:
++    """同じ buffer を 2 bar 連続で再利用して 2 bar 目の値が正しく上書き."""
++    clauses = (
++        ClauseConfig(
++            directional=(SignalConfig(name="d1", weight=1.0),),
++            local_gate=(),
++            weight=1.0,
++        ),
++        ClauseConfig(
++            directional=(SignalConfig(name="d2", weight=1.0),),
++            local_gate=(),
++            weight=1.0,
++        ),
++    )
++    signal_values = {
++        "d1": np.array([0.7, 0.0], dtype=np.float64),
++        "d2": np.array([0.0, 0.4], dtype=np.float64),
++    }
++    kw = _build_flat_inputs_from_clauses(clauses, signal_values)
++    # bar 0: clause 0 = 0.7, clause 1 = 0.0
++    compute_composite_at_bar_jit(
++        0,
++        kw["clause_weights"],
++        kw["dir_weights_flat"],
++        kw["dir_offsets"],
++        kw["dir_signal_idx"],
++        kw["gate_offsets"],
++        kw["gate_signal_idx"],
++        kw["unique_signal_matrix"],
++        kw["clause_score_buffer"],
++    )
++    assert kw["clause_score_buffer"][0] == 0.7
++    assert kw["clause_score_buffer"][1] == 0.0
++    # bar 1: clause 0 = 0.0 (上書き), clause 1 = 0.4 (上書き)
++    compute_composite_at_bar_jit(
++        1,
++        kw["clause_weights"],
++        kw["dir_weights_flat"],
++        kw["dir_offsets"],
++        kw["dir_signal_idx"],
++        kw["gate_offsets"],
++        kw["gate_signal_idx"],
++        kw["unique_signal_matrix"],
++        kw["clause_score_buffer"],
++    )
++    assert kw["clause_score_buffer"][0] == 0.0
++    assert kw["clause_score_buffer"][1] == 0.4
++
++
++def test_jit_kernel_active_clause_parity_zero_threshold() -> None:
++    """exact `!= 0.0` で純 Python compute_clause_score と判定一致 (T037)."""
++    clauses = (
++        ClauseConfig(
++            directional=(SignalConfig(name="d1", weight=1.0),),
++            local_gate=(),
++            weight=1.0,
++        ),
++        ClauseConfig(
++            directional=(SignalConfig(name="d2", weight=1.0),),
++            local_gate=(),
++            weight=1.0,
++        ),
++    )
++    signal_values = {
++        "d1": np.array([0.7, 0.0, 1e-300], dtype=np.float64),
++        "d2": np.array([0.0, 0.5, 0.0], dtype=np.float64),
++    }
++    kw = _build_flat_inputs_from_clauses(clauses, signal_values)
++
++    for idx in range(3):
++        compute_composite_at_bar_jit(
++            idx,
++            kw["clause_weights"],
++            kw["dir_weights_flat"],
++            kw["dir_offsets"],
++            kw["dir_signal_idx"],
++            kw["gate_offsets"],
++            kw["gate_signal_idx"],
++            kw["unique_signal_matrix"],
++            kw["clause_score_buffer"],
++        )
++        _, py_clause_scores = _python_composite_at_bar(
++            clauses, signal_values, idx
++        )
++        # exact != 0.0 parity (T037 semantics)
++        for ci in range(2):
++            jit_active = kw["clause_score_buffer"][ci] != 0.0
++            py_active = py_clause_scores[ci] != 0.0
++            assert jit_active == py_active, (
++                f"idx={idx} ci={ci}: jit_score={kw['clause_score_buffer'][ci]} "
++                f"vs py_score={py_clause_scores[ci]}"
++            )
++
++
++def test_jit_kernel_zero_neighborhood_signed_zero_parity() -> None:
++    """V13 (Round 1 Warning 2): ゼロ近傍ケースの T037 exact parity.
++
++    決定的ケースで純 Python と kernel の `clause_score != 0.0` 判定が一致:
++      - case A: +0.0 と -0.0 が混在する weights × values
++      - case B: 極小値 1e-320 (subnormal) 入力で aggregate allclose かつ T037 判定一致
++      - case C: 0.0 - 0.0 で対消失する weights × values (cancellation 狙い)
++    """
++    # ----- case A: +0.0 / -0.0 混在 -----
++    clauses_a = (
++        ClauseConfig(
++            directional=(
++                SignalConfig(name="dp", weight=1.0),
++                SignalConfig(name="dn", weight=-1.0),
++            ),
++            local_gate=(),
++            weight=1.0,
++        ),
++    )
++    signal_values_a = {
++        "dp": np.array([0.0], dtype=np.float64),  # +0.0
++        "dn": np.array([-0.0], dtype=np.float64),  # -0.0
++    }
++    kw_a = _build_flat_inputs_from_clauses(clauses_a, signal_values_a)
++    compute_composite_at_bar_jit(
++        0,
++        kw_a["clause_weights"],
++        kw_a["dir_weights_flat"],
++        kw_a["dir_offsets"],
++        kw_a["dir_signal_idx"],
++        kw_a["gate_offsets"],
++        kw_a["gate_signal_idx"],
++        kw_a["unique_signal_matrix"],
++        kw_a["clause_score_buffer"],
++    )
++    _, py_cs_a = _python_composite_at_bar(clauses_a, signal_values_a, 0)
++    # T037 exact parity: != 0.0 判定が一致
++    assert (kw_a["clause_score_buffer"][0] != 0.0) == (py_cs_a[0] != 0.0)
++
++    # ----- case B: subnormal 1e-320 -----
++    clauses_b = (
++        ClauseConfig(
++            directional=(SignalConfig(name="d1", weight=1.0),),
++            local_gate=(),
++            weight=1.0,
++        ),
++    )
++    signal_values_b = {
++        "d1": np.array([1e-320], dtype=np.float64),  # subnormal
++    }
++    kw_b = _build_flat_inputs_from_clauses(clauses_b, signal_values_b)
++    composite_b = compute_composite_at_bar_jit(
++        0,
++        kw_b["clause_weights"],
++        kw_b["dir_weights_flat"],
++        kw_b["dir_offsets"],
++        kw_b["dir_signal_idx"],
++        kw_b["gate_offsets"],
++        kw_b["gate_signal_idx"],
++        kw_b["unique_signal_matrix"],
++        kw_b["clause_score_buffer"],
++    )
++    py_c_b, py_cs_b = _python_composite_at_bar(clauses_b, signal_values_b, 0)
++    assert np.allclose(composite_b, py_c_b, atol=1e-6, rtol=0)
++    # T037 exact parity
++    assert (kw_b["clause_score_buffer"][0] != 0.0) == (py_cs_b[0] != 0.0)
++
++    # ----- case C: 対消失 (cancellation) -----
++    # 1*0.5 + (-1)*0.5 = 0.0 を狙う
++    clauses_c = (
++        ClauseConfig(
++            directional=(
++                SignalConfig(name="dp", weight=1.0),
++                SignalConfig(name="dn", weight=-1.0),
++            ),
++            local_gate=(),
++            weight=1.0,
++        ),
++    )
++    signal_values_c = {
++        "dp": np.array([0.5], dtype=np.float64),
++        "dn": np.array([0.5], dtype=np.float64),
++    }
++    kw_c = _build_flat_inputs_from_clauses(clauses_c, signal_values_c)
++    composite_c = compute_composite_at_bar_jit(
++        0,
++        kw_c["clause_weights"],
++        kw_c["dir_weights_flat"],
++        kw_c["dir_offsets"],
++        kw_c["dir_signal_idx"],
++        kw_c["gate_offsets"],
++        kw_c["gate_signal_idx"],
++        kw_c["unique_signal_matrix"],
++        kw_c["clause_score_buffer"],
++    )
++    py_c_c, py_cs_c = _python_composite_at_bar(clauses_c, signal_values_c, 0)
++    assert np.allclose(composite_c, py_c_c, atol=1e-6, rtol=0)
++    assert (kw_c["clause_score_buffer"][0] != 0.0) == (py_cs_c[0] != 0.0)
+diff --git a/tests/dsl/test_strategy.py b/tests/dsl/test_strategy.py
+index 9669fc4..30ca107 100644
+--- a/tests/dsl/test_strategy.py
++++ b/tests/dsl/test_strategy.py
+@@ -387,3 +387,284 @@ def test_active_clause_indices_returns_frozenset_immutable() -> None:
+     assert isinstance(s, frozenset)
+     # 外部参照からは mutate 不能 (frozenset は add/remove なし)
+     assert not hasattr(s, "add")
++
++
++# ---------------------------------------------------------------------------
++# T053: prepare() の事前検証 + Numba kernel 用 PreparedSignals 拡張
++# devnotes/20260427-1723-composite-numba-jit/detailed-design.md 施策 3
++# ---------------------------------------------------------------------------
++
++
++import numpy as np  # noqa: E402
++import pytest  # noqa: E402
++
++
++class _AllBarsEvaluator:
++    """evaluate_all_bars を実装した stub. T053 の prepare() path 用.
++
++    signal_returns: signal name -> ndarray (or list-like). prepare() からは
++    name 単位で配列を返す。len は基本 bars と同長だが、length-mismatch テスト
++    では意図的に bars 長と異なる長さにする。
++    """
++
++    def __init__(
++        self,
++        signal_returns: dict[str, np.ndarray],
++        force_length: int | None = None,
++    ) -> None:
++        self._signal_returns = signal_returns
++        self._force_length = force_length
++
++    def evaluate(
++        self, bars: list[PriceBar], idx: int, signal: SignalConfig
++    ) -> float:
++        return float(self._signal_returns[signal.name][idx])
++
++    def evaluate_all_bars(
++        self, bars: list[PriceBar], signal: SignalConfig
++    ) -> np.ndarray:
++        arr = self._signal_returns[signal.name]
++        if self._force_length is not None:
++            return np.asarray(arr[: self._force_length], dtype=np.float64)
++        # bars 長で切り詰め (= 一致)
++        return np.asarray(arr[: len(bars)], dtype=np.float64)
++
++
++def _mk_genome_two_clauses_shared_signal() -> Genome:
++    """同じ (name, params) の signal を 2 clause に出す Genome.
++
++    unique_signal_matrix dedup の検証用。
++    """
++    return Genome(
++        name="g_shared",
++        units=1000,
++        clauses=(
++            ClauseConfig(
++                directional=(
++                    SignalConfig(name="F1", weight=1.0, params={"n": 5}),
++                ),
++                local_gate=(),
++                weight=1.0,
++            ),
++            ClauseConfig(
++                directional=(
++                    # 同 (name, params) - 共有キャッシュ対象
++                    SignalConfig(name="F1", weight=0.5, params={"n": 5}),
++                    SignalConfig(name="F2", weight=1.0),
++                ),
++                local_gate=(),
++                weight=1.0,
++            ),
++        ),
++        position=PositionConfig(
++            entry_threshold=0.3,
++            exit_threshold=0.1,
++            max_pos=1,
++            time_stop_min=0,
++        ),
++        risk=RiskConfig(stop_atr=2.0, take_atr=3.0),
++    )
++
++
++def _mk_bars(n: int) -> list[PriceBar]:
++    return [_bar(i) for i in range(n)]
++
++
++def test_prepared_signals_unique_signal_matrix_dedupes_shared_primitives() -> None:
++    """V (T053): 同 (name, params) を 2 clause に出すと unique_signal_matrix
++    の行数が 2 ではなく 1 になる (arrays dict 共有キャッシュ不変条件)."""
++    n_bars = 5
++    g = _mk_genome_two_clauses_shared_signal()
++    sig_returns = {
++        "F1": np.linspace(0.1, 0.5, n_bars),
++        "F2": np.linspace(0.2, 0.6, n_bars),
++    }
++    evaluator = _AllBarsEvaluator(sig_returns)
++    strat = DslStrategy(g, evaluator)
++    strat.prepare(_mk_bars(n_bars))
++    prepared = strat._prepared
++    assert prepared is not None
++    # 2 clause に F1 が登場するが unique key は (F1, n=5) と F2 の 2 個のみ
++    assert prepared.unique_signal_matrix.shape == (2, n_bars)
++    # arrays dict も同 invariant
++    assert len(prepared.arrays) == 2
++
++
++def test_prepared_signals_dir_offsets_csr_form() -> None:
++    """V (T053): dir_offsets が CSR 形式: offsets[ci+1] - offsets[ci] = 当該
++    clause の dir signal 数."""
++    n_bars = 5
++    g = _mk_genome_two_clauses_shared_signal()
++    sig_returns = {
++        "F1": np.linspace(0.1, 0.5, n_bars),
++        "F2": np.linspace(0.2, 0.6, n_bars),
++    }
++    evaluator = _AllBarsEvaluator(sig_returns)
++    strat = DslStrategy(g, evaluator)
++    strat.prepare(_mk_bars(n_bars))
++    prepared = strat._prepared
++    assert prepared is not None
++    # clause 0: directional 1 個 (F1)
++    # clause 1: directional 2 個 (F1, F2)
++    assert prepared.dir_offsets.tolist() == [0, 1, 3]
++    assert (
++        prepared.dir_offsets[1] - prepared.dir_offsets[0]
++        == len(g.clauses[0].directional)
++    )
++    assert (
++        prepared.dir_offsets[2] - prepared.dir_offsets[1]
++        == len(g.clauses[1].directional)
++    )
++    # gate 側はどちらも 0 個
++    assert prepared.gate_offsets.tolist() == [0, 0, 0]
++
++
++def test_prepared_signals_dtypes_are_float64_int64() -> None:
++    """V (T053): kernel と契約する dtype が明示 float64 / int64."""
++    n_bars = 3
++    g = _mk_genome_two_clauses_shared_signal()
++    sig_returns = {
++        "F1": np.array([0.1, 0.2, 0.3]),
++        "F2": np.array([0.4, 0.5, 0.6]),
++    }
++    evaluator = _AllBarsEvaluator(sig_returns)
++    strat = DslStrategy(g, evaluator)
++    strat.prepare(_mk_bars(n_bars))
++    prepared = strat._prepared
++    assert prepared is not None
++    assert prepared.clause_weights.dtype == np.float64
++    assert prepared.dir_weights_flat.dtype == np.float64
++    assert prepared.unique_signal_matrix.dtype == np.float64
++    assert prepared.clause_score_buffer.dtype == np.float64
++    assert prepared.dir_offsets.dtype == np.int64
++    assert prepared.dir_signal_idx.dtype == np.int64
++    assert prepared.gate_offsets.dtype == np.int64
++    assert prepared.gate_signal_idx.dtype == np.int64
++
++
++def test_prepare_on_evaluator_without_evaluate_all_bars_returns_no_op() -> None:
++    """V (T053): evaluate_all_bars を持たない evaluator では prepare() が
++    no-op になり _prepared は None のまま (既存挙動の保持)."""
++    g = _mk_genome()
++    # ScriptedEvaluator は evaluate_all_bars を実装しない
++    evaluator = ScriptedEvaluator({0: {"F1": 0.5}})
++    strat = DslStrategy(g, evaluator)
++    strat.prepare(_mk_bars(3))
++    assert strat._prepared is None
++
++
++def test_prepare_raises_on_clauses_empty() -> None:
++    """V10 (Round 1 Critical 1): Genome.clauses == () で prepare() が
++    ValueError を raise する (compute_composite() の契約を prepared path
++    でも維持する)."""
++    g = Genome(
++        name="g_empty",
++        units=1000,
++        clauses=(),
++        position=PositionConfig(
++            entry_threshold=0.3,
++            exit_threshold=0.1,
++            max_pos=1,
++            time_stop_min=0,
++        ),
++        risk=RiskConfig(stop_atr=2.0, take_atr=3.0),
++    )
++    # evaluator は evaluate_all_bars を持つもの (= prepared path に入る)
++    evaluator = _AllBarsEvaluator({})
++    strat = DslStrategy(g, evaluator)
++    with pytest.raises(ValueError, match="clauses must not be empty"):
++        strat.prepare(_mk_bars(3))
++
++
++def test_prepare_raises_on_evaluate_all_bars_length_mismatch() -> None:
++    """V11 (Round 1 Critical 3): evaluate_all_bars が len(bars) と異なる
++    長さを返すと prepare() が ValueError を raise (fail-fast)."""
++    n_bars = 5
++    g = _mk_genome()
++    # 4 個 (短い) を返す
++    evaluator_short = _AllBarsEvaluator(
++        {"F1": np.array([0.1, 0.2, 0.3, 0.4, 0.5])},
++        force_length=4,
++    )
++    strat = DslStrategy(g, evaluator_short)
++    with pytest.raises(ValueError, match="evaluate_all_bars returned shape"):
++        strat.prepare(_mk_bars(n_bars))
++
++    # 6 個 (長い) を返す
++    evaluator_long = _AllBarsEvaluator(
++        {"F1": np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7])},
++        force_length=6,
++    )
++    strat2 = DslStrategy(g, evaluator_long)
++    with pytest.raises(ValueError, match="evaluate_all_bars returned shape"):
++        strat2.prepare(_mk_bars(n_bars))
++
++
++def test_on_bar_prepared_path_matches_unprepared_path() -> None:
++    """V2 / V3 (T053): prepared path (Numba kernel) と unprepared path
++    (純 Python) が同 genome × 同 signal values で完全一致する.
++
++    composite (allclose) と active_clause_indices (exact) の両方を検証。
++    """
++    n_bars = 20
++    rng = np.random.default_rng(20260427)
++    g = _mk_two_clause_genome()
++    sig_returns = {
++        "F1": rng.uniform(-1.0, 1.0, n_bars),
++        "F2": rng.uniform(-1.0, 1.0, n_bars),
++    }
++
++    # === prepared path (kernel) ===
++    eval_prepared = _AllBarsEvaluator(sig_returns)
++    strat_prepared = DslStrategy(g, eval_prepared)
++    strat_prepared.prepare(_mk_bars(n_bars))
++    snapshot = _empty_snapshot()
++    composites_prepared: list[float] = []
++    for i in range(n_bars):
++        # composite を観測するには内部 buffer を経由する必要があるため、
++        # ここでは on_bar が同じ entry/exit を返すことを確認 + buffer 検査
++        strat_prepared.on_bar(_bar(i), snapshot)
++        # buffer の最新値は最後に呼ばれた kernel の出力
++        composites_prepared.append(
++            sum(
++                cw * cs
++                for cw, cs in zip(
++                    strat_prepared._prepared.clause_weights,
++                    strat_prepared._prepared.clause_score_buffer,
++                    strict=True,
++                )
++            )
++        )
++
++    # === unprepared path (pure Python) ===
++    eval_unprepared = ScriptedEvaluator(
++        {
++            i: {"F1": float(sig_returns["F1"][i]), "F2": float(sig_returns["F2"][i])}
++            for i in range(n_bars)
++        }
++    )
++    strat_unprepared = DslStrategy(g, eval_unprepared)
++    # prepare() は呼ばない (= unprepared path)
++    for i in range(n_bars):
++        strat_unprepared.on_bar(_bar(i), snapshot)
++
++    # active_clause_indices が完全一致 (T037 exact parity)
++    assert (
++        strat_prepared.active_clause_indices
++        == strat_unprepared.active_clause_indices
++    )
++
++
++def test_on_bar_unprepared_path_unchanged() -> None:
++    """V (T053): unprepared path (live feed) は既存挙動を維持 (Numba 経由なし)."""
++    g = _mk_genome()
++    evaluator = ScriptedEvaluator({0: {"F1": 0.5}, 1: {"F1": 0.0}})
++    strat = DslStrategy(g, evaluator)
++    # prepare() を呼ばない → _prepared is None
++    assert strat._prepared is None
++    orders_0 = strat.on_bar(_bar(0), _empty_snapshot())
++    # composite = 1.0 * 0.5 / 1.0 = 0.5 >= 0.3 → open_long
++    assert len(orders_0) == 1
++    assert orders_0[0].kind == "open_long"
++    # active clause が記録される
++    assert 0 in strat.active_clause_indices
+diff --git a/uv.lock b/uv.lock
+index 1e80668..ed0450c 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -455,6 +455,34 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/aa/47/7d70414bcdbb3bc1f458a8d10558f00bbfdb24e5a11740fc8197e12c3255/librt-0.9.0-cp314-cp314t-win_arm64.whl", hash = "sha256:a4b25c6c25cac5d0d9d6d6da855195b254e0021e513e0249f0e3b444dc6e0e61", size = 50009, upload-time = "2026-04-09T16:06:07.995Z" },
+ ]
+ 
++[[package]]
++name = "llvmlite"
++version = "0.47.0"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/01/88/a8952b6d5c21e74cbf158515b779666f692846502623e9e3c39d8e8ba25f/llvmlite-0.47.0.tar.gz", hash = "sha256:62031ce968ec74e95092184d4b0e857e444f8fdff0b8f9213707699570c33ccc", size = 193614, upload-time = "2026-03-31T18:29:53.497Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/34/0b/b9d1911cfefa61399821dfb37f486d83e0f42630a8d12f7194270c417002/llvmlite-0.47.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:74090f0dcfd6f24ebbef3f21f11e38111c4d7e6919b54c4416e1e357c3446b07", size = 37232770, upload-time = "2026-03-31T18:28:26.765Z" },
++    { url = "https://files.pythonhosted.org/packages/46/27/5799b020e4cdfb25a7c951c06a96397c135efcdc21b78d853bbd9c814c7d/llvmlite-0.47.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:ca14f02e29134e837982497959a8e2193d6035235de1cb41a9cb2bd6da4eedbb", size = 56275177, upload-time = "2026-03-31T18:28:31.01Z" },
++    { url = "https://files.pythonhosted.org/packages/7e/51/48a53fedf01cb1f3f43ef200be17ebf83c8d9a04018d3783c1a226c342c2/llvmlite-0.47.0-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:12a69d4bb05f402f30477e21eeabe81911e7c251cecb192bed82cd83c9db10d8", size = 55128631, upload-time = "2026-03-31T18:28:36.046Z" },
++    { url = "https://files.pythonhosted.org/packages/a2/50/59227d06bdc96e23322713c381af4e77420949d8cd8a042c79e0043096cc/llvmlite-0.47.0-cp311-cp311-win_amd64.whl", hash = "sha256:c37d6eb7aaabfa83ab9c2ff5b5cdb95a5e6830403937b2c588b7490724e05327", size = 38138400, upload-time = "2026-03-31T18:28:40.076Z" },
++    { url = "https://files.pythonhosted.org/packages/fa/48/4b7fe0e34c169fa2f12532916133e0b219d2823b540733651b34fdac509a/llvmlite-0.47.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:306a265f408c259067257a732c8e159284334018b4083a9e35f67d19792b164f", size = 37232769, upload-time = "2026-03-31T18:28:43.735Z" },
++    { url = "https://files.pythonhosted.org/packages/e6/4b/e3f2cd17822cf772a4a51a0a8080b0032e6d37b2dbe8cfb724eac4e31c52/llvmlite-0.47.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:5853bf26160857c0c2573415ff4efe01c4c651e59e2c55c2a088740acfee51cd", size = 56275178, upload-time = "2026-03-31T18:28:48.342Z" },
++    { url = "https://files.pythonhosted.org/packages/b6/55/a3b4a543185305a9bdf3d9759d53646ed96e55e7dfd43f53e7a421b8fbae/llvmlite-0.47.0-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:003bcf7fa579e14db59c1a1e113f93ab8a06b56a4be31c7f08264d1d4072d077", size = 55128632, upload-time = "2026-03-31T18:28:52.901Z" },
++    { url = "https://files.pythonhosted.org/packages/2f/f5/d281ae0f79378a5a91f308ea9fdb9f9cc068fddd09629edc0725a5a8fde1/llvmlite-0.47.0-cp312-cp312-win_amd64.whl", hash = "sha256:f3079f25bdc24cd9d27c4b2b5e68f5f60c4fdb7e8ad5ee2b9b006007558f9df7", size = 38138692, upload-time = "2026-03-31T18:28:57.147Z" },
++    { url = "https://files.pythonhosted.org/packages/77/6f/4615353e016799f80fa52ccb270a843c413b22361fadda2589b2922fb9b0/llvmlite-0.47.0-cp313-cp313-macosx_12_0_arm64.whl", hash = "sha256:a3c6a735d4e1041808434f9d440faa3d78d9b4af2ee64d05a66f351883b6ceec", size = 37232771, upload-time = "2026-03-31T18:29:01.324Z" },
++    { url = "https://files.pythonhosted.org/packages/31/b8/69f5565f1a280d032525878a86511eebed0645818492feeb169dfb20ae8e/llvmlite-0.47.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:2699a74321189e812d476a43d6d7f652f51811e7b5aad9d9bba842a1c7927acb", size = 56275178, upload-time = "2026-03-31T18:29:05.748Z" },
++    { url = "https://files.pythonhosted.org/packages/d6/da/b32cafcb926fb0ce2aa25553bf32cb8764af31438f40e2481df08884c947/llvmlite-0.47.0-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:6c6951e2b29930227963e53ee152441f0e14be92e9d4231852102d986c761e40", size = 55128632, upload-time = "2026-03-31T18:29:11.235Z" },
++    { url = "https://files.pythonhosted.org/packages/46/9f/4898b44e4042c60fafcb1162dfb7014f6f15b1ec19bf29cfea6bf26df90d/llvmlite-0.47.0-cp313-cp313-win_amd64.whl", hash = "sha256:c2e9adf8698d813a9a5efb2d4370caf344dbc1e145019851fee6a6f319ba760e", size = 38138695, upload-time = "2026-03-31T18:29:15.43Z" },
++    { url = "https://files.pythonhosted.org/packages/1c/d4/33c8af00f0bf6f552d74f3a054f648af2c5bc6bece97972f3bfadce4f5ec/llvmlite-0.47.0-cp314-cp314-macosx_12_0_arm64.whl", hash = "sha256:de966c626c35c9dff5ae7bf12db25637738d0df83fc370cf793bc94d43d92d14", size = 37232773, upload-time = "2026-03-31T18:29:19.453Z" },
++    { url = "https://files.pythonhosted.org/packages/64/1d/a760e993e0c0ba6db38d46b9f48f6c7dceb8ac838824997fb9e25f97bc04/llvmlite-0.47.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:ddbccff2aeaff8670368340a158abefc032fe9b3ccf7d9c496639263d00151aa", size = 56275176, upload-time = "2026-03-31T18:29:24.149Z" },
++    { url = "https://files.pythonhosted.org/packages/84/3b/e679bc3b29127182a7f4aa2d2e9e5bea42adb93fb840484147d59c236299/llvmlite-0.47.0-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:d4a7b778a2e144fc64468fb9bf509ac1226c9813a00b4d7afea5d988c4e22fca", size = 55128631, upload-time = "2026-03-31T18:29:29.536Z" },
++    { url = "https://files.pythonhosted.org/packages/be/f7/19e2a09c62809c9e63bbd14ce71fb92c6ff7b7b3045741bb00c781efc3c9/llvmlite-0.47.0-cp314-cp314-win_amd64.whl", hash = "sha256:694e3c2cdc472ed2bd8bd4555ca002eec4310961dd58ef791d508f57b5cc4c94", size = 39153826, upload-time = "2026-03-31T18:29:33.681Z" },
++    { url = "https://files.pythonhosted.org/packages/40/a1/581a8c707b5e80efdbbe1dd94527404d33fe50bceb71f39d5a7e11bd57b7/llvmlite-0.47.0-cp314-cp314t-macosx_12_0_arm64.whl", hash = "sha256:92ec8a169a20b473c1c54d4695e371bde36489fc1efa3688e11e99beba0abf9c", size = 37232772, upload-time = "2026-03-31T18:29:37.952Z" },
++    { url = "https://files.pythonhosted.org/packages/11/03/16090dd6f74ba2b8b922276047f15962fbeea0a75d5601607edb301ba945/llvmlite-0.47.0-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:fa1cbd800edd3b20bc141521f7fd45a6185a5b84109aa6855134e81397ffe72b", size = 56275178, upload-time = "2026-03-31T18:29:42.58Z" },
++    { url = "https://files.pythonhosted.org/packages/f5/cb/0abf1dd4c5286a95ffe0c1d8c67aec06b515894a0dd2ac97f5e27b82ab0b/llvmlite-0.47.0-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:f6725179b89f03b17dabe236ff3422cb8291b4c1bf40af152826dfd34e350ae8", size = 55128632, upload-time = "2026-03-31T18:29:46.939Z" },
++    { url = "https://files.pythonhosted.org/packages/4f/79/d3bbab197e86e0ff4f9c07122895b66a3e0d024247fcff7f12c473cb36d9/llvmlite-0.47.0-cp314-cp314t-win_amd64.whl", hash = "sha256:6842cf6f707ec4be3d985a385ad03f72b2d724439e118fcbe99b2929964f0453", size = 39153839, upload-time = "2026-03-31T18:29:51.004Z" },
++]
++
+ [[package]]
+ name = "mako"
+ version = "1.3.11"
+@@ -600,6 +628,38 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/79/7b/2c79738432f5c924bef5071f933bcc9efd0473bac3b4aa584a6f7c1c8df8/mypy_extensions-1.1.0-py3-none-any.whl", hash = "sha256:1be4cccdb0f2482337c4743e60421de3a356cd97508abadd57d47403e94f5505", size = 4963, upload-time = "2025-04-22T14:54:22.983Z" },
+ ]
+ 
++[[package]]
++name = "numba"
++version = "0.65.1"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "llvmlite" },
++    { name = "numpy" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/f6/c5/db2ac3685833d626c0dcae6bd2330cd68433e1fd248d15f70998160d3ad7/numba-0.65.1.tar.gz", hash = "sha256:19357146c32fe9ed25059ab915e8465fb13951cf6b0aace3826b76886373ab23", size = 2765600, upload-time = "2026-04-24T02:02:56.551Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/96/b3/650500c2eab4534d98e9166f4298e0f3c69c742afdf24e6eabccd1f16ad8/numba-0.65.1-cp311-cp311-macosx_12_0_arm64.whl", hash = "sha256:7020d74b19cdb8cff16506542fdd510756e28c5e7f3bd0b7f574f0f42272fcd9", size = 2680563, upload-time = "2026-04-24T02:02:18.414Z" },
++    { url = "https://files.pythonhosted.org/packages/44/0b/0615dbedb98f5b32a35a53290fbdc6e22306968109278d7e58df82d7a9f6/numba-0.65.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:f80ed83774b5173abd6581cd8d2165d1d38e13d2e5c8155c0c0b421784745420", size = 3745018, upload-time = "2026-04-24T02:02:20.252Z" },
++    { url = "https://files.pythonhosted.org/packages/49/aa/4361698f35bf63bff67dfe6c90493731177f48ede954f77b0588731537bc/numba-0.65.1-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:7ed425a43b0a5f9772f2f4e2dd0bbd12eabecae1af0b24efcfd4e053f012aac6", size = 3450962, upload-time = "2026-04-24T02:02:22.449Z" },
++    { url = "https://files.pythonhosted.org/packages/bd/9a/af61ec03b3116c161fd7a06b9e8a265729a8718458333e8ffbb06d9a3978/numba-0.65.1-cp311-cp311-win_amd64.whl", hash = "sha256:df40a5028a975b9ea66f6a2a3f7abbdbd541a863070e34ed367aff21141248e4", size = 2747417, upload-time = "2026-04-24T02:02:24.43Z" },
++    { url = "https://files.pythonhosted.org/packages/57/bc/76f8f8c5cf9adee47fdb7bbb03be8900f76f902d451d7477cf12b845e1de/numba-0.65.1-cp312-cp312-macosx_12_0_arm64.whl", hash = "sha256:ac3f1e77c352dd0ea9712732c2d8f9ca507717435eec5b5013bf138ac33c4a08", size = 2681371, upload-time = "2026-04-24T02:02:26.105Z" },
++    { url = "https://files.pythonhosted.org/packages/69/47/a415af0283e4db0398104c6d1c11c9861a98dc67a7aa442a7769ed5d6196/numba-0.65.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:52bc6f3ceb8fcaff9b2ae26b4c6b1e9fee39db8d355534c0fe4f39a901246b84", size = 3802467, upload-time = "2026-04-24T02:02:27.712Z" },
++    { url = "https://files.pythonhosted.org/packages/46/36/246f73ec99cfeab2f2cb2ce7d4218766cc36a2da418901223f4f4da9c813/numba-0.65.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:90ca10b3463bae0bd70589726fe3c77d01d6b5fc86bee54bcdf9fb6b47c28977", size = 3502628, upload-time = "2026-04-24T02:02:29.763Z" },
++    { url = "https://files.pythonhosted.org/packages/db/9e/3c679b2ee078425b9e99a91e44f8d132a6830d8ccce5227bc5e9181aeed8/numba-0.65.1-cp312-cp312-win_amd64.whl", hash = "sha256:5971c632be2a2351500431f46213821dba8d02b18a9f7d02fd36bd2743e41a6a", size = 2750611, upload-time = "2026-04-24T02:02:31.477Z" },
++    { url = "https://files.pythonhosted.org/packages/79/37/14a4579049c1eb673afd0de0cb4842982acd55b9ce2643e763db858bcea0/numba-0.65.1-cp313-cp313-macosx_12_0_arm64.whl", hash = "sha256:1735c15c1134a5108b4d6a5c77fc0947924ea066a738dc09a52008c13df9cad3", size = 2681344, upload-time = "2026-04-24T02:02:33.65Z" },
++    { url = "https://files.pythonhosted.org/packages/a0/22/b8d873f6466b20aa563fc9b33acd48dec89a07803ddaa2f1c8ca1cd33126/numba-0.65.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:c09f49117ef255e1f1c6dad0c7a1ed39868243862a73be5706793241a3755f1b", size = 3810619, upload-time = "2026-04-24T02:02:36.041Z" },
++    { url = "https://files.pythonhosted.org/packages/62/08/e16a8b5d9a018962ebb5c66be662317cde32b9f5dab08441f90bed5522fb/numba-0.65.1-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:594a8680b3fadac99e97e489b1fd89007177e5336713745c3b769528c635a464", size = 3509783, upload-time = "2026-04-24T02:02:38.245Z" },
++    { url = "https://files.pythonhosted.org/packages/fd/a5/03c970d57f4c1741354837353ce39fb5206952ae1dba8922d29c86f64805/numba-0.65.1-cp313-cp313-win_amd64.whl", hash = "sha256:85be74c0d036842699a30058f82fb88fc5ffdc59f7615cab5792ea92914c9b62", size = 2750534, upload-time = "2026-04-24T02:02:39.903Z" },
++    { url = "https://files.pythonhosted.org/packages/4f/2e/8aed9b726d9ba5f11ad287645fd479e88278db3060a25cb1225d730eb2b7/numba-0.65.1-cp314-cp314-macosx_12_0_arm64.whl", hash = "sha256:33f5eb68eb1c843511615d14663ce60258525d6a4c65ab040e2c2b0c4cf17450", size = 2681554, upload-time = "2026-04-24T02:02:41.812Z" },
++    { url = "https://files.pythonhosted.org/packages/87/96/f3eb235fafa82a34e2ab5dd7dc9ffff998ebf5f0bbc23fa56a96aeb44da6/numba-0.65.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:71e73029bf53a62cc6afcf96be4bd942290d8b4c55f0a454fb536158115790f7", size = 3779602, upload-time = "2026-04-24T02:02:43.726Z" },
++    { url = "https://files.pythonhosted.org/packages/09/90/b0f09b48752d23640b8284f22aa597737e8adaddc7fbfacc4708b7f73a4c/numba-0.65.1-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:3a07635e0be926b9bdbffb09137c230fb13f6ec0e564914ba937cee12ce3eb35", size = 3479532, upload-time = "2026-04-24T02:02:45.427Z" },
++    { url = "https://files.pythonhosted.org/packages/56/46/3f7fc04fb853559e74b210e0b62c19974ec844cefec611f9e535f4da3761/numba-0.65.1-cp314-cp314-win_amd64.whl", hash = "sha256:2a20fcdabdefbdacf88d85caf70c3b18c4bcb7ebb8f82e6a19486383dd26ab63", size = 2752637, upload-time = "2026-04-24T02:02:47.664Z" },
++    { url = "https://files.pythonhosted.org/packages/81/7b/c1a341a9067367778f4152a5f01061cf281fb09582c92c510ec4918cabf6/numba-0.65.1-cp314-cp314t-macosx_12_0_arm64.whl", hash = "sha256:548dd4b3a4508d5062768d1514b2cd7b015f9a25ec7af651c50dee243965e652", size = 2684600, upload-time = "2026-04-24T02:02:49.653Z" },
++    { url = "https://files.pythonhosted.org/packages/03/36/98ddbcf3e4f04a6dd07e1c67249955920579ba4af6bb6868e3088f4ed282/numba-0.65.1-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:78abc28feff2c2ff8307fff3975b6438352759c9acb797ecd6b1fb6e7e39e31d", size = 3817198, upload-time = "2026-04-24T02:02:51.266Z" },
++    { url = "https://files.pythonhosted.org/packages/a3/83/0dad21057ece5a835599f5d24099b091703995e23dbbf894f259e91c010b/numba-0.65.1-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:ee7676cb389555805f9b9a1840cbcd1ea6c8bd5376ab6918e3a29c5ea1dbda20", size = 3533862, upload-time = "2026-04-24T02:02:52.987Z" },
++    { url = "https://files.pythonhosted.org/packages/32/36/8be7118ffd4c8440881046eac3d0982cc5ab42909508cf5d67024d62a2e4/numba-0.65.1-cp314-cp314t-win_amd64.whl", hash = "sha256:20609346e3bd75204950dcbbfe383a8d7dbf4902f442aedbf00f97fef4aa8f38", size = 2758237, upload-time = "2026-04-24T02:02:54.612Z" },
++]
++
+ [[package]]
+ name = "numpy"
+ version = "2.4.4"
+@@ -1536,6 +1596,7 @@ dependencies = [
+     { name = "alembic" },
+     { name = "diskcache" },
+     { name = "httpx" },
++    { name = "numba" },
+     { name = "numpy" },
+     { name = "pandas" },
+     { name = "psutil" },
+@@ -1567,6 +1628,7 @@ requires-dist = [
+     { name = "alembic" },
+     { name = "diskcache" },
+     { name = "httpx" },
++    { name = "numba", specifier = ">=0.61" },
+     { name = "numpy", specifier = ">=1.26" },
+     { name = "pandas", specifier = ">=2.2" },
+     { name = "psutil", specifier = ">=5.9" },

@@ -1,0 +1,406 @@
+diff --git a/docs/alpha_factory/primitives.md b/docs/alpha_factory/primitives.md
+index f9b60d6..1723377 100644
+--- a/docs/alpha_factory/primitives.md
++++ b/docs/alpha_factory/primitives.md
+@@ -73,7 +73,8 @@ T012 で `src/alpha_factory/primitives/modulator_generic.py` に実装・登録
+ - M1 / M6: ATR / ADX は Wilder smoothing で過去のみ参照
+ - M2: bar_time の hour/minute から計算、deterministic
+ - M3: bar close 時点のスプレッドを参照（signal at close → execute next bar open 規約と整合、MVP では proxy）
+-- M4: `event.actual` を一切参照せず `event.event_time` のみ使用。`EconomicEventSnapshot.as_of` を cap として `event_time > as_of` のイベントを除外
++- M4: `event.actual` を一切参照せず `event.event_time` のみ使用。`EconomicEventSnapshot.as_of` を 1 段目 cap として `event_time > as_of` のイベントを除外。**T039: `as_of_strict=True` のとき per-bar gate (二段目) を有効化し、各 bar で `event_time > bar_time[i]` のイベントを bisect で除外** (causality 強制)。
++- P10: M4 と同方針 (USD/CAD 限定 NA セッション内 gate)。`as_of_strict` で per-bar gate を有効化 (T039)。
+ - M5: `bisect_left(pubs, bar_time)` の strict less than で同時刻 publication を除外
+ 
+ **snapshot 欠損時挙動**:
+@@ -89,7 +90,7 @@ T012 で `src/alpha_factory/primitives/modulator_generic.py` に実装・登録
+ T011 既存テストは新フィールドを指定せず `EvaluationContext(bars=..., idx=..., pair=..., params=...)` で構築するため壊れない（frozen dataclass への default 値付きフィールド追加は backward-compatible）。
+ 
+ **snapshot dataclass** (`_base.py`):
+-- `EconomicEventSnapshot(calendar, as_of)` — `EconomicCalendar` と as-of cap のペア
++- `EconomicEventSnapshot(calendar, as_of, as_of_strict=False)` — `EconomicCalendar` と as-of cap のペア。`as_of_strict=True` で M4/P10 の per-bar gate を有効化 (T039、production 推奨)。`__post_init__` で `as_of` の tz-aware を強制 (T039 fail-fast)。
+ - `VixSeriesSnapshot(observations: tuple[(datetime, float), ...])` — publication_ts_utc 昇順、`__post_init__` で tz-aware 強制 + 昇順検証。`lookup(bar_time)` は strict less than で O(N) lookup（compute_all_bars 内で繰り返し呼ぶ場合は呼び出し側で pubs 列をキャッシュして bisect_left を直接使うこと、M5 実装参照）
+ 
+ **実行タイミング規約**: zenigame-fx の backtest は `signal at close → execute next bar open`。
+diff --git a/src/alpha_factory/primitives/_base.py b/src/alpha_factory/primitives/_base.py
+index 7fcdd14..84d6cab 100644
+--- a/src/alpha_factory/primitives/_base.py
++++ b/src/alpha_factory/primitives/_base.py
+@@ -118,26 +118,42 @@ class ParamSpec:
+ 
+ @dataclass(frozen=True)
+ class EconomicEventSnapshot:
+-    """as-of <= bar_time までに既知のイベントスケジュールのスナップショット (T012)。
++    """as-of <= bar_time までに既知のイベントスケジュールのスナップショット (T012/T039)。
+ 
+-    look-ahead bias 回避のため、primitive (M4) は本 snapshot を介して
++    look-ahead bias 回避のため、primitive (M4/P10) は本 snapshot を介して
+     EconomicCalendar を参照する。`as_of` は「この時刻までに schedule が既知」と
+     みなす上限であり、`event.event_time > as_of` のイベントは
+     「bar_time 時点で未知」として primitive 側で除外される。
+ 
+-    MVP 仮定:
++    T039: 未来 schedule 漏洩を構造的に防ぐため `as_of_strict` フラグを追加。
++    True の場合、primitive 側で **bar_time ごと** に
++    `event_time <= min(as_of, bar_time[i])` の二段ガードを適用する
++    (per-bar gate)。False (legacy MVP) では従来通り as_of cap のみ。
++    `__post_init__` で `as_of` の tz-aware を強制する (T039)。
++
++    MVP 仮定 (legacy, as_of_strict=False):
+         - backtest 使用時は calendar 全量を `as_of=+∞ 近似` で渡す運用を許容
+-          （schedule の late amendment leakage は別 TODO で厳密化）
+         - compute は `event.event_time` のみ参照、`event.actual` には触れない
+-          （FX live 時点で未公開のため）
+ 
+     Attributes:
+         calendar: EconomicCalendar インスタンス
+-        as_of: この時刻までに schedule が既知（future schedule の leakage を防ぐ cap）
++        as_of: この時刻までに schedule が既知（future schedule の leakage を防ぐ cap）。
++            tz-aware datetime 必須 (T039 強制)。
++        as_of_strict: True で per-bar gate を有効化 (production 推奨)。
++            既存 backtest の MVP 互換性のため default False。
+     """
+ 
+     calendar: EconomicCalendar
+     as_of: datetime
++    as_of_strict: bool = False
++
++    def __post_init__(self) -> None:
++        """T039: as_of の tz-aware を強制 (fail-fast)."""
++        if self.as_of.tzinfo is None:
++            raise ValueError(
++                "EconomicEventSnapshot.as_of must be tz-aware datetime; "
++                f"got naive {self.as_of!r}"
++            )
+ 
+ 
+ @dataclass(frozen=True)
+diff --git a/src/alpha_factory/primitives/modulator_generic.py b/src/alpha_factory/primitives/modulator_generic.py
+index e0fae86..4f72fb2 100644
+--- a/src/alpha_factory/primitives/modulator_generic.py
++++ b/src/alpha_factory/primitives/modulator_generic.py
+@@ -270,6 +270,9 @@ def _m4_compute_all(ctx: EvaluationContext) -> np.ndarray:
+ 
+     look-ahead 回避:
+         - `event.event_time > snapshot.as_of` のイベントは未知として除外
++        - T039: `snapshot.as_of_strict=True` の場合 **per-bar gate** を有効化、
++          `event.event_time > bar_time[i]` のイベントは bar i では除外
++          (二段ガード)。snapshot.as_of は最大 cap として残る
+         - `event.actual` は参照しない（schedule のみ使用）
+ 
+     snapshot=None:
+@@ -299,6 +302,7 @@ def _m4_compute_all(ctx: EvaluationContext) -> np.ndarray:
+     snapshot = ctx.event_snapshot
+     calendar = snapshot.calendar
+     as_of = snapshot.as_of
++    strict = snapshot.as_of_strict
+ 
+     pair = ctx.pair
+     try:
+@@ -306,6 +310,8 @@ def _m4_compute_all(ctx: EvaluationContext) -> np.ndarray:
+     except Exception:
+         base, quote = ("", "")
+     as_of_ts = as_of.timestamp()
++    # T039: as_of で 1 段目 cap (relevant 集合を絞り込み)。
++    # 2 段目 cap (per-bar) は strict=True のときに bar ループ内で適用する。
+     relevant_events = [
+         e for e in calendar.events
+         if e.impact >= min_impact
+@@ -318,9 +324,23 @@ def _m4_compute_all(ctx: EvaluationContext) -> np.ndarray:
+     event_times = np.array(
+         [e.event_time.timestamp() for e in relevant_events], dtype=np.float64
+     )
++    # T039: per-bar gate のため event_times は昇順ソート (bisect 化のため)
++    if strict:
++        event_times = np.sort(event_times)
+     for i in range(length):
+         t = ctx.bars[i].bar_time.timestamp()
+-        diff_min = float(np.min(np.abs(event_times - t)) / 60.0)
++        if strict:
++            # T039 per-bar gate: bar_time までに既知のイベントのみ採用 (二段目 cap)。
++            # bisect_right で event_time <= t のスライスを O(log E) で取得。
++            cutoff = int(np.searchsorted(event_times, t, side="right"))
++            if cutoff == 0:
++                # bar i 時点で既知イベントなし → gate 開放
++                out[i] = 1.0
++                continue
++            available = event_times[:cutoff]
++        else:
++            available = event_times
++        diff_min = float(np.min(np.abs(available - t)) / 60.0)
+         raw = (window_min - diff_min) / (scale_min + _EPS)
+         out[i] = 1.0 - float(sigmoid(raw))
+     return out
+diff --git a/src/alpha_factory/primitives/pair_specific.py b/src/alpha_factory/primitives/pair_specific.py
+index 63c1bcb..72d10a1 100644
+--- a/src/alpha_factory/primitives/pair_specific.py
++++ b/src/alpha_factory/primitives/pair_specific.py
+@@ -710,6 +710,9 @@ P9_SPEC = PrimitiveSpec(
+ def _p10_compute_all(ctx: EvaluationContext) -> np.ndarray:
+     """NA セッション (12:00-21:00 UTC) かつ USD/CAD イベント ±window 分以内で
+     gate を抑制 (0 寄り)。NA セッション外は 1.0 (gate open) で M4 と切り分け。
++
++    T039 per-bar gate: snapshot.as_of_strict=True の場合、各 bar の bar_time までに
++    既知のイベントのみを採用 (二段ガード)。M4 と同じ実装方針 (bisect で O(log E))。
+     """
+     n = len(ctx.bars)
+     na_lo, na_hi = 12 * 60.0, 21 * 60.0
+@@ -723,6 +726,7 @@ def _p10_compute_all(ctx: EvaluationContext) -> np.ndarray:
+     snapshot = ctx.event_snapshot
+     calendar = snapshot.calendar
+     as_of_ts = snapshot.as_of.timestamp()
++    strict = snapshot.as_of_strict
+     min_impact = _get_int_param(ctx.params, "min_impact")
+     window_min = _get_float_param(ctx.params, "window_min")
+     scale_min = _get_float_param(ctx.params, "scale_min")
+@@ -739,13 +743,23 @@ def _p10_compute_all(ctx: EvaluationContext) -> np.ndarray:
+     event_times = np.array(
+         [e.event_time.timestamp() for e in relevant], dtype=np.float64
+     )
++    if strict:
++        event_times = np.sort(event_times)
+     for i in range(n):
+         m = _bar_time_minutes_utc(ctx.bars[i])
+         if not (na_lo <= m < na_hi):
+             out[i] = 1.0
+             continue
+         t = ctx.bars[i].bar_time.timestamp()
+-        diff_min = float(np.min(np.abs(event_times - t)) / 60.0)
++        if strict:
++            cutoff = int(np.searchsorted(event_times, t, side="right"))
++            if cutoff == 0:
++                out[i] = 1.0
++                continue
++            available = event_times[:cutoff]
++        else:
++            available = event_times
++        diff_min = float(np.min(np.abs(available - t)) / 60.0)
+         raw = (window_min - diff_min) / (scale_min + _EPS)
+         out[i] = 1.0 - float(sigmoid(raw))
+     return out
+diff --git a/tests/alpha_factory/primitives/test_modulator_generic.py b/tests/alpha_factory/primitives/test_modulator_generic.py
+index 2bacbea..d92b23c 100644
+--- a/tests/alpha_factory/primitives/test_modulator_generic.py
++++ b/tests/alpha_factory/primitives/test_modulator_generic.py
+@@ -38,6 +38,7 @@ from src.alpha_factory.primitives.modulator_generic import (
+     M5_SPEC,
+     M6_SPEC,
+     MODULATOR_SPECS,
++    _m4_compute_all,
+     all_specs,
+ )
+ from src.domain.price import Ohlc, PriceBar
+@@ -789,3 +790,120 @@ class _NoWarnContext:
+ 
+ def _no_warn_context():
+     return _NoWarnContext()
++
++
++# ---------------------------------------------------------------------------
++# T039: EconomicEventSnapshot as_of_strict + per-bar gate (M4)
++# ---------------------------------------------------------------------------
++
++
++class TestT039EconomicEventSnapshotStrict:
++    """as_of_strict=True で per-bar gate が有効化される (M4 causality)."""
++
++    def test_snapshot_requires_tz_aware_as_of(self) -> None:
++        """as_of が naive datetime なら ValueError (T039 fail-fast)."""
++        with pytest.raises(ValueError, match="must be tz-aware"):
++            EconomicEventSnapshot(
++                calendar=EconomicCalendar([]),
++                as_of=datetime(2026, 1, 1),  # naive
++            )
++
++    def test_snapshot_default_as_of_strict_is_false(self) -> None:
++        """既存 backtest の MVP 互換性のため default は False."""
++        snap = EconomicEventSnapshot(
++            calendar=EconomicCalendar([]),
++            as_of=datetime(2026, 1, 1, tzinfo=UTC),
++        )
++        assert snap.as_of_strict is False
++
++    def test_m4_strict_excludes_future_event_per_bar(self) -> None:
++        """T039 per-bar gate: as_of_strict=True で event_time > bar_time[i] の
++        イベントを bar i では除外する。strict=True と False で出力が変わる
++        ことを示し、causality 強制が機能していることを確認."""
++        bars = _build_bars(8, seed=39)  # 8 hourly bars
++        # 1 日目最後の bar より後 (2 日目以降) に発生する future event を仕込む
++        future_event = EconomicEvent(
++            event_time=bars[-1].bar_time + timedelta(hours=1),
++            currency="USD",
++            name="FOMC",
++            impact=3,
++        )
++        # 1 日目早い時点に既知 event
++        past_event = EconomicEvent(
++            event_time=bars[0].bar_time + timedelta(minutes=10),
++            currency="EUR",
++            name="ECB",
++            impact=3,
++        )
++        events = [past_event, future_event]
++        # legacy MVP (as_of=+∞ 近似) では future event も全 bar に影響
++        snap_legacy = EconomicEventSnapshot(
++            calendar=EconomicCalendar(events),
++            as_of=datetime(2099, 1, 1, tzinfo=UTC),
++            as_of_strict=False,
++        )
++        # strict (per-bar gate) では future event は当該 bar で除外
++        snap_strict = EconomicEventSnapshot(
++            calendar=EconomicCalendar(events),
++            as_of=datetime(2099, 1, 1, tzinfo=UTC),
++            as_of_strict=True,
++        )
++        out_legacy = _m4_compute_all(
++            _ctx(bars, 0, M4_SPEC, pair="EUR_USD", event_snapshot=snap_legacy)
++        )
++        out_strict = _m4_compute_all(
++            _ctx(bars, 0, M4_SPEC, pair="EUR_USD", event_snapshot=snap_strict)
++        )
++        # 全 bar 同じ shape
++        assert out_legacy.shape == out_strict.shape
++        # 1 つ以上の bar で値が異なる (future event の影響が strict で消える)
++        assert not np.array_equal(out_legacy, out_strict)
++
++    def test_m4_strict_legacy_equivalence_when_no_future_events(self) -> None:
++        """全 event が全 bar より過去なら legacy と strict は同じ出力."""
++        bars = _build_bars(8, seed=39)
++        # 全 bar より前の event のみ
++        past_event = EconomicEvent(
++            event_time=bars[0].bar_time - timedelta(hours=10),
++            currency="USD",
++            name="past",
++            impact=3,
++        )
++        snap_legacy = EconomicEventSnapshot(
++            calendar=EconomicCalendar([past_event]),
++            as_of=datetime(2099, 1, 1, tzinfo=UTC),
++            as_of_strict=False,
++        )
++        snap_strict = EconomicEventSnapshot(
++            calendar=EconomicCalendar([past_event]),
++            as_of=datetime(2099, 1, 1, tzinfo=UTC),
++            as_of_strict=True,
++        )
++        out_legacy = _m4_compute_all(
++            _ctx(bars, 0, M4_SPEC, pair="EUR_USD", event_snapshot=snap_legacy)
++        )
++        out_strict = _m4_compute_all(
++            _ctx(bars, 0, M4_SPEC, pair="EUR_USD", event_snapshot=snap_strict)
++        )
++        assert np.array_equal(out_legacy, out_strict)
++
++    def test_m4_strict_first_bar_with_no_known_events_returns_one(self) -> None:
++        """全 event が当該 bar より未来なら gate=1.0 (開放)."""
++        bars = _build_bars(8, seed=39)
++        # 全 event が bar より遥か未来
++        future_event = EconomicEvent(
++            event_time=bars[-1].bar_time + timedelta(days=10),
++            currency="USD",
++            name="future",
++            impact=3,
++        )
++        snap = EconomicEventSnapshot(
++            calendar=EconomicCalendar([future_event]),
++            as_of=datetime(2099, 1, 1, tzinfo=UTC),
++            as_of_strict=True,
++        )
++        out = _m4_compute_all(
++            _ctx(bars, 0, M4_SPEC, pair="EUR_USD", event_snapshot=snap)
++        )
++        # 全 bar で gate 開放 (1.0)
++        assert np.allclose(out, 1.0)
+diff --git a/tests/alpha_factory/primitives/test_pair_specific.py b/tests/alpha_factory/primitives/test_pair_specific.py
+index 5782b9d..3937386 100644
+--- a/tests/alpha_factory/primitives/test_pair_specific.py
++++ b/tests/alpha_factory/primitives/test_pair_specific.py
+@@ -44,6 +44,7 @@ from src.alpha_factory.primitives.pair_specific import (
+     P11_SPEC,
+     P12_SPEC,
+     PAIR_SPECIFIC_SPECS,
++    _p10_compute_all,
+     all_specs,
+ )
+ from src.domain.price import Ohlc, PriceBar
+@@ -1167,3 +1168,81 @@ class TestViaRegistryEvaluator:
+                 assert -1e-9 <= val <= 1.0 + 1e-9
+             else:
+                 assert -1.0 - 1e-9 <= val <= 1.0 + 1e-9
++
++
++# ---------------------------------------------------------------------------
++# T039: P10 NADataProximityGate per-bar gate (as_of_strict=True)
++# ---------------------------------------------------------------------------
++
++
++class TestT039P10AsOfStrict:
++    """P10 でも as_of_strict=True で per-bar gate が有効化される (causality)."""
++
++    def _bar_at_na_session(self, base_time: datetime) -> list[PriceBar]:
++        """NA セッション内 (15:00 UTC) を含む bars を生成 (P10 gate 適用範囲)."""
++        # 15:00, 15:01, 15:02, ... 8 bars within NA session 12-21 UTC
++        na_base = base_time.replace(hour=15, minute=0, second=0, microsecond=0)
++        return _build_bars(8, seed=39, base_time=na_base, step=timedelta(minutes=1))
++
++    def test_p10_strict_excludes_future_event_per_bar(self) -> None:
++        bars = self._bar_at_na_session(datetime(2026, 1, 5, tzinfo=UTC))
++        # past event 30 分前、future event 4 分後 (= 5 番目の bar の直前)。
++        # legacy では future が bars[1..3] で最近接、strict では future event が
++        # 当該 bar より未来の bars (bars[0..3]) では除外され、past を使う。
++        past_event = EconomicEvent(
++            event_time=bars[0].bar_time - timedelta(minutes=30),
++            currency="USD",
++            name="past_NFP",
++            impact=3,
++        )
++        future_event = EconomicEvent(
++            event_time=bars[0].bar_time + timedelta(minutes=4),
++            currency="USD",
++            name="future_FOMC",
++            impact=3,
++        )
++        snap_legacy = EconomicEventSnapshot(
++            calendar=EconomicCalendar([past_event, future_event]),
++            as_of=datetime(2099, 1, 1, tzinfo=UTC),
++            as_of_strict=False,
++        )
++        snap_strict = EconomicEventSnapshot(
++            calendar=EconomicCalendar([past_event, future_event]),
++            as_of=datetime(2099, 1, 1, tzinfo=UTC),
++            as_of_strict=True,
++        )
++        out_legacy = _p10_compute_all(
++            _ctx(bars, 0, P10_SPEC, pair="USD_CAD", event_snapshot=snap_legacy)
++        )
++        out_strict = _p10_compute_all(
++            _ctx(bars, 0, P10_SPEC, pair="USD_CAD", event_snapshot=snap_strict)
++        )
++        assert out_legacy.shape == out_strict.shape
++        assert not np.array_equal(out_legacy, out_strict)
++
++    def test_p10_strict_no_future_returns_legacy_equiv(self) -> None:
++        """全 event が全 bar より過去なら legacy と strict は同じ."""
++        bars = self._bar_at_na_session(datetime(2026, 1, 5, tzinfo=UTC))
++        past_event = EconomicEvent(
++            event_time=bars[0].bar_time - timedelta(hours=2),
++            currency="USD",
++            name="past",
++            impact=3,
++        )
++        snap_legacy = EconomicEventSnapshot(
++            calendar=EconomicCalendar([past_event]),
++            as_of=datetime(2099, 1, 1, tzinfo=UTC),
++            as_of_strict=False,
++        )
++        snap_strict = EconomicEventSnapshot(
++            calendar=EconomicCalendar([past_event]),
++            as_of=datetime(2099, 1, 1, tzinfo=UTC),
++            as_of_strict=True,
++        )
++        out_legacy = _p10_compute_all(
++            _ctx(bars, 0, P10_SPEC, pair="USD_CAD", event_snapshot=snap_legacy)
++        )
++        out_strict = _p10_compute_all(
++            _ctx(bars, 0, P10_SPEC, pair="USD_CAD", event_snapshot=snap_strict)
++        )
++        assert np.array_equal(out_legacy, out_strict)

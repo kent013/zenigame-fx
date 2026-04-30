@@ -1,0 +1,808 @@
+diff --git a/docs/alpha_factory/concepts/calibrate-gate.md b/docs/alpha_factory/concepts/calibrate-gate.md
+index 0750446..a8ac997 100644
+--- a/docs/alpha_factory/concepts/calibrate-gate.md
++++ b/docs/alpha_factory/concepts/calibrate-gate.md
+@@ -35,9 +35,62 @@ dead-band 付き P 項のみの PID-like。
+ - **calibrate.enabled = false**: 完全停止可能（手動チューニング期間用）
+ - **dry-run**: 提案のみで yaml 不変
+ 
++## drift 監視 (T040 Phase 1)
++
++calibrate-gate 実行ごとに `reports/calibrate-gate/history.jsonl` へ JSONL 1 行
++追記する (fail-open)。直近 N Run の drift 集計 + アラート判定 CLI:
++
++```bash
++uv run python scripts/alpha_factory/calibrate_gate_drift.py --last 5
++```
++
++### JSONL schema (1 record / 1 line)
++
++```json
++{
++  "run_id": "run_20260426_001234",
++  "applied_at": "2026-04-26T00:12:34+09:00",
++  "n_rows_total": 96,
++  "n_rows_used": 80,
++  "aggregation_mode": "last_k_generations",
++  "aggregation_window": 5,
++  "actual_pass_rate": 0.123,
++  "target_pass_rate": 0.15,
++  "tol": 0.05,
++  "prev_threshold": 0.0977,
++  "new_threshold": 0.0934,
++  "delta": -0.0043,
++  "decision": "loosen",
++  "var_fitness_pen": 1.23e-2,
++  "clamped_by_delta": false,
++  "clamped_by_floor_or_ceiling": false,
++  "stage_b_pass_count": 2,
++  "stage_c_pass_count": 0,
++  "live_criteria_gap": 0.31
++}
++```
++
++主キー: `(run_id, applied_at)`。SSoT は `src/alpha_factory/calibrate_gate_history.py`
++の `HistoryRecord` dataclass。
++
++### drift 判定ルール (Phase 1 conservative)
++
++| ルール | 既定閾値 | 意味 |
++|--------|---------|------|
++| `monotone_tighten` | `n_tighten >= 4 / N` | tighten 連発 = target が高すぎる可能性 |
++| `monotone_loosen` | `n_loosen >= 4 / N` | loosen 連発 = target が低すぎる可能性 |
++| `threshold_clamp` | `n_clamped >= 3 / N` | floor/ceiling 貼り付き = control law 飽和 |
++| `pass_rate_band_excess` | `\|gap\| > 2 × tol` | actual と target の累積逸脱 |
++
++CLI exit code: `0` no alert / `10` drift detected (warning) / `2` invalid arg / `3` history 不在。
++
++**判断主体は人間**。本機構は記録・集計のみで calibrate-gate 制御則
++(上記 "判断アルゴリズム") は変更しない (C3 collider bias 回避)。
++
+ ## 関連
+ 
+ - 親概念: [stage-gates.md](../stage-gates.md)
+-- 実装: `scripts/alpha_factory/calibrate_gate.py`
++- 実装: `scripts/alpha_factory/calibrate_gate.py` / `calibrate_gate_drift.py`
++- 永続化: `src/alpha_factory/calibrate_gate_history.py`
+ - skill: `.claude/skills/zenigame-fx-calibrate-gate/SKILL.md`
+ - 接続: `improve-cycle` Phase 2.5
+diff --git a/scripts/alpha_factory/calibrate_gate.py b/scripts/alpha_factory/calibrate_gate.py
+index c95582d..4bbcff5 100644
+--- a/scripts/alpha_factory/calibrate_gate.py
++++ b/scripts/alpha_factory/calibrate_gate.py
+@@ -44,6 +44,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
+ if str(REPO_ROOT) not in sys.path:
+     sys.path.insert(0, str(REPO_ROOT))
+ 
++from datetime import UTC  # noqa: E402
++
+ from src.alpha_factory.calibrate_gate import (  # noqa: E402
+     CalibrateConfig,
+     ConfigError,
+@@ -55,6 +57,11 @@ from src.alpha_factory.calibrate_gate import (  # noqa: E402
+     load_calibrate_config,
+     validate_schema,
+ )
++from src.alpha_factory.calibrate_gate_history import (  # noqa: E402
++    DEFAULT_HISTORY_PATH,
++    HistoryRecord,
++    append_record,
++)
+ 
+ logger = structlog.get_logger("calibrate_gate")
+ 
+@@ -375,6 +382,40 @@ def main(argv: list[str] | None = None) -> int:
+             new_threshold=decision.new_threshold,
+         )
+ 
++    # ---- T040: drift 監視用 JSONL 履歴に append (fail-open) ----
++    # dry_run でも観察記録は残す (制御則は変えない、観察のみ)。
++    try:
++        from datetime import datetime
++        record = HistoryRecord(
++            run_id=run_id_resolved,
++            applied_at=datetime.now(UTC).isoformat(),
++            n_rows_total=sample.n_rows_total,
++            n_rows_used=sample.n_rows_used,
++            aggregation_mode=sample.mode,
++            aggregation_window=sample.window,
++            actual_pass_rate=sample.actual_pass_rate,
++            target_pass_rate=config.target_pass_rate,
++            tol=config.pass_rate_tolerance_abs,
++            prev_threshold=config.prev_threshold,
++            new_threshold=decision.new_threshold,
++            delta=decision.delta,
++            decision=decision.decision,
++            var_fitness_pen=decision.var_fitness_pen,
++            clamped_by_delta=decision.clamped_by_delta,
++            clamped_by_floor_or_ceiling=decision.clamped_by_floor_or_ceiling,
++            stage_b_pass_count=monitoring.stage_b_pass_count,
++            stage_c_pass_count=monitoring.stage_c_pass_count,
++            live_criteria_gap=monitoring.live_criteria_gap,
++        )
++        history_path = REPO_ROOT / DEFAULT_HISTORY_PATH
++        append_record(record, history_path)
++    except Exception as e:
++        # fail-open: history 永続化エラーは calibrate-gate を止めない
++        print(
++            f"[warn] calibrate_gate.history append failed: {e}",
++            file=sys.stderr,
++        )
++
+     # ---- human-readable report ----
+     report = _format_report(
+         run_id=run_id_resolved,
+diff --git a/scripts/alpha_factory/calibrate_gate_drift.py b/scripts/alpha_factory/calibrate_gate_drift.py
+new file mode 100644
+index 0000000..98c5471
+--- /dev/null
++++ b/scripts/alpha_factory/calibrate_gate_drift.py
+@@ -0,0 +1,155 @@
++"""T040: calibrate-gate drift monitor CLI.
++
++直近 N Run の calibrate-gate decision を ``reports/calibrate-gate/history.jsonl``
++から読み、Markdown テーブル + drift 警告を stdout に出力する。
++
++判断主体は人間。本機構は記録・集計のみ (C3 collider bias 回避)。
++
++Usage:
++    uv run python scripts/alpha_factory/calibrate_gate_drift.py --last 5
++    uv run python scripts/alpha_factory/calibrate_gate_drift.py --last 10 \\
++        --history reports/calibrate-gate/history.jsonl
++
++Exit codes:
++    0  drift なし (アラート 0 件)
++    10 drift あり (1 件以上のアラート発火 = warning)
++    2  invalid arg
++    3  history 不在
++"""
++
++from __future__ import annotations
++
++import argparse
++import sys
++from pathlib import Path
++
++REPO_ROOT = Path(__file__).resolve().parents[2]
++if str(REPO_ROOT) not in sys.path:
++    sys.path.insert(0, str(REPO_ROOT))
++
++from src.alpha_factory.calibrate_gate_history import (  # noqa: E402
++    DEFAULT_HISTORY_PATH,
++    DriftAnalysis,
++    HistoryRecord,
++    compute_drift,
++    read_history,
++)
++
++EXIT_OK = 0
++EXIT_INVALID_ARG = 2
++EXIT_NO_HISTORY = 3
++EXIT_DRIFT_DETECTED = 10
++
++
++def _format_table(records: list[HistoryRecord]) -> str:
++    """Markdown テーブルで直近 N record を整形."""
++    if not records:
++        return "(no records)"
++    lines = [
++        "| run_id | decision | prev_t | new_t | actual | target | gap | clamped |",
++        "|--------|---------|-------|------|--------|--------|-----|---------|",
++    ]
++    for r in records:
++        gap = r.actual_pass_rate - r.target_pass_rate
++        clamp = "✓" if r.clamped_by_floor_or_ceiling else ""
++        lines.append(
++            f"| {r.run_id} | {r.decision} | "
++            f"{r.prev_threshold:.4f} | {r.new_threshold:.4f} | "
++            f"{r.actual_pass_rate:.3f} | {r.target_pass_rate:.3f} | "
++            f"{gap:+.3f} | {clamp} |"
++        )
++    return "\n".join(lines)
++
++
++def _format_alerts(analysis: DriftAnalysis, last_n: int) -> str:
++    """drift アラート行を整形."""
++    a = analysis.alerts
++    lines = [
++        "Alerts:",
++        f"- monotone tighten: {analysis.n_tighten}/{last_n} "
++        f"{'(ALERT)' if a.monotone_tighten else ''}",
++        f"- monotone loosen: {analysis.n_loosen}/{last_n} "
++        f"{'(ALERT)' if a.monotone_loosen else ''}",
++        f"- threshold clamp: {analysis.n_clamped_floor_ceiling}/{last_n} "
++        f"{'(ALERT)' if a.threshold_clamp else ''}",
++        f"- pass_rate band excess (max |gap|={analysis.max_abs_gap:.3f}) "
++        f"{'(ALERT)' if a.pass_rate_band_excess else ''}",
++    ]
++    return "\n".join(lines)
++
++
++def _parse_args(argv: list[str] | None) -> argparse.Namespace:
++    parser = argparse.ArgumentParser(
++        description="T040: calibrate-gate threshold drift monitor",
++    )
++    parser.add_argument(
++        "--last",
++        type=int,
++        default=5,
++        help="末尾 N record を集計対象とする (default: 5)",
++    )
++    parser.add_argument(
++        "--history",
++        type=Path,
++        default=REPO_ROOT / DEFAULT_HISTORY_PATH,
++        help="history JSONL path (default: reports/calibrate-gate/history.jsonl)",
++    )
++    parser.add_argument(
++        "--monotone-threshold",
++        type=int,
++        default=4,
++        help="N record 中 K 回以上 tighten/loosen でアラート (default: 4)",
++    )
++    parser.add_argument(
++        "--clamp-threshold",
++        type=int,
++        default=3,
++        help="N record 中 clamp が K 回以上でアラート (default: 3)",
++    )
++    parser.add_argument(
++        "--band-multiplier",
++        type=float,
++        default=2.0,
++        help="|actual-target| > band_multiplier * tol でアラート (default: 2.0)",
++    )
++    return parser.parse_args(argv)
++
++
++def main(argv: list[str] | None = None) -> int:
++    args = _parse_args(argv)
++    if args.last < 1:
++        print(
++            f"[error] --last must be >= 1: got {args.last}",
++            file=sys.stderr,
++        )
++        return EXIT_INVALID_ARG
++    if not args.history.exists():
++        print(
++            f"[error] history file not found: {args.history}",
++            file=sys.stderr,
++        )
++        return EXIT_NO_HISTORY
++
++    records = read_history(args.history, last_n=args.last)
++    if not records:
++        print("(history is empty)")
++        return EXIT_OK
++
++    analysis = compute_drift(
++        records,
++        monotone_threshold=args.monotone_threshold,
++        clamp_threshold=args.clamp_threshold,
++        band_multiplier=args.band_multiplier,
++    )
++    last_n = len(records)
++    print(f"## Calibrate Gate Drift (last {last_n} runs)")
++    print()
++    print(_format_table(records))
++    print()
++    print(_format_alerts(analysis, last_n))
++    print()
++    return EXIT_DRIFT_DETECTED if analysis.alerts.any_alert else EXIT_OK
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/src/alpha_factory/calibrate_gate_history.py b/src/alpha_factory/calibrate_gate_history.py
+new file mode 100644
+index 0000000..0449031
+--- /dev/null
++++ b/src/alpha_factory/calibrate_gate_history.py
+@@ -0,0 +1,180 @@
++"""T040: calibrate-gate decision history (JSONL append-only persistence).
++
++`scripts/alpha_factory/calibrate_gate.py` が threshold 調整 decision を
++``reports/calibrate-gate/history.jsonl`` に追記し、`calibrate_gate_drift.py`
++CLI が直近 N Run を集計・drift 警告を出力する。
++
++判断主体は人間。本機構は記録・集計のみ (C3 collider bias 回避、calibrate-gate
++制御則は変更しない)。
++
++詳細: devnotes/20260426-0024-calibrate-gate-drift-monitor/
++"""
++
++from __future__ import annotations
++
++import json
++from collections.abc import Iterable
++from dataclasses import asdict, dataclass
++from pathlib import Path
++
++__all__ = [
++    "DEFAULT_HISTORY_PATH",
++    "DriftAlerts",
++    "DriftAnalysis",
++    "HistoryRecord",
++    "append_record",
++    "compute_drift",
++    "read_history",
++]
++
++DEFAULT_HISTORY_PATH: Path = Path("reports/calibrate-gate/history.jsonl")
++
++
++@dataclass(frozen=True)
++class HistoryRecord:
++    """1 Run 1 record. JSONL の 1 行 = 1 dict (asdict で serialize)."""
++
++    run_id: str
++    applied_at: str  # ISO 8601 (JST or UTC、loader 側の責務)
++    n_rows_total: int
++    n_rows_used: int
++    aggregation_mode: str
++    aggregation_window: int
++    actual_pass_rate: float
++    target_pass_rate: float
++    tol: float
++    prev_threshold: float
++    new_threshold: float
++    delta: float
++    decision: str
++    var_fitness_pen: float | None
++    clamped_by_delta: bool
++    clamped_by_floor_or_ceiling: bool
++    stage_b_pass_count: int
++    stage_c_pass_count: int
++    live_criteria_gap: float | None
++
++
++def append_record(record: HistoryRecord, path: Path = DEFAULT_HISTORY_PATH) -> None:
++    """JSONL 1 行を append-only で追記する (parent dir 自動作成)。"""
++    path.parent.mkdir(parents=True, exist_ok=True)
++    line = json.dumps(asdict(record), ensure_ascii=False, default=str)
++    with path.open("a", encoding="utf-8") as f:
++        f.write(line)
++        f.write("\n")
++
++
++def read_history(
++    path: Path = DEFAULT_HISTORY_PATH,
++    last_n: int | None = None,
++) -> list[HistoryRecord]:
++    """JSONL を読み HistoryRecord list を返す。
++
++    Args:
++        path: history.jsonl path (default: reports/calibrate-gate/history.jsonl)
++        last_n: 末尾 N 行のみ取得 (None なら全行)。
++
++    Returns:
++        新しい順ではなく **追記順** (古い→新しい) の list。
++        ファイル不在 / 空なら空 list。
++    """
++    if not path.exists():
++        return []
++    records: list[HistoryRecord] = []
++    with path.open(encoding="utf-8") as f:
++        for raw in f:
++            line = raw.strip()
++            if not line:
++                continue
++            try:
++                obj = json.loads(line)
++            except json.JSONDecodeError:
++                # 破損行は skip (defensive、ログ出力は CLI 側の責務)
++                continue
++            try:
++                records.append(HistoryRecord(**obj))
++            except TypeError:
++                # スキーマ不整合 (古い record / 新規 field 追加直後) は skip
++                continue
++    if last_n is not None and last_n >= 0:
++        records = records[-last_n:]
++    return records
++
++
++@dataclass(frozen=True)
++class DriftAlerts:
++    """drift 判定結果 (3 ルール)。1 つでも True で warning レベル."""
++
++    monotone_tighten: bool
++    monotone_loosen: bool
++    threshold_clamp: bool
++    pass_rate_band_excess: bool
++
++    @property
++    def any_alert(self) -> bool:
++        return (
++            self.monotone_tighten
++            or self.monotone_loosen
++            or self.threshold_clamp
++            or self.pass_rate_band_excess
++        )
++
++
++@dataclass(frozen=True)
++class DriftAnalysis:
++    """直近 N Run の drift 分析結果 (records + alerts + summary stats)."""
++
++    records: tuple[HistoryRecord, ...]
++    alerts: DriftAlerts
++    n_tighten: int
++    n_loosen: int
++    n_in_band: int
++    n_clamped_floor_ceiling: int
++    max_abs_gap: float
++
++
++def compute_drift(
++    records: Iterable[HistoryRecord],
++    *,
++    monotone_threshold: int = 4,
++    clamp_threshold: int = 3,
++    band_multiplier: float = 2.0,
++) -> DriftAnalysis:
++    """直近 N record から drift 判定を出す。
++
++    judgement rules (Phase 1 conservative):
++    - monotone_tighten: 直近 N で tighten が monotone_threshold 回以上
++    - monotone_loosen: 同上 loosen
++    - threshold_clamp: clamped_by_floor_or_ceiling が clamp_threshold 回以上
++    - pass_rate_band_excess: いずれかの record で |actual - target| > band_multiplier * tol
++    """
++    rec_tuple = tuple(records)
++    n_tighten = sum(1 for r in rec_tuple if r.decision == "tighten")
++    n_loosen = sum(1 for r in rec_tuple if r.decision == "loosen")
++    n_in_band = sum(1 for r in rec_tuple if r.decision == "in_band")
++    n_clamped = sum(
++        1 for r in rec_tuple if r.clamped_by_floor_or_ceiling
++    )
++    gaps = [r.actual_pass_rate - r.target_pass_rate for r in rec_tuple]
++    abs_gaps = [abs(g) for g in gaps]
++    max_abs_gap = max(abs_gaps) if abs_gaps else 0.0
++    band_excess = any(
++        abs(r.actual_pass_rate - r.target_pass_rate)
++        > band_multiplier * r.tol
++        for r in rec_tuple
++    )
++    alerts = DriftAlerts(
++        monotone_tighten=n_tighten >= monotone_threshold,
++        monotone_loosen=n_loosen >= monotone_threshold,
++        threshold_clamp=n_clamped >= clamp_threshold,
++        pass_rate_band_excess=band_excess,
++    )
++    return DriftAnalysis(
++        records=rec_tuple,
++        alerts=alerts,
++        n_tighten=n_tighten,
++        n_loosen=n_loosen,
++        n_in_band=n_in_band,
++        n_clamped_floor_ceiling=n_clamped,
++        max_abs_gap=max_abs_gap,
++    )
+diff --git a/tests/alpha_factory/test_calibrate_gate_history.py b/tests/alpha_factory/test_calibrate_gate_history.py
+new file mode 100644
+index 0000000..1668e48
+--- /dev/null
++++ b/tests/alpha_factory/test_calibrate_gate_history.py
+@@ -0,0 +1,191 @@
++"""T040: calibrate_gate_history unit tests."""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++import pytest
++
++from src.alpha_factory.calibrate_gate_history import (
++    DriftAlerts,
++    HistoryRecord,
++    append_record,
++    compute_drift,
++    read_history,
++)
++
++
++def _record(
++    *,
++    run_id: str = "run_test",
++    decision: str = "in_band",
++    actual: float = 0.15,
++    target: float = 0.15,
++    tol: float = 0.05,
++    prev_t: float = 0.10,
++    new_t: float = 0.10,
++    delta: float = 0.0,
++    clamped_floor_or_ceiling: bool = False,
++    var_fitness_pen: float | None = 0.01,
++) -> HistoryRecord:
++    return HistoryRecord(
++        run_id=run_id,
++        applied_at="2026-04-26T00:00:00+09:00",
++        n_rows_total=96,
++        n_rows_used=80,
++        aggregation_mode="last_k_generations",
++        aggregation_window=5,
++        actual_pass_rate=actual,
++        target_pass_rate=target,
++        tol=tol,
++        prev_threshold=prev_t,
++        new_threshold=new_t,
++        delta=delta,
++        decision=decision,
++        var_fitness_pen=var_fitness_pen,
++        clamped_by_delta=False,
++        clamped_by_floor_or_ceiling=clamped_floor_or_ceiling,
++        stage_b_pass_count=0,
++        stage_c_pass_count=0,
++        live_criteria_gap=0.3,
++    )
++
++
++class TestAppendAndRead:
++    def test_append_creates_parent_dir(self, tmp_path: Path) -> None:
++        path = tmp_path / "deep" / "nested" / "history.jsonl"
++        rec = _record(run_id="run_001")
++        append_record(rec, path)
++        assert path.exists()
++
++    def test_round_trip_single_record(self, tmp_path: Path) -> None:
++        path = tmp_path / "history.jsonl"
++        rec = _record(run_id="run_001", decision="tighten")
++        append_record(rec, path)
++        loaded = read_history(path)
++        assert len(loaded) == 1
++        assert loaded[0].run_id == "run_001"
++        assert loaded[0].decision == "tighten"
++
++    def test_append_multiple_preserves_order(self, tmp_path: Path) -> None:
++        path = tmp_path / "history.jsonl"
++        for i in range(5):
++            append_record(_record(run_id=f"run_{i:03d}"), path)
++        loaded = read_history(path)
++        assert [r.run_id for r in loaded] == [f"run_{i:03d}" for i in range(5)]
++
++    def test_read_history_missing_file_returns_empty(
++        self, tmp_path: Path
++    ) -> None:
++        loaded = read_history(tmp_path / "missing.jsonl")
++        assert loaded == []
++
++    def test_read_history_skips_corrupted_lines(
++        self, tmp_path: Path
++    ) -> None:
++        path = tmp_path / "history.jsonl"
++        path.parent.mkdir(parents=True, exist_ok=True)
++        good = json.dumps({**_record(run_id="ok").__dict__})
++        with path.open("w") as f:
++            f.write("not-json\n")
++            f.write(good + "\n")
++            f.write("\n")  # 空行も無視
++        loaded = read_history(path)
++        assert len(loaded) == 1
++        assert loaded[0].run_id == "ok"
++
++    def test_read_history_skips_schema_mismatch(self, tmp_path: Path) -> None:
++        path = tmp_path / "history.jsonl"
++        path.parent.mkdir(parents=True, exist_ok=True)
++        with path.open("w") as f:
++            # 必須 field 欠落 (古い record format)
++            f.write(json.dumps({"run_id": "incomplete"}) + "\n")
++            f.write(
++                json.dumps({**_record(run_id="ok").__dict__}) + "\n"
++            )
++        loaded = read_history(path)
++        assert len(loaded) == 1
++        assert loaded[0].run_id == "ok"
++
++    def test_last_n_filtering(self, tmp_path: Path) -> None:
++        path = tmp_path / "history.jsonl"
++        for i in range(10):
++            append_record(_record(run_id=f"run_{i:03d}"), path)
++        loaded = read_history(path, last_n=3)
++        assert len(loaded) == 3
++        assert [r.run_id for r in loaded] == [
++            "run_007", "run_008", "run_009"
++        ]
++
++
++class TestComputeDrift:
++    def test_no_records_returns_no_alerts(self) -> None:
++        analysis = compute_drift([])
++        assert analysis.alerts.any_alert is False
++        assert analysis.n_tighten == 0
++        assert analysis.n_loosen == 0
++        assert analysis.max_abs_gap == 0.0
++
++    def test_monotone_tighten_alerts_when_threshold_reached(self) -> None:
++        recs = [
++            _record(run_id=f"r{i}", decision="tighten") for i in range(4)
++        ]
++        recs.append(_record(run_id="r4", decision="in_band"))
++        analysis = compute_drift(recs, monotone_threshold=4)
++        assert analysis.alerts.monotone_tighten is True
++        assert analysis.alerts.monotone_loosen is False
++        assert analysis.alerts.any_alert is True
++
++    def test_monotone_loosen_alerts(self) -> None:
++        recs = [
++            _record(run_id=f"r{i}", decision="loosen") for i in range(5)
++        ]
++        analysis = compute_drift(recs, monotone_threshold=4)
++        assert analysis.alerts.monotone_loosen is True
++
++    def test_threshold_clamp_alerts(self) -> None:
++        recs = [
++            _record(run_id=f"r{i}", clamped_floor_or_ceiling=True)
++            for i in range(3)
++        ]
++        analysis = compute_drift(recs, clamp_threshold=3)
++        assert analysis.alerts.threshold_clamp is True
++
++    def test_band_excess_alerts_when_actual_outside(self) -> None:
++        # tol=0.05, target=0.15, actual=0.30 → gap=0.15 > 2*0.05=0.10
++        recs = [_record(actual=0.30, target=0.15, tol=0.05)]
++        analysis = compute_drift(recs)
++        assert analysis.alerts.pass_rate_band_excess is True
++
++    def test_no_alert_when_all_in_band_and_no_clamp(self) -> None:
++        recs = [
++            _record(run_id=f"r{i}", decision="in_band", actual=0.16)
++            for i in range(5)
++        ]
++        analysis = compute_drift(recs)
++        assert analysis.alerts.any_alert is False
++
++    def test_max_abs_gap_computed(self) -> None:
++        recs = [
++            _record(actual=0.10, target=0.15),  # gap -0.05
++            _record(actual=0.25, target=0.15),  # gap +0.10
++            _record(actual=0.18, target=0.15),  # gap +0.03
++        ]
++        analysis = compute_drift(recs)
++        assert analysis.max_abs_gap == pytest.approx(0.10)
++
++
++class TestDriftAlertsAnyAlert:
++    def test_all_false_means_no_alert(self) -> None:
++        a = DriftAlerts(False, False, False, False)
++        assert a.any_alert is False
++
++    def test_single_true_triggers_alert(self) -> None:
++        for fn in [
++            lambda: DriftAlerts(True, False, False, False),
++            lambda: DriftAlerts(False, True, False, False),
++            lambda: DriftAlerts(False, False, True, False),
++            lambda: DriftAlerts(False, False, False, True),
++        ]:
++            assert fn().any_alert is True
+diff --git a/tests/scripts/test_calibrate_gate_drift.py b/tests/scripts/test_calibrate_gate_drift.py
+new file mode 100644
+index 0000000..985525f
+--- /dev/null
++++ b/tests/scripts/test_calibrate_gate_drift.py
+@@ -0,0 +1,124 @@
++"""T040: calibrate_gate_drift CLI tests (subprocess + tmp history)."""
++
++from __future__ import annotations
++
++import json
++import subprocess
++import sys
++from pathlib import Path
++
++REPO_ROOT = Path(__file__).resolve().parents[2]
++SCRIPT = REPO_ROOT / "scripts" / "alpha_factory" / "calibrate_gate_drift.py"
++
++
++def _record_dict(
++    *,
++    run_id: str = "run_test",
++    decision: str = "in_band",
++    actual: float = 0.15,
++    target: float = 0.15,
++    clamped: bool = False,
++) -> dict:
++    return {
++        "run_id": run_id,
++        "applied_at": "2026-04-26T00:00:00+09:00",
++        "n_rows_total": 96,
++        "n_rows_used": 80,
++        "aggregation_mode": "last_k_generations",
++        "aggregation_window": 5,
++        "actual_pass_rate": actual,
++        "target_pass_rate": target,
++        "tol": 0.05,
++        "prev_threshold": 0.10,
++        "new_threshold": 0.10,
++        "delta": 0.0,
++        "decision": decision,
++        "var_fitness_pen": 0.01,
++        "clamped_by_delta": False,
++        "clamped_by_floor_or_ceiling": clamped,
++        "stage_b_pass_count": 0,
++        "stage_c_pass_count": 0,
++        "live_criteria_gap": 0.3,
++    }
++
++
++def _write_history(path: Path, records: list[dict]) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with path.open("w") as f:
++        for r in records:
++            f.write(json.dumps(r) + "\n")
++
++
++def _run_cli(args: list[str]) -> subprocess.CompletedProcess:
++    return subprocess.run(
++        [sys.executable, str(SCRIPT), *args],
++        capture_output=True,
++        text=True,
++        cwd=REPO_ROOT,
++    )
++
++
++class TestCli:
++    def test_missing_history_returns_3(self, tmp_path: Path) -> None:
++        result = _run_cli(
++            ["--last", "5", "--history", str(tmp_path / "missing.jsonl")]
++        )
++        assert result.returncode == 3
++        assert "not found" in result.stderr
++
++    def test_invalid_last_returns_2(self, tmp_path: Path) -> None:
++        history = tmp_path / "history.jsonl"
++        _write_history(history, [_record_dict()])
++        result = _run_cli(
++            ["--last", "0", "--history", str(history)]
++        )
++        assert result.returncode == 2
++
++    def test_no_alert_returns_0(self, tmp_path: Path) -> None:
++        history = tmp_path / "history.jsonl"
++        records = [
++            _record_dict(run_id=f"run_{i}", decision="in_band")
++            for i in range(3)
++        ]
++        _write_history(history, records)
++        result = _run_cli(
++            ["--last", "5", "--history", str(history)]
++        )
++        assert result.returncode == 0
++        assert "Calibrate Gate Drift" in result.stdout
++        assert "Alerts:" in result.stdout
++
++    def test_monotone_tighten_returns_10(self, tmp_path: Path) -> None:
++        history = tmp_path / "history.jsonl"
++        records = [
++            _record_dict(run_id=f"run_{i}", decision="tighten")
++            for i in range(5)
++        ]
++        _write_history(history, records)
++        result = _run_cli(
++            ["--last", "5", "--history", str(history)]
++        )
++        assert result.returncode == 10  # drift detected
++        assert "ALERT" in result.stdout
++
++    def test_table_includes_run_ids(self, tmp_path: Path) -> None:
++        history = tmp_path / "history.jsonl"
++        records = [_record_dict(run_id=f"run_{i:03d}") for i in range(3)]
++        _write_history(history, records)
++        result = _run_cli(
++            ["--last", "5", "--history", str(history)]
++        )
++        for r in records:
++            assert r["run_id"] in result.stdout
++
++    def test_empty_history_returns_0_with_message(
++        self, tmp_path: Path
++    ) -> None:
++        history = tmp_path / "history.jsonl"
++        history.parent.mkdir(parents=True, exist_ok=True)
++        history.touch()  # 空ファイル
++        result = _run_cli(
++            ["--last", "5", "--history", str(history)]
++        )
++        assert result.returncode == 0
++        assert "(history is empty)" in result.stdout

@@ -1,0 +1,1 @@
+APPROVED StageGateConfig の class default が 0.05 に揃い Round1 Critical 解消。`devnotes/20260426-10**` および `reports/sharpe-rescale/run-1{4,5,6}-distribution.json` が存在し Warning も解消。新規回帰は確認できず。
