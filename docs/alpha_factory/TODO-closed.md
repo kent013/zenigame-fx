@@ -64,6 +64,7 @@
 | T059 | T059-epoch-window-manager | infrastructure | Critical | 2026-05-01 17:03 | - |
 | T060 | T060-partition-fold-generator | stage-gate | Critical | 2026-05-01 17:48 | - |
 | T061 | T061-canonical-five-engine | stage-gate | Critical | 2026-05-01 20:01 | - |
+| T062 | T062-mission-inf-gap-engine | ga-architecture | Critical | 2026-05-01 21:11 | - |
 
 ## Obsoleted
 
