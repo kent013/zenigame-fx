@@ -435,3 +435,127 @@ T069 (Phase 1) では yaml への threshold 書き戻し経路は新設しない
 - `scripts/alpha_factory/run_ga.py` で freeze 中の log (任意)
 - 運用契約 preflight check: `dataset_epoch_id` 空なら calibrate 起動しない
 - T058 詳細設計改訂依頼: `HistoryRecord.applied_from_run_id: str` を v2 必須化
+
+## T070: SessionBlock 集計 + spread_cost / holding_cost field (synthesis § 4.4 / § 6.2 / § 6.3)
+
+### 8h covering partition (BLOCK_BUCKET_RANGES_UTC)
+
+UTC 24h を 3 covering partition (8h × 3、 重複なし) に分割し、 1 営業日 (UTC date)
+× 1 bucket = 1 SessionBlock として集計する (synthesis § 4.4 SSOT):
+
+| Bucket | UTC 時間範囲 | 想定マーケット |
+|---|---|---|
+| `tokyo` | `[0, 8)` | Tokyo session |
+| `london` | `[8, 16)` | London session |
+| `ny` | `[16, 24)` | NY session 後半 |
+
+`src/alpha_factory/primitives/_indicators.py:51-55` の `_SESSION_RANGES_UTC`
+(9h overlap windows、 indicator 用) とは **別責務** で並列管理する (= F18 防御).
+DST / holiday は T072 (T914) で別 layer 例外として扱い、 T070 SSOT は UTC 単純基準
+で固定.
+
+### 会計契約 SSOT (Trade.spread_cost / holding_cost)
+
+T070 で `Trade` dataclass に 2 field を追加 (default=Decimal(0)):
+
+| field | 意味 | Trade.pnl への反映 |
+|---|---|---|
+| `spread_cost` | entry/exit spread 推定値 (Roll 1984 で `exit_spread × 2 × abs(units)`) | **未反映** (= 監査・stress 用記録) |
+| `holding_cost` | `MockBroker._holding_cost_by_position[pos.id]` の転記 | **既反映** (= Trade.pnl は raw_pnl - holding_cost) |
+
+**不変条件** (詳細設計 §3.5):
+
+```
+Trade.pnl + Trade.holding_cost == raw_pnl    (price-diff pnl)
+Trade.spread_cost は raw_pnl と独立に記録
+```
+
+二重計上防御 (F19): `apply_bar_holding_cost` で既に `_cash` から控除済のため、
+`_close_one` は cash 操作を変更しない (= broker.cash 動きの破壊変更なし).
+
+### SessionBlock 集計式 (概念設計 §3.4.0)
+
+```
+pnl_net          = sum(t.pnl - t.spread_cost   for t in trades_in_block)
+pnl_before_costs = sum(t.pnl + t.holding_cost  for t in trades_in_block)
+spread_cost_total  = sum(t.spread_cost  for t in trades_in_block)
+holding_cost_total = sum(t.holding_cost for t in trades_in_block)
+```
+
+**block invariant** (`SessionBlock.__post_init__` で検証):
+
+```
+pnl_before_costs == pnl_net + spread_cost_total + holding_cost_total
+spread_cost_total >= 0
+holding_cost_total >= 0
+bar_count >= 0
+trade_count >= 0
+```
+
+集計の **date universe** は bars が触れた UTC date set ∪ trades.exit_time が触れた
+UTC date set × 3 bucket. `trade_count == 0` の empty block も生成する
+(synthesis § 6.3 0.5 neutral 対象を機械判定可能化、 `is_empty_trade_block` /
+`is_partial_bar_block` property 提供).
+
+trade の 帰属 bucket は **`trade.exit_time` 一括帰属** (= entry/exit が異なる
+bucket でも exit bucket に全 cost を寄せる、 詳細設計 §3.4.1 SSOT).
+
+### apply_spread_stress (T064 申し送り解消)
+
+T064 で `NotImplementedError` で skeleton 化されていた `apply_spread_stress` を
+T070 で正式実装 (`src/backtest/session_block.py`):
+
+```
+delta_spread     = trade.spread_cost * (multiplier - Decimal(1))
+new_pnl          = trade.pnl - delta_spread
+new_spread_cost  = trade.spread_cost * multiplier
+new_holding_cost = trade.holding_cost   # 不変 (stress は spread 専用)
+```
+
+multiplier=1 で no-op、 multiplier < 1.0 / NaN / Infinite で `ValueError` raise.
+
+**契約境界** (詳細設計 §4.3): stress 出力 `Trade(stressed)` は `Trade.pnl +
+Trade.holding_cost = raw_pnl - delta_spread` の擬似 pnl となり、 通常会計の F13
+invariant は適用しない. 下流 (T064 stress evaluator) は「stress 済 trade は
+集計・SR 計算用、 broker.cash には反映されない」 を前提として扱う.
+
+### transport SSOT (BacktestResult.session_blocks)
+
+`BacktestResult.session_blocks: tuple[SessionBlock, ...]` field を追加し、
+`run_backtest` 末尾で `aggregate_session_blocks(bars_list, broker.trades)` を
+**1 回のみ計算** して同梱する. caller (T061 / T064 / Phase 2 配線) は
+`result.session_blocks` を読むのみで **再計算は禁止** (= F14/F21 防御、
+詳細設計 §4.6 SSOT).
+
+backward-compat: `default_factory=tuple` のため既存 caller (= session_blocks を
+読まない `BacktestResult(config=, trades=, equity_curve=)`) は影響なし.
+
+### library API (T070 PR1 scope)
+
+| シンボル | 場所 | 役割 |
+|---|---|---|
+| `SessionBlockBucket` | `src/backtest/session_block.py` | `Literal["tokyo", "london", "ny"]` |
+| `BLOCK_BUCKET_RANGES_UTC` | 同上 | 8h covering partition SSOT (Final) |
+| `SessionBlock` | 同上 | 1 営業日 × 1 bucket の集計 dataclass (frozen) |
+| `compute_bucket_for_bar` | 同上 | `bar_time` UTC hour → bucket (pure function) |
+| `compute_bucket_for_trade` | 同上 | `trade.exit_time` → bucket (pure function) |
+| `aggregate_session_blocks` | 同上 | bars + trades → `tuple[SessionBlock, ...]` |
+| `apply_spread_stress` | 同上 | spread cost multiplier で `Trade` 列を再計算 |
+| `Trade.spread_cost` | `src/broker/orders.py` | entry/exit spread 推定値 (記録のみ) |
+| `Trade.holding_cost` | 同上 | `_holding_cost_by_position[pos.id]` 転記 (既存 pnl 反映済) |
+| `BacktestResult.session_blocks` | `src/backtest/engine.py` | run_backtest 末尾で同梱、 caller 再計算禁止 |
+
+### Phase 2 申し送り (T070 detailed-design § 1.3 / § 10.2 連動)
+
+- T064 `stage_bc_evaluator`: `apply_spread_stress` を T070 import に置換 +
+  `TradeRecord` 表記 → `Trade` 統一
+- T061 `canonical_metrics`: `BacktestResult.session_blocks` を入力に
+  `SR_session_worst` / `WR_worst` 計算
+- T072: `BLOCK_BUCKET_RANGES_UTC` への DST 例外、 holiday 時 block の特別扱い
+- `scripts/alpha_factory/run_ga.py` / 既存 `backtest_runner`: `session_blocks`
+  caller 配線 (= 再計算禁止 lint)
+- run report / archive 露出: `Trade.spread_cost` / `holding_cost` /
+  `SessionBlock.pnl_before_costs` などを log / report / archive に出す
+  (F17 / F20 解消)
+- broker `entry_spread` 保持改造: `spread_cost` を「entry_spread + exit_spread」
+  で正確化 (現状 `exit × 2` 近似、 Roll 1984 で代用)

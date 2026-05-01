@@ -7,6 +7,7 @@ from decimal import Decimal
 
 import structlog
 
+from src.backtest.session_block import SessionBlock, aggregate_session_blocks
 from src.broker.mock import MockBroker
 from src.broker.orders import Trade
 from src.domain.price import PriceBar
@@ -76,6 +77,10 @@ class BacktestResult:
     config: BacktestConfig
     trades: list[Trade]
     equity_curve: list[tuple[datetime, Decimal]] = field(default_factory=list)
+    # T070: cascade port v2 Phase 2 配線. session_blocks は run_backtest 内で 1 回
+    # 計算し、 caller は読むのみ (再計算禁止、 概念設計 §6.4 SSOT). default_factory で
+    # backward-compat を維持 (= 既存 caller への影響なし).
+    session_blocks: tuple[SessionBlock, ...] = field(default_factory=tuple)
 
 
 def run_backtest(
@@ -193,4 +198,13 @@ def run_backtest(
         first_drop_open_bar_time=first_drop_open_bar_time,
         negative_equity_drop_open_count=negative_equity_drop_open_count,
     )
-    return BacktestResult(config=config, trades=broker.trades, equity_curve=equity_curve)
+
+    # T070: SessionBlock 集計 (Round 1 [C3] transport SSOT). caller 再計算禁止 (§6.4).
+    session_blocks = aggregate_session_blocks(bars_list, broker.trades)
+
+    return BacktestResult(
+        config=config,
+        trades=broker.trades,
+        equity_curve=equity_curve,
+        session_blocks=session_blocks,
+    )

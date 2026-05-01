@@ -43,6 +43,15 @@ class Trade:
     pnl: Decimal
     exit_reason: ExitReason
     equity_at_entry: Decimal = Decimal(0)  # T-sharpe: Position から伝搬
+    # T070: cascade port v2 Phase 2 配線.
+    # 概念設計 §3.4.0 / §3.5 SSOT 参照. spread_cost は entry/exit spread 推定値で
+    # **Trade.pnl 未反映** (監査・spread stress 用記録)、 holding_cost は
+    # `MockBroker._holding_cost_by_position[pos.id]` の転記で **既に Trade.pnl に
+    # 控除済** (= raw_pnl - holding_cost). 不変条件:
+    # `Trade.pnl + Trade.holding_cost == raw_pnl (= price-diff pnl)`、
+    # `spread_cost` は raw_pnl と独立に記録される.
+    spread_cost: Decimal = Decimal(0)
+    holding_cost: Decimal = Decimal(0)
 
 
 @dataclass(frozen=True)

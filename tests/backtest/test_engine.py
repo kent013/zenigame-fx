@@ -6,6 +6,7 @@ from decimal import Decimal
 from structlog.testing import capture_logs
 
 from src.backtest.engine import BacktestConfig, run_backtest
+from src.backtest.session_block import SessionBlock
 from src.broker import MockBroker, OrderSignal
 from src.broker.orders import PortfolioSnapshot
 from src.domain.price import PriceBar
@@ -296,3 +297,116 @@ def test_run_backtest_negative_equity_drop_count_in_summary() -> None:
     assert "negative_equity_drop_open_count" in finished
     # bar 2 で 1 件 drop された
     assert finished["negative_equity_drop_open_count"] == 1
+
+
+# -- T070: BacktestResult.session_blocks 同梱 (F4 / F16) -------------------
+
+
+def test_F4_run_backtest_returns_session_blocks() -> None:
+    """F4: BacktestResult.session_blocks が同梱され、 1 day で 3 bucket 分生成."""
+    bars = [
+        make_bar(0, bid_close="154.100", ask_close="154.110"),
+        make_bar(120, bid_close="154.110", ask_close="154.120"),
+    ]
+    strat = _ScriptedStrategy({})
+    broker = MockBroker(instrument_meta=usd_jpy_meta())
+    config = BacktestConfig(
+        instrument="USD_JPY",
+        start=bars[0].bar_time,
+        end=datetime(2026, 4, 2, tzinfo=UTC),
+        initial_cash=Decimal("1000000"),
+        leverage=10,
+        session_close_utc_hours=frozenset({23}),
+    )
+    result = run_backtest(bars, strat, broker, config)
+
+    assert isinstance(result.session_blocks, tuple)
+    # 1 day × 3 bucket
+    assert len(result.session_blocks) == 3
+    assert all(isinstance(b, SessionBlock) for b in result.session_blocks)
+    # bars が tokyo (hour=0/2) のみなら他 bucket は bar_count=0
+    tokyo = next(b for b in result.session_blocks if b.bucket == "tokyo")
+    london = next(b for b in result.session_blocks if b.bucket == "london")
+    assert tokyo.bar_count == 2
+    assert london.bar_count == 0
+
+
+def test_F16_session_blocks_use_exit_time_for_attribution() -> None:
+    """F16: trade.exit_time の bucket に集計される (= exit bucket 一括帰属)."""
+    # bar 0: hour=0 (tokyo) で open_long → bar 1: hour=0 同 day で fill (= entry tokyo)
+    # → bar 2: 翌日 hour=0 で eod close (= exit tokyo)
+    bars = [
+        make_bar(0, bid_close="154.100", ask_close="154.110"),  # day1 hour=0 tokyo
+        make_bar(1, bid_close="154.150", ask_close="154.160"),  # day1 hour=0 tokyo
+        make_bar(0, bid_close="154.200", ask_close="154.210", day=2),  # day2 hour=0 tokyo
+    ]
+    strat = _ScriptedStrategy({0: [OrderSignal(kind="open_long", units=10000)]})
+    broker = MockBroker(instrument_meta=usd_jpy_meta())
+    config = BacktestConfig(
+        instrument="USD_JPY",
+        start=bars[0].bar_time,
+        end=datetime(2026, 4, 3, tzinfo=UTC),
+        initial_cash=Decimal("1000000"),
+        leverage=10,
+    )
+    result = run_backtest(bars, strat, broker, config)
+
+    # 1 trade、 exit_time = bar 1 の bid.close (= EOD close、 hour=0 / day=1)
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.exit_time.date() == bars[1].bar_time.date()
+
+    # session_blocks に trade が tokyo bucket でカウントされている
+    target_block = next(
+        b for b in result.session_blocks
+        if b.bucket == "tokyo" and b.business_date == trade.exit_time.date()
+    )
+    assert target_block.trade_count == 1
+
+
+def test_F4_session_blocks_invariant_holds_after_run() -> None:
+    """F4 補強: session_blocks の各 invariant (pnl_before == net + spread + holding)."""
+    bars = [
+        make_bar(0, bid_close="154.100", ask_close="154.110"),
+        make_bar(60, bid_close="154.150", ask_close="154.160"),  # hour=1 tokyo
+        make_bar(120, bid_close="154.200", ask_close="154.210"),  # hour=2 tokyo
+    ]
+    strat = _ScriptedStrategy({0: [OrderSignal(kind="open_long", units=10000)]})
+    broker = MockBroker(instrument_meta=usd_jpy_meta())
+    config = BacktestConfig(
+        instrument="USD_JPY",
+        start=bars[0].bar_time,
+        end=datetime(2026, 4, 2, tzinfo=UTC),
+        initial_cash=Decimal("1000000"),
+        leverage=10,
+        session_close_utc_hours=frozenset({23}),
+        holding_cost_per_day_bps=Decimal("36"),
+        bar_minutes=60,
+    )
+    result = run_backtest(bars, strat, broker, config)
+
+    for b in result.session_blocks:
+        assert b.pnl_before_costs == (
+            b.pnl_net + b.spread_cost_total + b.holding_cost_total
+        )
+        assert b.spread_cost_total >= Decimal(0)
+        assert b.holding_cost_total >= Decimal(0)
+
+
+def test_F4_default_session_blocks_is_empty_tuple() -> None:
+    """BacktestResult.session_blocks default は空 tuple (= backward-compat).
+
+    既存 caller が session_blocks を渡さない場合の default_factory 検証.
+    """
+    from src.backtest.engine import BacktestConfig, BacktestResult
+
+    config = BacktestConfig(
+        instrument="USD_JPY",
+        start=datetime(2026, 4, 1, tzinfo=UTC),
+        end=datetime(2026, 4, 2, tzinfo=UTC),
+        initial_cash=Decimal("1000000"),
+        leverage=10,
+        session_close_utc_hours=frozenset({23}),
+    )
+    result = BacktestResult(config=config, trades=[], equity_curve=[])
+    assert result.session_blocks == ()

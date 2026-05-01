@@ -408,6 +408,10 @@ class MockBroker:
         # （二重控除を回避）。
         cost_accum = self._holding_cost_by_position.pop(pos.id, Decimal(0))
         net_pnl = raw_pnl - cost_accum
+        # T070: entry/exit spread を別 field 化 (Trade.pnl 未反映、 監査・stress 用).
+        # 詳細設計 §4.5 SSOT: exit bar の bid/ask spread × 2 を entry+exit 往復 spread
+        # の概算プロキシとして採用 (Roll 1984)。 厳密な entry_spread 取得は Phase 2.
+        spread_cost = self._compute_trade_spread_cost(pos, bar)
         self._cash += raw_pnl
         trade = Trade(
             position_id=pos.id,
@@ -421,10 +425,39 @@ class MockBroker:
             pnl=net_pnl,
             exit_reason=reason,
             equity_at_entry=pos.equity_at_entry,
+            spread_cost=spread_cost,
+            holding_cost=cost_accum,
         )
         self._trades.append(trade)
         self._invalidate_snapshot_cache()
         return trade
+
+    @staticmethod
+    def _compute_trade_spread_cost(pos: Position, bar: PriceBar) -> Decimal:
+        """entry/exit の bid/ask spread から trade-level spread cost を推定する (T070).
+
+        SSOT: 概念設計 §3.4.0 (spread_cost は監査・stress 用記録、 既存 pnl 未反映).
+
+        計算式 (詳細設計 §4.5):
+            exit_spread = bar.spread_close  # ask.close - bid.close
+            spread_cost_per_unit = exit_spread * 2  # entry+exit 往復近似 (Roll 1984)
+            spread_cost = abs(pos.units) * spread_cost_per_unit
+
+        T070 では「exit bar の spread × 2」を entry+exit 往復 spread の概算
+        プロキシとして採用 (Roll 1984)。 厳密な entry_spread 取得は Phase 2 で
+        broker 改造 (Position.entry_spread 保持) により対応.
+
+        異常データ (bid > ask 等) で spread_close < 0 の場合は 0 に clamp し、
+        SessionBlock.spread_cost_total >= 0 invariant を破らない (Round 1 [W1]).
+
+        Returns:
+            spread_cost (>= 0).
+        """
+        exit_spread = bar.spread_close
+        if exit_spread < 0:
+            exit_spread = Decimal(0)
+        spread_cost_per_unit = exit_spread * Decimal(2)
+        return abs(Decimal(pos.units)) * spread_cost_per_unit
 
     def _close_all_internal(self, bar: PriceBar, exit_kind: str, reason: ExitReason) -> list[Trade]:
         trades: list[Trade] = []
