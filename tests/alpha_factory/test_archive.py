@@ -1350,3 +1350,144 @@ def test_t058_genomes_schema_column_order_keeps_v2_fields_at_head() -> None:
     assert names[3] == "source_stage"
     # v2 4 field の直後に既存 run_id 列が来る (= 既存列の相対順序を破壊しない)
     assert names[4] == "run_id"
+
+
+# ---------------------------------------------------------------------------
+# T058 PR 5: GenomeArchive.load tuple 受取 + v1 archive 検出
+# ---------------------------------------------------------------------------
+
+
+def _build_v1_archive(tmp_path: Path) -> Path:
+    """T058 PR 5 test helper: v1 archive (genome_entry_schema_version 列なし) を作成."""
+    import pyarrow.parquet as pq
+
+    # v1 (legacy) schema: v2 必須 4 field を含まない最低限の table を作成
+    minimal_schema = pa.schema(
+        [
+            pa.field("run_id", pa.string()),
+            pa.field("run_number", pa.int32()),
+            pa.field("individual_name", pa.string()),
+        ]
+    )
+    table = pa.Table.from_pylist(
+        [{"run_id": "run_legacy", "run_number": 1, "individual_name": "g0_i0"}],
+        schema=minimal_schema,
+    )
+    out = tmp_path / "v1_archive.parquet"
+    pq.write_table(table, out)
+    return out
+
+
+def test_load_backward_compat_returns_table_only_when_kwargs_omitted(
+    tmp_path: Path,
+) -> None:
+    """既存 caller (1-arg, return_schema_version=False default) は Table 単独返却."""
+    arc = _make_archive()
+    arc.collect_stage_a(_stub_genome(), "lane", 0, _stage_a_result(),
+                         instrument="USD_JPY")
+    out = arc.flush(tmp_path)
+
+    table = GenomeArchive.load(out)
+    # 旧 caller は Table 単独 (tuple ではない)
+    assert isinstance(table, pa.Table)
+    assert table.num_rows == 1
+
+
+def test_load_mode_kwarg_alone_keeps_table_only_return_for_backward_compat(
+    tmp_path: Path,
+) -> None:
+    """T058 PR 5 (Codex Warning 1 反映): mode 指定 + return_schema_version=False
+    (default) では Table 単独返却が維持される (= 旧 caller 完全互換)。
+    意図: 「mode だけ指定して fail-closed 期待」誤用を test で固定して
+    将来の signature 誤理解 regression を防ぐ。"""
+    from src.alpha_factory.schema_contract import SchemaEnforcementMode
+
+    arc = _make_archive()
+    arc.collect_stage_a(_stub_genome(), "lane", 0, _stage_a_result(),
+                         instrument="USD_JPY")
+    out = arc.flush(tmp_path)
+    table = GenomeArchive.load(out, mode=SchemaEnforcementMode.FAIL_CLOSED)
+    # return_schema_version=False default のため Table 単独返却 (tuple ではない)
+    assert isinstance(table, pa.Table)
+    assert table.num_rows == 1
+
+
+def test_load_with_return_schema_version_returns_tuple_for_v2_archive(
+    tmp_path: Path,
+) -> None:
+    """v2 archive (新規 flush) は (Table, 2) を返す."""
+    from src.alpha_factory.schema_contract import SchemaEnforcementMode
+
+    arc = _make_archive()
+    arc.collect_stage_a(_stub_genome(), "lane", 0, _stage_a_result(),
+                         instrument="USD_JPY")
+    out = arc.flush(tmp_path)
+
+    result = GenomeArchive.load(
+        out, mode=SchemaEnforcementMode.LOG_ONLY, return_schema_version=True
+    )
+    assert isinstance(result, tuple)
+    table, sv = result
+    assert isinstance(table, pa.Table)
+    assert sv == 2  # GENOME_ENTRY_SCHEMA_VERSION
+
+
+def test_load_log_only_warns_and_returns_none_sv_for_v1_archive(
+    tmp_path: Path,
+) -> None:
+    """LOG_ONLY mode で v1 archive を読むと warning + sv=None 返却."""
+    from src.alpha_factory.schema_contract import SchemaEnforcementMode
+
+    v1_path = _build_v1_archive(tmp_path)
+    with capture_logs() as logs:
+        result = GenomeArchive.load(
+            v1_path,
+            mode=SchemaEnforcementMode.LOG_ONLY,
+            return_schema_version=True,
+        )
+    assert isinstance(result, tuple)
+    table, sv = result
+    assert sv is None
+    assert table.num_rows == 1
+    # warning 発火
+    events = [log for log in logs if log["event"] == "archive.load.v1_archive_detected"]
+    assert len(events) == 1
+    assert events[0]["mode"] == "log_only"
+
+
+def test_load_fail_closed_raises_on_v1_archive(tmp_path: Path) -> None:
+    """FAIL_CLOSED mode で v1 archive を読むと SchemaVersionError raise."""
+    from src.alpha_factory.schema_contract import (
+        SchemaEnforcementMode,
+        SchemaVersionError,
+    )
+
+    v1_path = _build_v1_archive(tmp_path)
+    with pytest.raises(SchemaVersionError, match="v1 archive"):
+        GenomeArchive.load(
+            v1_path,
+            mode=SchemaEnforcementMode.FAIL_CLOSED,
+            return_schema_version=True,
+        )
+
+
+def test_load_empty_v2_archive_returns_v2_schema_version(tmp_path: Path) -> None:
+    """空の v2 archive (genome_entry_schema_version 列が存在、 行 0 件) は
+    fsp_updater の helper と同型の判定で v2 を返す (= FAIL_CLOSED で raise しない)."""
+    import pyarrow.parquet as pq
+
+    from src.alpha_factory.schema_contract import SchemaEnforcementMode
+
+    # 空の v2 archive を作成 (= GENOMES_SCHEMA で 0 行 table)
+    empty_table = pa.Table.from_pylist([], schema=GENOMES_SCHEMA)
+    out = tmp_path / "empty_v2.parquet"
+    pq.write_table(empty_table, out)
+
+    result = GenomeArchive.load(
+        out,
+        mode=SchemaEnforcementMode.FAIL_CLOSED,
+        return_schema_version=True,
+    )
+    assert isinstance(result, tuple)
+    _table, sv = result
+    assert sv == 2  # 物理 schema は v2 なので空でも raise しない

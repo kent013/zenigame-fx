@@ -45,6 +45,7 @@ from src.alpha_factory.run_context import RunContext
 from src.alpha_factory.schema_contract import (
     GENOME_ENTRY_SCHEMA_VERSION,
     SchemaEnforcementMode,
+    SchemaVersionError,
     assert_genome_entry_v2,
 )
 from src.alpha_factory.stage_gate import CrossPairResult, StageResult
@@ -699,9 +700,86 @@ class GenomeArchive:
         return path
 
     @staticmethod
-    def load(parquet_path: Path) -> pa.Table:
-        """Parquet ファイルを ``pyarrow.Table`` として読み戻す。"""
-        return pq.read_table(parquet_path)
+    def load(
+        parquet_path: Path,
+        *,
+        mode: SchemaEnforcementMode = SchemaEnforcementMode.LOG_ONLY,
+        return_schema_version: bool = False,
+    ) -> pa.Table | tuple[pa.Table, int | None]:
+        """Parquet ファイルを ``pyarrow.Table`` として読み戻す。
+
+        T058 (PR 5): ``mode`` / ``return_schema_version`` kwargs 追加。
+        既存 caller (``GenomeArchive.load(path)``) は ``return_schema_version=False``
+        default で旧挙動 (Table 単独返却) を維持する。
+
+        新 caller (`run_alpha_sieve.py` 等) は
+        ``GenomeArchive.load(path, mode=..., return_schema_version=True)`` で
+        ``(Table, schema_version)`` tuple を受け取り、 v1 archive 検出時に
+        mode に従って handle する:
+
+        - ``mode=LOG_ONLY``: warning + ``schema_version=None`` 返却
+        - ``mode=FAIL_CLOSED``: :class:`SchemaVersionError` raise
+
+        判定ロジックは ``src.alpha_factory.fsp_updater._detect_archive_schema_version``
+        と同型 (詳細設計 行 1136 / 1422-1432 SSOT)。
+
+        Args:
+            parquet_path: archive Parquet path (絶対 or 相対)。
+            mode: schema enforcement mode (LOG_ONLY default)。
+            return_schema_version: True 指定時は ``(Table, int | None)`` tuple
+                返却、 False (default) 時は Table 単独返却 (backward compat)。
+
+        Returns:
+            ``return_schema_version=False``: ``pa.Table``
+            ``return_schema_version=True``: ``(pa.Table, int | None)``
+
+        Raises:
+            SchemaVersionError: ``mode=FAIL_CLOSED`` + v1 archive 検出時。
+        """
+        table = pq.read_table(parquet_path)
+        if not return_schema_version:
+            # 旧 caller 互換 (Table 単独返却、 schema_version 検査も行わない)
+            return table
+        schema_version = GenomeArchive._detect_archive_schema_version(table)
+        if schema_version is None:
+            if mode == SchemaEnforcementMode.FAIL_CLOSED:
+                raise SchemaVersionError(
+                    f"GenomeArchive.load: v1 archive (no "
+                    f"genome_entry_schema_version): {parquet_path}"
+                )
+            logger.warning(
+                "archive.load.v1_archive_detected",
+                archive_path=str(parquet_path),
+                mode=mode.value,
+            )
+        return table, schema_version
+
+    @staticmethod
+    def _detect_archive_schema_version(table: pa.Table) -> int | None:
+        """archive Parquet の ``genome_entry_schema_version`` を判定する helper.
+
+        判定ロジック (`fsp_updater._detect_archive_schema_version` と同型 SSOT):
+
+        - 列が存在しない → v1 archive とみなして ``None``
+        - 列が存在 + 行 0 件 → 物理 schema は v2 (PR 2 で field 定義済) なので
+          ``GENOME_ENTRY_SCHEMA_VERSION`` (= 2) を返す。 空 archive を v1 扱いで
+          誤検出しないため (FAIL_CLOSED で誤 raise を防ぐ)。
+        - 列が存在 + 全 None → v1 互換 (None) を返す。
+        - それ以外 → 値の最大値 (mixed-version archive 観測時の保守的見積もり)。
+
+        Returns:
+            ``None`` (v1 archive 検出時) または ``int`` (v2+ schema_version)。
+        """
+        if "genome_entry_schema_version" not in table.column_names:
+            return None
+        versions = table.column("genome_entry_schema_version").to_pylist()
+        if not versions:
+            # 空 table: 物理 schema は v2 (列が存在) なので v2 と宣言
+            return GENOME_ENTRY_SCHEMA_VERSION
+        valid_versions = [int(v) for v in versions if v is not None]
+        if not valid_versions:
+            return None
+        return max(valid_versions)
 
     # ------------------------------------------------------------------
     # T-sharpe Phase 1A: canonical Sharpe accessor

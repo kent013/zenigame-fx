@@ -81,6 +81,11 @@ from src.alpha_factory.parallel_eval import (
     measure_peak_rss_mb,
 )
 from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
+from src.alpha_factory.run_context import RunContext, generate_epoch_id_stub
+from src.alpha_factory.schema_contract import (
+    CASCADE_CONTRACT_VERSION,
+    assert_run_report_v2,
+)
 from src.alpha_factory.stage_gate import STAGE_GATE_VERSION
 from src.alpha_factory.swim_lane import (
     GRADUATION_LANE_ID,
@@ -810,10 +815,13 @@ def _write_reports(
     lane_manager: LaneManager,
     cross_pair_mode: str,
     now: datetime,
+    run_context: RunContext,
     diagnostics_sidecar_path: Path | None = None,
     peak_rss_per_generation: list[dict[str, float]] | None = None,
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
+    # T058 PR 5: 全 artifact に同一 dataset_epoch_id を伝搬する SSOT (RunContext 経由)
+    dataset_epoch_id = run_context.dataset_epoch_id
 
     best_fitness_val, best_finite = _safe_finite(best_entry.fitness_pen)
     best_fitness_str = _fitness_to_str(best_entry.fitness_pen)
@@ -872,8 +880,15 @@ def _write_reports(
     #            per_generation[*].peak_*_rss_mb, top-level parallel_config,
     #            top-level max_rss_mb_per_worker
     # 後方互換: consumer は未知 field を無視する義務 (additionalProperties: true)
+    #
+    # T058 PR 5: ``cascade_contract_version`` (int=2) と ``dataset_epoch_id``
+    # (string) を summary.json 先頭に追加 (詳細設計 行 1354-1362)。
+    # ``schema_version`` は **string "1.1" のまま維持** (test 互換性、
+    # 詳細設計 行 1404)。 cascade_contract_version は int で型分離。
     summary: dict[str, Any] = {
         "schema_version": "1.1",
+        "cascade_contract_version": CASCADE_CONTRACT_VERSION,
+        "dataset_epoch_id": dataset_epoch_id,
         "run_id": run_id,
         "run_number": run_number,
         "generated_at": now.isoformat(),
@@ -976,6 +991,9 @@ def _write_reports(
             )
         except ValueError:
             summary["diagnostics_sidecar"] = str(diagnostics_sidecar_path)
+    # T058 PR 5: passive validation (LOG_ONLY default で warning のみ、
+    # FAIL_CLOSED で必須 field 欠落 raise)
+    assert_run_report_v2(summary, mode=cfg.schema_contract.to_mode())
     (run_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -985,6 +1003,8 @@ def _write_reports(
     for pg in per_generation:
         history.append(
             {
+                # T058 PR 5: 各世代 entry にも dataset_epoch_id 付与 (詳細設計 行 1366-1370)
+                "dataset_epoch_id": dataset_epoch_id,
                 "generation": pg["generation"],
                 "best_fitness": _fitness_to_str(
                     float(pg["best_fitness_pen"])
@@ -1000,8 +1020,12 @@ def _write_reports(
         encoding="utf-8",
     )
 
+    # T058 PR 5: best_genome.json に dataset_epoch_id を merge
+    # (詳細設計 行 1372-1373、 既存 genome_to_dict 構造に同一 epoch_id を追加)
+    best_genome_payload: dict[str, Any] = {"dataset_epoch_id": dataset_epoch_id}
+    best_genome_payload.update(genome_to_dict(best_genome))
     (run_dir / "best_genome.json").write_text(
-        json.dumps(genome_to_dict(best_genome), ensure_ascii=False, indent=2),
+        json.dumps(best_genome_payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -1009,9 +1033,14 @@ def _write_reports(
         for g in final_population:
             ent = final_population_cache.get(g.name)
             fit_val = ent.fitness_pen if ent is not None else 0.0
+            # T058 PR 5: 各 line に dataset_epoch_id 付与 (詳細設計 行 1375-1377)
             f.write(
                 json.dumps(
-                    {"name": g.name, "fitness": _fitness_to_str(fit_val)},
+                    {
+                        "dataset_epoch_id": dataset_epoch_id,
+                        "name": g.name,
+                        "fitness": _fitness_to_str(fit_val),
+                    },
                     ensure_ascii=False,
                 )
                 + "\n"
@@ -1056,6 +1085,7 @@ def _resolve_stage_a_threshold(
     *,
     cli_override: float | None,
     history_path: Path,
+    dataset_epoch_id: str,
 ) -> tuple[float, Literal["config", "history", "cli"]]:
     """T054: Stage A threshold の effective 値と source を確定する。
 
@@ -1065,8 +1095,11 @@ def _resolve_stage_a_threshold(
         3. config 値 (yaml load 値) → source="config"
 
     cross-run contamination guard (load_calibrated_threshold) で
-    base_config_hash / dataset_span / instrument / stage_gate_version の
-    一致確認 + decision filter (tighten/loosen) を行う。
+    base_config_hash / dataset_span / instrument / stage_gate_version /
+    dataset_epoch_id の AND 一致確認 + decision filter (tighten/loosen) を行う。
+
+    T058 PR 5: ``dataset_epoch_id`` を caller (RunContext 経由) から受取り、
+    PR 3 の literal "epoch_legacy" 直書きを置換 (詳細設計 行 1078-1085)。
     """
     # 1. CLI override 優先
     if cli_override is not None:
@@ -1075,14 +1108,11 @@ def _resolve_stage_a_threshold(
     # 2. history.jsonl から override 試行
     base_hash = compute_base_config_hash(cfg)
     dataset_span = (str(cfg.dataset.start), str(cfg.dataset.end))
-    # T058 (PR 3): dataset_epoch_id を AND 結合の追加条件として渡す。
-    # 現段階では `epoch_legacy` stub (archive.py / calibrate_gate.py と同値)。
-    # T059 で deterministic な epoch-rolling 識別子に置換、 PR 5 で
-    # RunContext 経由の full propagate に移行予定 (synthesis § 12.1)。
+    # T058 PR 5: dataset_epoch_id を RunContext 経由で受け取る (synthesis § 12.1)
     calibrated = load_calibrated_threshold(
         history_path=history_path,
         base_config_hash=base_hash,
-        dataset_epoch_id="epoch_legacy",
+        dataset_epoch_id=dataset_epoch_id,
         dataset_span=dataset_span,
         instrument=cfg.dataset.instrument,
         stage_gate_version=STAGE_GATE_VERSION,
@@ -1098,6 +1128,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     cfg = load_config(args.config, overrides=_args_to_overrides(args))
 
+    # T058 PR 5: dataset_epoch_id を起動初期で確定 (T059 stub)。
+    # RunContext は run_id 確定後 (下方) に生成するが、 threshold 解決が
+    # それより前にあるため、 epoch_id 値だけ先取りして両方に渡す SSOT。
+    dataset_epoch_id = generate_epoch_id_stub(cfg.dataset)
+
     # T054: Stage A threshold の effective 値と source を確定し cfg に反映する。
     # source 単一値 ("config" | "history" | "cli") を必ず確定 (詳細設計 §0b)。
     repo_root = Path(__file__).resolve().parents[2]
@@ -1106,6 +1141,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg,
         cli_override=args.stage_a_threshold,
         history_path=history_path,
+        dataset_epoch_id=dataset_epoch_id,
     )
     if effective_threshold != cfg.stage_gate.stage_a_threshold:
         logger.info(
@@ -1145,6 +1181,17 @@ def main(argv: list[str] | None = None) -> int:
     run_number = get_latest_run_number() + 1
     run_dir = RUN_REPORTS_DIR / f"run-{run_number}"
 
+    # T058 PR 5: RunContext 生成 (詳細設計 行 1334-1341)
+    # 1 Run スコープで固定される runtime context。 archive / report 全
+    # artifact が同じ source から dataset_epoch_id 等を読む SSOT。
+    run_context = RunContext(
+        run_id=run_id,
+        run_number=run_number,
+        dataset_epoch_id=dataset_epoch_id,
+        base_config_hash=compute_base_config_hash(cfg),
+        instrument=cfg.dataset.instrument,
+    )
+
     logger.info(
         "ga.run.start",
         run_id=run_id,
@@ -1152,6 +1199,7 @@ def main(argv: list[str] | None = None) -> int:
         instrument=cfg.dataset.instrument,
         population_size=cfg.ga.population_size,
         generations=cfg.ga.generations,
+        dataset_epoch_id=dataset_epoch_id,
     )
 
     ensure_registered()
@@ -1161,7 +1209,15 @@ def main(argv: list[str] | None = None) -> int:
         cfg.dataset.instrument, cfg.dataset, cfg.stage_windows
     )
 
-    archive = GenomeArchive(run_id=run_id, run_number=run_number)
+    # T058 PR 5: archive に RunContext + enforcement_mode を注入
+    # (詳細設計 行 1344-1349)。 既存 backward compat (run_context=None) は
+    # 維持されるが、 production 経路では必ず RunContext を渡す。
+    archive = GenomeArchive(
+        run_id=run_id,
+        run_number=run_number,
+        run_context=run_context,
+        enforcement_mode=cfg.schema_contract.to_mode(),
+    )
     lane_id = f"tier1_{cfg.dataset.instrument}"
 
     # T057 Phase 2 Gate B/C: aux preflight + AuxBundle 構築
@@ -1445,11 +1501,16 @@ def main(argv: list[str] | None = None) -> int:
     # T033: Stage A diagnostics sidecar を _write_reports の前に flush して、
     # 書き込み成功時のみ summary.json に diagnostics_sidecar field を追加する。
     # --no-report 時は sidecar も skip (reports/ ディレクトリを触らない契約と整合)。
+    # T058 PR 5: write_stage_a_provenance に run_context / mode を伝搬 (PR 4 で
+    # optional 化された kwargs を production 経路で必ず渡す)。
     sidecar_path_written: Path | None = None
     if not args.no_report:
         sidecar_path = REPO_ROOT / sidecar_relative_path(run_number)
         sidecar_path_written = write_stage_a_provenance(
-            diagnostics_collector, sidecar_path
+            diagnostics_collector,
+            sidecar_path,
+            run_context=run_context,
+            mode=cfg.schema_contract.to_mode(),
         )
 
     if not args.no_report:
@@ -1470,6 +1531,7 @@ def main(argv: list[str] | None = None) -> int:
             lane_manager=lane_manager,
             cross_pair_mode=cross_pair_mode,
             now=now,
+            run_context=run_context,
             diagnostics_sidecar_path=sidecar_path_written,
             peak_rss_per_generation=peak_rss_per_generation,
         )
@@ -1481,10 +1543,15 @@ def main(argv: list[str] | None = None) -> int:
             note="reports/run-reports/ was not touched (archive + cache only)",
         )
 
+    # T058 PR 5: run cache JSON に dataset_epoch_id を伝搬 (詳細設計 行 1379-1381)
     RUN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     (RUN_CACHE_DIR / f"{run_id}.json").write_text(
         json.dumps(
-            {"run_id": run_id, "run_number": run_number},
+            {
+                "run_id": run_id,
+                "run_number": run_number,
+                "dataset_epoch_id": run_context.dataset_epoch_id,
+            },
             ensure_ascii=False,
             indent=2,
         ),

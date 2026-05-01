@@ -219,6 +219,80 @@ def test_load_stage_c_passers_empty_when_no_pass(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# T058 PR 5: loader mode 連動 (v1 archive 検出時の skip / raise)
+# ---------------------------------------------------------------------------
+
+
+def _write_v1_archive(parquet_path: Path) -> None:
+    """T058 PR 5 helper: v1 archive (genome_entry_schema_version 列なし)."""
+    from src.alpha_factory.schema_contract import SchemaEnforcementMode  # noqa: F401
+
+    minimal_schema = pa.schema(
+        [
+            pa.field("run_id", pa.string()),
+            pa.field("run_number", pa.int32()),
+            pa.field("individual_name", pa.string()),
+            pa.field("stage_c_pass", pa.bool_()),
+        ]
+    )
+    table = pa.Table.from_pylist(
+        [{"run_id": "run_legacy", "run_number": 1,
+          "individual_name": "g0_i0", "stage_c_pass": True}],
+        schema=minimal_schema,
+    )
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, parquet_path)
+
+
+def test_run_alpha_sieve_log_only_skips_v1_archive_with_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T058 PR 5 (詳細設計 行 1437): LOG_ONLY mode で v1 archive を空 list で skip."""
+    from src.alpha_factory.schema_contract import SchemaEnforcementMode
+
+    v1_path = tmp_path / "v1_archive.parquet"
+    _write_v1_archive(v1_path)
+    candidates = sieve_mod._load_stage_c_passers(
+        v1_path, mode=SchemaEnforcementMode.LOG_ONLY
+    )
+    assert candidates == []
+
+
+def test_run_alpha_sieve_fail_closed_raises_on_v1_archive(
+    tmp_path: Path,
+) -> None:
+    """T058 PR 5 (詳細設計 行 1438): FAIL_CLOSED mode で v1 archive は SchemaVersionError raise."""
+    from src.alpha_factory.schema_contract import (
+        SchemaEnforcementMode,
+        SchemaVersionError,
+    )
+
+    v1_path = tmp_path / "v1_archive.parquet"
+    _write_v1_archive(v1_path)
+    with pytest.raises(SchemaVersionError, match="v1 archive"):
+        sieve_mod._load_stage_c_passers(
+            v1_path, mode=SchemaEnforcementMode.FAIL_CLOSED
+        )
+
+
+def test_run_alpha_sieve_v2_archive_processed_normally(tmp_path: Path) -> None:
+    """T058 PR 5 (詳細設計 行 1439): v2 archive は LOG_ONLY/FAIL_CLOSED どちらでも処理."""
+    from src.alpha_factory.schema_contract import SchemaEnforcementMode
+
+    parquet_path = tmp_path / "v2.parquet"
+    rows = [
+        _make_archive_row(individual_name="g0_i0", stage_c_pass=True),
+        _make_archive_row(individual_name="g0_i1", stage_c_pass=False),
+    ]
+    _write_archive(parquet_path, rows)
+    # FAIL_CLOSED でも v2 archive なら raise しない
+    candidates = sieve_mod._load_stage_c_passers(
+        parquet_path, mode=SchemaEnforcementMode.FAIL_CLOSED
+    )
+    assert [c.individual_name for c in candidates] == ["g0_i0"]
+
+
+# ---------------------------------------------------------------------------
 # 8-10: main flow (no archive / no_candidates / no_data)
 # ---------------------------------------------------------------------------
 

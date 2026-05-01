@@ -206,3 +206,124 @@ def test_existing_summary_contract_preserved_under_parallel_mode(
         "per_generation",
     ):
         assert key in summary, f"existing summary key '{key}' missing"
+
+
+# ---------------------------------------------------------------------------
+# T058 PR 5: RunContext / dataset_epoch_id propagation
+# ---------------------------------------------------------------------------
+
+
+def _run_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, sub_dir: str
+) -> tuple[Path, dict[str, Any]]:
+    """1 RUN を実行して (run_dir, summary) を返す T058 用 helper."""
+    out_root = _setup_smoke_run_env(monkeypatch, tmp_path, sub_dir=sub_dir)
+    rc = run_ga_module.main(
+        [
+            "--config", str(CONFIG_PATH),
+            "--run-id", "run_t058_pr5_artifact",
+            "--population-size", "4",
+            "--generations", "1",
+            "--seed", "42",
+            "--max-workers", "1",
+        ]
+    )
+    assert rc == 0
+    run_dir = out_root / "reports" / "run-1"
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    return run_dir, summary
+
+
+def test_summary_json_includes_cascade_contract_version_and_dataset_epoch_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T058 PR 5: summary.json に cascade_contract_version + dataset_epoch_id が入る."""
+    _run_dir, summary = _run_artifacts(
+        monkeypatch, tmp_path, sub_dir="t058_summary"
+    )
+    assert summary["cascade_contract_version"] == 2
+    assert summary["dataset_epoch_id"] == "epoch_legacy"
+
+
+def test_summary_json_schema_version_remains_string_one_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T058 PR 5: schema_version は **string "1.1"** のまま (test 互換性維持)."""
+    _run_dir, summary = _run_artifacts(
+        monkeypatch, tmp_path, sub_dir="t058_schema_string"
+    )
+    sv = summary["schema_version"]
+    assert isinstance(sv, str)
+    assert sv == "1.1"
+
+
+def test_cascade_contract_version_is_int_in_summary_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T058 PR 5 (型固定): cascade_contract_version は **int**, schema_version は str."""
+    _run_dir, summary = _run_artifacts(
+        monkeypatch, tmp_path, sub_dir="t058_int_type"
+    )
+    ccv = summary["cascade_contract_version"]
+    assert isinstance(ccv, int)
+    assert not isinstance(ccv, bool)  # bool は int subclass なので除外
+    assert ccv == 2
+
+
+def test_history_json_each_entry_includes_dataset_epoch_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T058 PR 5: history.json の各 entry に dataset_epoch_id 付与."""
+    run_dir, _ = _run_artifacts(monkeypatch, tmp_path, sub_dir="t058_history")
+    history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
+    assert isinstance(history, list)
+    assert history, "history.json should be non-empty"
+    for entry in history:
+        assert entry["dataset_epoch_id"] == "epoch_legacy"
+
+
+def test_best_genome_json_includes_dataset_epoch_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T058 PR 5: best_genome.json に dataset_epoch_id field 付与."""
+    run_dir, _ = _run_artifacts(monkeypatch, tmp_path, sub_dir="t058_best")
+    bg = json.loads((run_dir / "best_genome.json").read_text(encoding="utf-8"))
+    assert bg["dataset_epoch_id"] == "epoch_legacy"
+    # 既存 genome_to_dict 構造 (name 等) も維持
+    assert "name" in bg
+
+
+def test_population_jsonl_each_line_includes_dataset_epoch_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T058 PR 5: population.jsonl の各 line に dataset_epoch_id 付与."""
+    run_dir, _ = _run_artifacts(monkeypatch, tmp_path, sub_dir="t058_pop")
+    lines = (run_dir / "population.jsonl").read_text(encoding="utf-8").splitlines()
+    assert lines, "population.jsonl should be non-empty"
+    for raw in lines:
+        d = json.loads(raw)
+        assert d["dataset_epoch_id"] == "epoch_legacy"
+        assert "name" in d
+        assert "fitness" in d
+
+
+def test_run_cache_json_includes_dataset_epoch_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T058 PR 5: .cache/alpha_factory/runs/{run_id}.json に dataset_epoch_id 付与."""
+    out_root = _setup_smoke_run_env(monkeypatch, tmp_path, sub_dir="t058_cache")
+    rc = run_ga_module.main(
+        [
+            "--config", str(CONFIG_PATH),
+            "--run-id", "run_t058_pr5_cache_check",
+            "--population-size", "4",
+            "--generations", "1",
+            "--seed", "42",
+            "--max-workers", "1",
+        ]
+    )
+    assert rc == 0
+    cache_path = out_root / "cache" / "run_t058_pr5_cache_check.json"
+    cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert cache["run_id"] == "run_t058_pr5_cache_check"
+    assert cache["dataset_epoch_id"] == "epoch_legacy"

@@ -50,6 +50,7 @@ from src.alpha_factory.config import (
     load_config,
 )
 from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
+from src.alpha_factory.schema_contract import SchemaEnforcementMode
 from src.backtest.engine import BacktestConfig, run_backtest
 from src.backtest.metrics import DEFAULT_TRADE_COUNT_MIN_FOR_SHARPE, compute_metrics
 from src.broker import InstrumentMeta
@@ -217,9 +218,37 @@ def _resolve_run(
 # ---------------------------------------------------------------------------
 
 
-def _load_stage_c_passers(parquet_path: Path) -> list[CandidateRow]:
-    """archive Parquet を読み、stage_c_pass=True 行を CandidateRow として返す。"""
-    table = GenomeArchive.load(parquet_path)
+def _load_stage_c_passers(
+    parquet_path: Path,
+    *,
+    mode: SchemaEnforcementMode = SchemaEnforcementMode.LOG_ONLY,
+) -> list[CandidateRow]:
+    """archive Parquet を読み、stage_c_pass=True 行を CandidateRow として返す。
+
+    T058 PR 5 (詳細設計 行 1421-1432): ``GenomeArchive.load`` を tuple 受取に
+    切替え、 v1 archive を mode に従って handle する。
+
+    - ``mode=LOG_ONLY``: v1 archive 検出時 warning + 空 list 返却 (sieve 結果から除外)
+    - ``mode=FAIL_CLOSED``: ``GenomeArchive.load`` 内で SchemaVersionError raise
+
+    既存 v2 archive 経路は変更なし (table を従来通り処理)。
+    """
+    result = GenomeArchive.load(
+        parquet_path, mode=mode, return_schema_version=True
+    )
+    # tuple 確定 (return_schema_version=True 指定時の契約)
+    assert isinstance(result, tuple), (
+        "GenomeArchive.load(return_schema_version=True) must return tuple"
+    )
+    table, schema_version = result
+    if schema_version is None:
+        # FAIL_CLOSED は load 内で SchemaVersionError raise 済み (= ここに来るのは LOG_ONLY のみ)
+        logger.warning(
+            "alpha_sieve.v1_archive_skipped",
+            archive_path=str(parquet_path),
+            mode=mode.value,
+        )
+        return []
     n_rows = table.num_rows
     if n_rows == 0:
         return []
@@ -755,7 +784,11 @@ def main(argv: list[str] | None = None) -> int:
 
     generated_at = datetime.now(UTC)
 
-    candidates = _load_stage_c_passers(archive_path)
+    # T058 PR 5: schema_contract enforcement mode を cfg から取得し、
+    # archive load に伝搬 (詳細設計 行 1421)。
+    cfg_for_mode = load_config(args.config, overrides={})
+    sieve_mode = cfg_for_mode.schema_contract.to_mode()
+    candidates = _load_stage_c_passers(archive_path, mode=sieve_mode)
     if not candidates:
         report = _render_report(
             status="no_candidates",

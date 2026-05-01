@@ -10,10 +10,14 @@ T058 段階の必須注入は archive / calibrate / diagnostics の主要 3 comp
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from src.alpha_factory.schema_contract import validate_epoch_id
 
-__all__ = ["RunContext"]
+if TYPE_CHECKING:
+    from src.alpha_factory.config import DatasetConfig
+
+__all__ = ["RunContext", "generate_epoch_id_stub"]
 
 
 @dataclass(frozen=True)
@@ -47,3 +51,25 @@ class RunContext:
             raise ValueError("run_context.base_config_hash must be non-empty")
         if not self.instrument:
             raise ValueError("run_context.instrument must be non-empty")
+
+
+# ---------------------------------------------------------------------------
+# T058 stub: T059 で deterministic 生成に置換
+# ---------------------------------------------------------------------------
+
+
+def generate_epoch_id_stub(dataset_cfg: DatasetConfig) -> str:
+    """T058 stub: dataset_epoch_id の固定 stub 値を返す.
+
+    T058 段階では deterministic 生成 (T059 で実装) が未着手のため、
+    全経路で同一の ``"epoch_legacy"`` を返す。 grammar [a-z0-9_]+ 適合済。
+
+    T059 完了後、 dataset の (instrument / start / end / data hash 等) から
+    deterministic な epoch-rolling 識別子を生成する関数に置換される。
+
+    Args:
+        dataset_cfg: 現段階では参照しないが、 T059 移行時の signature 互換のため
+            受け取る (実装側が引数欠落で壊れない)。
+    """
+    del dataset_cfg  # T058 段階では未使用 (T059 で hash 計算に使う)
+    return "epoch_legacy"

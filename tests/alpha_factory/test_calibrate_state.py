@@ -563,10 +563,12 @@ class TestThresholdSourceCliOverridesHistory:
         )
         _write_history([rec], history)
         # CLI override = 0.99 で history 値 0.0778 より優先される
+        # T058 PR 5: dataset_epoch_id を caller (RunContext 経由) から渡す signature
         threshold, source = _resolve_stage_a_threshold(
             af_cfg,
             cli_override=0.99,
             history_path=history,
+            dataset_epoch_id="epoch_legacy",
         )
         assert threshold == 0.99
         assert source == "cli"
@@ -588,10 +590,12 @@ class TestThresholdSourceCliOverridesHistory:
             dataset_epoch_id="epoch_legacy",
         )
         _write_history([rec], history)
+        # T058 PR 5: dataset_epoch_id を caller (RunContext 経由) から渡す signature
         threshold, source = _resolve_stage_a_threshold(
             af_cfg,
             cli_override=None,
             history_path=history,
+            dataset_epoch_id="epoch_legacy",
         )
         assert threshold == 0.0778
         assert source == "history"
@@ -603,10 +607,12 @@ class TestThresholdSourceCliOverridesHistory:
         from scripts.alpha_factory.run_ga import _resolve_stage_a_threshold
 
         history = tmp_path / "missing_history.jsonl"
+        # T058 PR 5: dataset_epoch_id を caller (RunContext 経由) から渡す signature
         threshold, source = _resolve_stage_a_threshold(
             af_cfg,
             cli_override=None,
             history_path=history,
+            dataset_epoch_id="epoch_legacy",
         )
         assert threshold == af_cfg.stage_gate.stage_a_threshold
         assert source == "config"
