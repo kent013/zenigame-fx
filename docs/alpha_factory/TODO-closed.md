@@ -61,6 +61,7 @@
 | T056 | negative equity 再発の根本修正（多層防御 + OANDA spec 文書化） | infrastructure | Critical | 2026-04-27 22:18 | - |
 | T057 | aux data loader Phase 2 — 実データ取得 + production wiring（FRED + aux_pair_bars + events + preflight + strict 化） | data-ingest | Critical | 2026-04-28 00:31 | - |
 | T058 | T058-schema-v2-contract | infrastructure | Critical | 2026-05-01 15:35 | - |
+| T059 | T059-epoch-window-manager | infrastructure | Critical | 2026-05-01 17:03 | - |
 
 ## Obsoleted
 
