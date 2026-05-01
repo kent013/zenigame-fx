@@ -6,7 +6,6 @@ zenigame-fx Alpha Factory の改善タスク一覧。
 
 | ID | タイトル | テーマ | 概要 | 優先度 | 実装モード | 設計 | 追加日時 |
 |----|---------|-------|------|-------|----------|------|---------|
-| T060 | T060-partition-fold-generator | stage-gate | Partition (10 領域) + Fold (5 folds) generator | Critical | incremental | [設計](devnotes/20260429-2210-todo-T060-partition-fold-generator/) | 2026-04-29 22:44 |
 | T061 | T061-canonical-five-engine | stage-gate | canonical 5 engine: HAC Bartlett q=5 SR + session block win rate + slack_to_range + log_pf_clip + invariant fail-fast | Critical | incremental | [設計](devnotes/20260429-2300-todo-T061-canonical-five-engine/) | 2026-04-30 00:00 |
 | T062 | T062-mission-inf-gap-engine | ga-architecture | mission_inf_gap engine: 4 指標 (sharpe/pnl/dd/tc) inf-norm shortfall + constraint_violation + mission_signed_margin (Pareto f3 / Deb 2000 用) | Critical | incremental | [設計](devnotes/20260430-0030-todo-T062-mission-inf-gap-engine/) | 2026-04-30 00:42 |
 | T063 | T063-stage-a-evaluator | stage-gate | Stage A evaluator: T061 + q_force 動的計算 + A→B 乖離自動引き上げ + 世代内 top q_force% 選抜 (state-immutable pure function) | Critical | incremental | [設計](devnotes/20260430-0130-todo-T063-stage-a-evaluator/) | 2026-04-30 09:41 |

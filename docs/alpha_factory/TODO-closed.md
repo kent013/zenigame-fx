@@ -62,6 +62,7 @@
 | T057 | aux data loader Phase 2 — 実データ取得 + production wiring（FRED + aux_pair_bars + events + preflight + strict 化） | data-ingest | Critical | 2026-04-28 00:31 | - |
 | T058 | T058-schema-v2-contract | infrastructure | Critical | 2026-05-01 15:35 | - |
 | T059 | T059-epoch-window-manager | infrastructure | Critical | 2026-05-01 17:03 | - |
+| T060 | T060-partition-fold-generator | stage-gate | Critical | 2026-05-01 17:48 | - |
 
 ## Obsoleted
 
