@@ -166,14 +166,16 @@ def _make_archive() -> GenomeArchive:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_has_43_columns() -> None:
+def test_schema_has_47_columns() -> None:
     # T-sharpe Phase 1A: trade_sharpe_raw + sharpe_calc_version (28→30)
     # T035: n_fold_effective + positive_fold_ratio_effective + stage_b_reason_codes (30→33)
     # T043: mission_score (33→34)
     # T036: FSP 6 列 (34→40)
     # T044: trade_sharpe_stage_b + trade_sharpe_stage_c (40→42)
     # T054: stage_b_unavailable_reason_counts (42→43)
-    assert len(GENOMES_SCHEMA.names) == 43
+    # T058: schema v2 4 field (genome_entry_schema_version / dataset_epoch_id
+    #       / archive_role / source_stage) (43→47)
+    assert len(GENOMES_SCHEMA.names) == 47
     expected = {
         "run_id", "run_number", "generation", "individual_name",
         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
@@ -196,6 +198,9 @@ def test_schema_has_43_columns() -> None:
         # T036: Factor Shadow Plane (FSP) 6 列
         "fsp_runtime_mode", "fsp_sampling_mode", "fsp_factor_set",
         "fsp_rolling_corr_60d", "fsp_explained_variance", "fsp_idio_ratio",
+        # T058: schema v2 必須 4 field
+        "genome_entry_schema_version", "dataset_epoch_id",
+        "archive_role", "source_stage",
     }
     assert set(GENOMES_SCHEMA.names) == expected
 
@@ -221,6 +226,8 @@ def test_template_default_values() -> None:
         "stage_b_reason_codes",
         # T043: mission_score (Stage C 評価時のみ書き込み)
         "mission_score",
+        # T058: archive_role / source_stage は T066 / T063-T064 で書込、 default None
+        "archive_role", "source_stage",
     ):
         assert t[k] is None, f"{k} should default to None"
     # non-null bool -> False
@@ -828,6 +835,9 @@ def test_schema_nullable_attributes() -> None:
         # T036: FSP 6 列 (post-RUN updater が書き込む、collect_stage_* では null)
         "fsp_runtime_mode", "fsp_sampling_mode", "fsp_factor_set",
         "fsp_rolling_corr_60d", "fsp_explained_variance", "fsp_idio_ratio",
+        # T058: archive_role (T066 で書込) / source_stage (T063-T064 で書込) は
+        # null 許容。 genome_entry_schema_version / dataset_epoch_id は non-null。
+        "archive_role", "source_stage",
     }
     for f in GENOMES_SCHEMA:
         if f.name in nullable_cols:
@@ -1014,3 +1024,329 @@ def test_collect_stage_b_writes_none_reason_codes_when_passed() -> None:
     arc.collect_stage_b(g, lane_id="lane1", generation=0, stage_result=sr, instrument="EUR_JPY")
     rows = list(arc._rows.values())
     assert rows[0]["stage_b_reason_codes"] is None
+
+
+# ---------------------------------------------------------------------------
+# T058: schema v2 contract — 4 field 追加 + flush lint 連動
+# ---------------------------------------------------------------------------
+
+
+def _make_run_context(
+    *,
+    run_id: str = "run_test_20260423_180000",
+    run_number: int = 1,
+    dataset_epoch_id: str = "epoch_20260101_20260401",
+    base_config_hash: str = "deadbeef",
+    instrument: str = "USD_JPY",
+):
+    from src.alpha_factory.run_context import RunContext
+
+    return RunContext(
+        run_id=run_id,
+        run_number=run_number,
+        dataset_epoch_id=dataset_epoch_id,
+        base_config_hash=base_config_hash,
+        instrument=instrument,
+    )
+
+
+def test_t058_genomes_schema_includes_v2_required_fields() -> None:
+    """T058: GENOMES_SCHEMA に v2 必須 4 field が存在する."""
+    names = set(GENOMES_SCHEMA.names)
+    assert "genome_entry_schema_version" in names
+    assert "dataset_epoch_id" in names
+    assert "archive_role" in names
+    assert "source_stage" in names
+
+    # 型検証: schema_version=int32 / 他=string
+    assert GENOMES_SCHEMA.field("genome_entry_schema_version").type == pa.int32()
+    assert GENOMES_SCHEMA.field("dataset_epoch_id").type == pa.string()
+    assert GENOMES_SCHEMA.field("archive_role").type == pa.string()
+    assert GENOMES_SCHEMA.field("source_stage").type == pa.string()
+
+    # nullability:
+    # - genome_entry_schema_version / dataset_epoch_id は non-null (必須 contract)
+    # - archive_role / source_stage は T066 / T063-T064 で書込、 T058 では None 許容
+    assert not GENOMES_SCHEMA.field("genome_entry_schema_version").nullable
+    assert not GENOMES_SCHEMA.field("dataset_epoch_id").nullable
+    assert GENOMES_SCHEMA.field("archive_role").nullable
+    assert GENOMES_SCHEMA.field("source_stage").nullable
+
+
+def test_t058_create_row_template_initializes_v2_fields_with_defaults() -> None:
+    """T058: row template が v2 4 field を default 値で初期化する."""
+    from src.alpha_factory.schema_contract import GENOME_ENTRY_SCHEMA_VERSION
+
+    t = _create_row_template()
+    assert t["genome_entry_schema_version"] == GENOME_ENTRY_SCHEMA_VERSION
+    # epoch_legacy stub: T059 で deterministic 値に置換されるが、 grammar
+    # [a-z0-9_]+ には適合させる (validator が grammar 違反として警告しないように)。
+    assert t["dataset_epoch_id"] == "epoch_legacy"
+    assert t["archive_role"] is None
+    assert t["source_stage"] is None
+
+
+def test_t058_genome_archive_init_with_legacy_signature_works_without_run_context() -> None:
+    """T058: 既存 caller (run_context / enforcement_mode 省略) で構築可能."""
+    arc = GenomeArchive(run_id="run_x", run_number=1)
+    assert arc.run_context is None
+    # default は LOG_ONLY
+    from src.alpha_factory.schema_contract import SchemaEnforcementMode
+
+    assert arc.enforcement_mode == SchemaEnforcementMode.LOG_ONLY
+
+
+def test_t058_genome_archive_init_accepts_run_context_kwarg() -> None:
+    """T058: 新 caller が run_context / enforcement_mode を kwarg で渡せる."""
+    from src.alpha_factory.schema_contract import SchemaEnforcementMode
+
+    ctx = _make_run_context()
+    arc = GenomeArchive(
+        run_id="run_x",
+        run_number=1,
+        run_context=ctx,
+        enforcement_mode=SchemaEnforcementMode.FAIL_CLOSED,
+    )
+    assert arc.run_context is ctx
+    assert arc.enforcement_mode == SchemaEnforcementMode.FAIL_CLOSED
+
+
+def test_t058_flush_injects_dataset_epoch_id_from_run_context(
+    tmp_path: Path,
+) -> None:
+    """T058: flush 時に template の "epoch_legacy" stub が RunContext の値で
+    上書きされる (run_context 注入時)。"""
+    ctx = _make_run_context(dataset_epoch_id="epoch_20260101_20260401")
+    arc = GenomeArchive(
+        run_id="run_test_20260423_180000",
+        run_number=1,
+        run_context=ctx,
+    )
+    # template default では dataset_epoch_id="epoch_legacy" だが flush で上書き
+    # されるためには row が "epoch_legacy" or empty/None である必要がある。
+    # _create_row_template の default が "epoch_legacy" のため、 collect_stage_a
+    # で行を作った直後は "epoch_legacy"。 flush で run_context 値に上書きしたい
+    # ので、 まず row を作って明示的に空文字に落としておく (実環境では legacy
+    # stub と空の両方を補完したい意図、 詳細設計 行 737)。
+    arc.collect_stage_a(
+        _stub_genome(), "lane", 0, _stage_a_result(), instrument="USD_JPY"
+    )
+    arc._rows[("lane", 0, "g0_i0")]["dataset_epoch_id"] = ""
+    out = arc.flush(tmp_path)
+
+    table = GenomeArchive.load(out)
+    d = table.to_pylist()[0]
+    assert d["dataset_epoch_id"] == "epoch_20260101_20260401"
+
+
+def test_t058_flush_keeps_epoch_legacy_when_run_context_none(
+    tmp_path: Path,
+) -> None:
+    """T058: run_context 注入なしなら template の "epoch_legacy" stub のまま
+    permanent (= T059 で deterministic 値に置換される予定)。"""
+    arc = GenomeArchive(
+        run_id="run_test_20260423_180000", run_number=1
+    )
+    arc.collect_stage_a(
+        _stub_genome(), "lane", 0, _stage_a_result(), instrument="USD_JPY"
+    )
+    out = arc.flush(tmp_path)
+    table = GenomeArchive.load(out)
+    d = table.to_pylist()[0]
+    # template default のまま flush
+    assert d["dataset_epoch_id"] == "epoch_legacy"
+    # archive_role / source_stage は T066 / T063-T064 で書込のため None
+    assert d["archive_role"] is None
+    assert d["source_stage"] is None
+    # genome_entry_schema_version は常に 2
+    assert d["genome_entry_schema_version"] == 2
+
+
+def test_t058_flush_log_only_does_not_raise_for_grammar_violation(
+    tmp_path: Path,
+) -> None:
+    """T058: LOG_ONLY mode で dataset_epoch_id grammar 違反があっても raise
+    せず、 schema_lint_summary log を出して flush 完了する."""
+    arc = GenomeArchive(
+        run_id="run_test_20260423_180000", run_number=1
+    )
+    arc.collect_stage_a(
+        _stub_genome(), "lane", 0, _stage_a_result(), instrument="USD_JPY"
+    )
+    # grammar 違反 (大文字を含む) を意図的に注入
+    arc._rows[("lane", 0, "g0_i0")]["dataset_epoch_id"] = "EPOCH_BAD"
+
+    with capture_logs() as logs:
+        out = arc.flush(tmp_path)
+    assert out.exists()
+    # LOG_ONLY mode → schema_lint_summary が出る
+    summary_logs = [
+        log for log in logs if log["event"] == "archive.flush.schema_lint_summary"
+    ]
+    assert len(summary_logs) == 1
+    assert summary_logs[0]["warning_count"] == 1
+    assert summary_logs[0]["mode"] == "log_only"
+    assert summary_logs[0]["run_id"] == "run_test_20260423_180000"
+    # warning lint 自体も発火している (validator 内 + invalid_epoch_id event)
+    assert any(
+        log["event"] == "schema_contract.invalid_epoch_id" for log in logs
+    )
+
+
+def test_t058_flush_log_only_summary_aggregates_multiple_warnings(
+    tmp_path: Path,
+) -> None:
+    """T058: 同一 flush で複数 row の lint warning が per-run summary に集約."""
+    arc = GenomeArchive(
+        run_id="run_test_20260423_180000", run_number=1
+    )
+    g0 = _stub_genome("g0_i0")
+    g1 = _stub_genome("g0_i1")
+    arc.collect_stage_a(g0, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    arc.collect_stage_a(g1, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    arc._rows[("lane", 0, "g0_i0")]["dataset_epoch_id"] = "BAD-1"
+    arc._rows[("lane", 0, "g0_i1")]["dataset_epoch_id"] = "BAD-2"
+
+    with capture_logs() as logs:
+        arc.flush(tmp_path)
+    summary_logs = [
+        log for log in logs if log["event"] == "archive.flush.schema_lint_summary"
+    ]
+    assert len(summary_logs) == 1
+    assert summary_logs[0]["warning_count"] == 2
+
+
+def test_t058_flush_log_only_no_summary_when_no_warnings(
+    tmp_path: Path,
+) -> None:
+    """T058: lint warning 0 件なら schema_lint_summary log は出ない."""
+    ctx = _make_run_context(dataset_epoch_id="epoch_20260101_20260401")
+    arc = GenomeArchive(
+        run_id="run_test_20260423_180000",
+        run_number=1,
+        run_context=ctx,
+    )
+    arc.collect_stage_a(
+        _stub_genome(), "lane", 0, _stage_a_result(), instrument="USD_JPY"
+    )
+
+    with capture_logs() as logs:
+        arc.flush(tmp_path)
+    summary_logs = [
+        log for log in logs if log["event"] == "archive.flush.schema_lint_summary"
+    ]
+    assert len(summary_logs) == 0
+
+
+def test_t058_flush_fail_closed_raises_on_grammar_violation(
+    tmp_path: Path,
+) -> None:
+    """T058: FAIL_CLOSED mode で grammar 違反は SchemaContractError raise."""
+    from src.alpha_factory.schema_contract import (
+        SchemaContractError,
+        SchemaEnforcementMode,
+    )
+
+    arc = GenomeArchive(
+        run_id="run_test_20260423_180000",
+        run_number=1,
+        enforcement_mode=SchemaEnforcementMode.FAIL_CLOSED,
+    )
+    arc.collect_stage_a(
+        _stub_genome(), "lane", 0, _stage_a_result(), instrument="USD_JPY"
+    )
+    # grammar 違反 (大文字を含む) を注入
+    arc._rows[("lane", 0, "g0_i0")]["dataset_epoch_id"] = "EPOCH_BAD"
+    with pytest.raises(SchemaContractError):
+        arc.flush(tmp_path)
+
+
+def test_t058_flush_fail_closed_passes_when_all_v2_fields_valid(
+    tmp_path: Path,
+) -> None:
+    """T058: FAIL_CLOSED mode で v2 4 field 全部揃っていれば raise しない."""
+    from src.alpha_factory.schema_contract import SchemaEnforcementMode
+
+    ctx = _make_run_context(dataset_epoch_id="epoch_20260101_20260401")
+    arc = GenomeArchive(
+        run_id="run_test_20260423_180000",
+        run_number=1,
+        run_context=ctx,
+        enforcement_mode=SchemaEnforcementMode.FAIL_CLOSED,
+    )
+    arc.collect_stage_a(
+        _stub_genome(), "lane", 0, _stage_a_result(), instrument="USD_JPY"
+    )
+    out = arc.flush(tmp_path)
+    assert out.exists()
+
+
+def test_t058_flush_persists_v2_field_values_through_parquet_roundtrip(
+    tmp_path: Path,
+) -> None:
+    """T058: archive_role / source_stage に手動で値を設定すると Parquet 経由
+    で読み戻せる (T063-T064 / T066 で本書込される値の経路確認)."""
+    arc = GenomeArchive(
+        run_id="run_test_20260423_180000", run_number=1
+    )
+    arc.collect_stage_a(
+        _stub_genome(), "lane", 0, _stage_a_result(), instrument="USD_JPY"
+    )
+    arc._rows[("lane", 0, "g0_i0")]["archive_role"] = "mission_pass"
+    arc._rows[("lane", 0, "g0_i0")]["source_stage"] = "c"
+    out = arc.flush(tmp_path)
+
+    table = GenomeArchive.load(out)
+    d = table.to_pylist()[0]
+    assert d["archive_role"] == "mission_pass"
+    assert d["source_stage"] == "c"
+    assert d["genome_entry_schema_version"] == 2
+
+
+def test_t058_flush_resets_lint_warning_count_between_flushes(
+    tmp_path: Path,
+) -> None:
+    """T058 (Codex Round 1 [Warning] 1): 同一 GenomeArchive で連続 flush しても
+    _lint_warning_count が累積汚染しないこと (= flush 開始時に reset)。"""
+    arc = GenomeArchive(
+        run_id="run_test_20260423_180000", run_number=1
+    )
+    arc.collect_stage_a(
+        _stub_genome(), "lane", 0, _stage_a_result(), instrument="USD_JPY"
+    )
+    # 1 回目: grammar 違反を入れて summary log warning_count=1 を期待
+    arc._rows[("lane", 0, "g0_i0")]["dataset_epoch_id"] = "BAD-FIRST"
+    with capture_logs() as logs1:
+        arc.flush(tmp_path)
+    summary1 = [
+        log for log in logs1 if log["event"] == "archive.flush.schema_lint_summary"
+    ]
+    assert len(summary1) == 1
+    assert summary1[0]["warning_count"] == 1
+
+    # 2 回目: 違反を解消、 同一 archive instance で再 flush。
+    # _lint_warning_count が前回値に累積していれば 2 になるはず → reset 動作で 0 期待
+    arc._rows[("lane", 0, "g0_i0")]["dataset_epoch_id"] = "epoch_legacy"
+    with capture_logs() as logs2:
+        arc.flush(tmp_path / "second")
+    # warning 0 件なら summary log は出ない設計
+    summary2 = [
+        log for log in logs2 if log["event"] == "archive.flush.schema_lint_summary"
+    ]
+    assert len(summary2) == 0
+    # 内部 counter も 0 にリセットされている
+    assert arc._lint_warning_count == 0
+
+
+def test_t058_genomes_schema_column_order_keeps_v2_fields_at_head() -> None:
+    """T058 (Codex Round 1 [Warning] 2): set ではなく順序で v2 4 field の相対
+    位置を確認 (= 詳細設計 行 672-688 の通り schema 先頭 4 列に配置)。
+    schema 順序の意図しないドリフトを検知する。"""
+    names = GENOMES_SCHEMA.names
+    # 詳細設計通り、 schema 先頭 4 列に v2 必須 field が配置される
+    assert names[0] == "genome_entry_schema_version"
+    assert names[1] == "dataset_epoch_id"
+    assert names[2] == "archive_role"
+    assert names[3] == "source_stage"
+    # v2 4 field の直後に既存 run_id 列が来る (= 既存列の相対順序を破壊しない)
+    assert names[4] == "run_id"

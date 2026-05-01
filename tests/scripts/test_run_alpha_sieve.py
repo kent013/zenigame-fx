@@ -43,6 +43,11 @@ def _make_archive_row(
     genome_json: str = '{"name":"g0_i0"}',
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
+        # T058: schema v2 必須 4 field (GENOMES_SCHEMA non-null)
+        "genome_entry_schema_version": 2,
+        "dataset_epoch_id": "epoch_legacy",
+        "archive_role": None,
+        "source_stage": None,
         "run_id": "run_test",
         "run_number": 99,
         "generation": generation,

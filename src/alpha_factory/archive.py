@@ -5,12 +5,13 @@ GA Run の個体評価結果を 1 行 = 1 個体 (lane × generation × individu
 （parent_a / parent_b）に使う。
 
 主な公開 API:
-    - :data:`GENOMES_SCHEMA` — Parquet schema (33 カラム; T-sharpe Phase 1A で +2、T035 で +3)
+    - :data:`GENOMES_SCHEMA` — Parquet schema (47 カラム; T058 で v2 4 field 追加)
     - :class:`GenomeArchive` — 1 Run 分の buffering + flush
 
 仕様:
     - docs/alpha_factory/concepts/genome-archive-schema.md
     - devnotes/20260423-1826-genome-archive-schema/{conceptual,detailed}-design.md
+    - devnotes/20260429-1912-todo-T058-schema-v2-contract/detailed-design.md
 
 設計上のポイント:
     - **複合主キー** ``(lane_id, generation, individual_name)`` で
@@ -20,6 +21,12 @@ GA Run の個体評価結果を 1 行 = 1 個体 (lane × generation × individu
     - **4 段伝搬契約**: GENOMES_SCHEMA → ``_create_row_template`` →
       ``collect_stage_*`` → ``flush`` のカラム抜けは import-time assert と
       ``flush`` の last-mile guard で 2 段検証
+    - **T058 schema v2 contract**: ``flush()`` で
+      :func:`assert_genome_entry_v2` を呼び出して必須 4 field
+      (genome_entry_schema_version / dataset_epoch_id / archive_role /
+      source_stage) を passive validation。 mode=LOG_ONLY (default) では
+      warning + ``schema_lint_summary`` 集約 log、 FAIL_CLOSED で
+      :class:`SchemaContractError` を raise。
 """
 
 from __future__ import annotations
@@ -34,6 +41,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import structlog
 
+from src.alpha_factory.run_context import RunContext
+from src.alpha_factory.schema_contract import (
+    GENOME_ENTRY_SCHEMA_VERSION,
+    SchemaEnforcementMode,
+    assert_genome_entry_v2,
+)
 from src.alpha_factory.stage_gate import CrossPairResult, StageResult
 from src.alpha_factory.statistics import fold_sign_ratio
 from src.dsl.genome import Genome
@@ -48,11 +61,25 @@ logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Schema definition (28 columns)
+# Schema definition (47 columns; T058 で v2 4 field 追加 = 43 + 4)
 # ---------------------------------------------------------------------------
 
 GENOMES_SCHEMA: pa.Schema = pa.schema(
     [
+        # T058: schema v2 必須 4 field
+        # - genome_entry_schema_version: 整数 schema バージョン (= 2)。
+        #   v1 archive 区別用 (T067 で fail_closed 切替時に使う)。
+        # - dataset_epoch_id: epoch-rolling 識別子 (T059 で deterministic 生成、
+        #   T058 段階では RunContext 経由 or "epoch_legacy" stub)。
+        # - archive_role: archive 流入 3 層 ("mission_pass" / "progress_pass"
+        #   / "score_bypass")、 T066 で書込 (T058 では None 既定)。
+        # - source_stage: 個体評価の最終 stage ("a" / "b" / "c_lite" / "c")、
+        #   T063-T064 で書込 (T058 では None 既定)。
+        pa.field("genome_entry_schema_version", pa.int32(), nullable=False),
+        pa.field("dataset_epoch_id", pa.string(), nullable=False),
+        pa.field("archive_role", pa.string(), nullable=True),
+        pa.field("source_stage", pa.string(), nullable=True),
+        # 既存 43 field
         pa.field("run_id", pa.string(), nullable=False),
         pa.field("run_number", pa.int32(), nullable=False),
         pa.field("generation", pa.int32(), nullable=False),
@@ -141,6 +168,15 @@ def _create_row_template() -> dict[str, Any]:
     上書きする。
     """
     return {
+        # T058: schema v2 必須 4 field の default
+        # - genome_entry_schema_version は常に 2 (schema 自体のバージョン)
+        # - dataset_epoch_id は "epoch_legacy" stub (T059 で deterministic 値に置換)。
+        #   grammar [a-z0-9_]+ 適合。 RunContext 経由で flush() 時に上書きされる。
+        # - archive_role / source_stage は T066 / T063-T064 で書込、 T058 では None。
+        "genome_entry_schema_version": GENOME_ENTRY_SCHEMA_VERSION,
+        "dataset_epoch_id": "epoch_legacy",
+        "archive_role": None,
+        "source_stage": None,
         "run_id": "",
         "run_number": 0,
         "generation": 0,
@@ -331,10 +367,18 @@ class GenomeArchive:
     Attributes:
         run_id: ``run_YYYYMMDD_HHMMSS`` 形式の Run 識別子。
         run_number: 連番。
+        run_context: T058 で導入された 1 Run スコープの runtime context。
+            ``flush()`` 時に row の ``dataset_epoch_id`` 補完に使う。
+            ``None`` (default) なら template の "epoch_legacy" stub のまま。
+            既存 caller (run_ga.py 等) は省略可能 (backward compat)、 T058 では
+            optional 注入。 T067 で必須化予定。
+        enforcement_mode: schema_contract の lint mode (T058 default LOG_ONLY)。
 
     Internal:
         _rows: 主キー ``(lane_id, generation, individual_name)`` の dict。
             value は row dict（各 stage の collect で部分更新される）。
+        _lint_warning_count: per-run の lint warning 集計カウンタ
+            (LOG_ONLY mode で flush 末尾の summary log に出す)。
 
     重複 collect ポリシー (monotonic enrich):
         - 新規行 (key 未登録) → template から作成、collect 適用
@@ -345,10 +389,15 @@ class GenomeArchive:
 
     run_id: str
     run_number: int
+    run_context: RunContext | None = field(default=None, kw_only=True)
+    enforcement_mode: SchemaEnforcementMode = field(
+        default=SchemaEnforcementMode.LOG_ONLY, kw_only=True
+    )
 
     _rows: dict[tuple[str, int, str], dict[str, Any]] = field(
         default_factory=dict, init=False, repr=False
     )
+    _lint_warning_count: int = field(default=0, init=False, repr=False)
 
     DEFAULT_OUTPUT_DIR: ClassVar[Path] = Path(".cache/alpha_factory/runs")
 
@@ -582,6 +631,16 @@ class GenomeArchive:
         """全 row を Parquet に書き出して path を返す。
 
         ``output_dir`` 未指定なら ``DEFAULT_OUTPUT_DIR`` (``.cache/alpha_factory/runs/``)。
+
+        T058: 各 row に対して :func:`assert_genome_entry_v2` を呼び出し、
+        必須 4 field (genome_entry_schema_version / dataset_epoch_id /
+        archive_role / source_stage) を passive validation する。
+        ``run_context`` が注入されていれば、 row の ``dataset_epoch_id`` が
+        empty/None の場合に ``run_context.dataset_epoch_id`` で補完する
+        (template の "epoch_legacy" stub も含めて上書き)。
+        ``enforcement_mode=LOG_ONLY`` (default) では warning + per-run summary
+        log を出すのみで raise しない。 ``FAIL_CLOSED`` では validator が
+        :class:`SchemaContractError` を raise する。
         """
         out_dir = (
             Path(output_dir) if output_dir is not None else self.DEFAULT_OUTPUT_DIR
@@ -603,6 +662,37 @@ class GenomeArchive:
                     f"missing={missing} extra={extra}"
                 )
             clean_rows.append(cr)
+
+        # T058: 各 row に対して passive validation (mode 連動)
+        # - dataset_epoch_id が empty/None なら RunContext の値で補完
+        # - genome_entry_schema_version が無ければ default 補完 (template に
+        #   既に入っているが defensive)
+        # - assert_genome_entry_v2 を呼んで ValidationResult を集計
+        # - LOG_ONLY mode で warning が出れば per-run カウントを加算
+        # - FAIL_CLOSED mode では validator が SchemaContractError を raise
+        #   (= ここから return しない)
+        # 不変条件: lint は file 書込前に走るので、 FAIL_CLOSED で raise すれば
+        # Parquet ファイル自体が生成されない。
+        self._lint_warning_count = 0
+        for row in clean_rows:
+            if row.get("dataset_epoch_id") in (None, "") and self.run_context is not None:
+                row["dataset_epoch_id"] = self.run_context.dataset_epoch_id
+            row.setdefault(
+                "genome_entry_schema_version", GENOME_ENTRY_SCHEMA_VERSION
+            )
+            result = assert_genome_entry_v2(row, mode=self.enforcement_mode)
+            # FAIL_CLOSED は validator 内で raise 済み、 ここに来るのは LOG_ONLY のみ
+            if not result.ok:
+                self._lint_warning_count += 1
+
+        # 詳細設計 行 745: 末尾 summary log (per-run 集約、 LOG_ONLY mode のみ実質発火)
+        if self._lint_warning_count:
+            logger.warning(
+                "archive.flush.schema_lint_summary",
+                warning_count=self._lint_warning_count,
+                mode=self.enforcement_mode.value,
+                run_id=self.run_id,
+            )
 
         table = pa.Table.from_pylist(clean_rows, schema=GENOMES_SCHEMA)
         pq.write_table(table, path)
