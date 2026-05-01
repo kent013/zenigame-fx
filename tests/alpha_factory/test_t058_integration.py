@@ -465,20 +465,20 @@ def test_end_to_end_writes_v2_summary_json(
     assert isinstance(epoch_id, str) and epoch_id, (
         "dataset_epoch_id must be a non-empty string"
     )
-    # T058 段階 stub なので "epoch_legacy" になることを確認 (T059 で
-    # deterministic 値に置換される)
-    assert epoch_id == "epoch_legacy"
+    # T059: deterministic 生成に切替済 (smoke fixture: 2026-01-01 .. 2026-01-08)。
+    expected_epoch_id = "epoch_20260101_20260108"
+    assert epoch_id == expected_epoch_id
 
     # 派生 artifact (history.json / best_genome.json) にも propagate していること
     history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
     assert history, "history.json must be non-empty"
     for entry in history:
-        assert entry["dataset_epoch_id"] == "epoch_legacy"
+        assert entry["dataset_epoch_id"] == expected_epoch_id
 
     best_genome = json.loads(
         (run_dir / "best_genome.json").read_text(encoding="utf-8")
     )
-    assert best_genome["dataset_epoch_id"] == "epoch_legacy"
+    assert best_genome["dataset_epoch_id"] == expected_epoch_id
 
 
 # ---------------------------------------------------------------------------

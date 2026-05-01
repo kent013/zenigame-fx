@@ -234,15 +234,21 @@ def _run_artifacts(
     return run_dir, summary
 
 
+_EXPECTED_EPOCH_ID = "epoch_20260101_20260108"
+"""T059: smoke run fixture (``alpha_factory_min_config.yaml``) の dataset
+(start=2026-01-01, end=2026-01-08) から ``make_epoch_id`` で生成される
+deterministic 値。 T058 段階の ``"epoch_legacy"`` から切替。"""
+
+
 def test_summary_json_includes_cascade_contract_version_and_dataset_epoch_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """T058 PR 5: summary.json に cascade_contract_version + dataset_epoch_id が入る."""
+    """T059: summary.json に cascade_contract_version + deterministic dataset_epoch_id が入る."""
     _run_dir, summary = _run_artifacts(
         monkeypatch, tmp_path, sub_dir="t058_summary"
     )
     assert summary["cascade_contract_version"] == 2
-    assert summary["dataset_epoch_id"] == "epoch_legacy"
+    assert summary["dataset_epoch_id"] == _EXPECTED_EPOCH_ID
 
 
 def test_summary_json_schema_version_remains_string_one_one(
@@ -273,22 +279,22 @@ def test_cascade_contract_version_is_int_in_summary_json(
 def test_history_json_each_entry_includes_dataset_epoch_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """T058 PR 5: history.json の各 entry に dataset_epoch_id 付与."""
+    """T059: history.json の各 entry に deterministic dataset_epoch_id 付与."""
     run_dir, _ = _run_artifacts(monkeypatch, tmp_path, sub_dir="t058_history")
     history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
     assert isinstance(history, list)
     assert history, "history.json should be non-empty"
     for entry in history:
-        assert entry["dataset_epoch_id"] == "epoch_legacy"
+        assert entry["dataset_epoch_id"] == _EXPECTED_EPOCH_ID
 
 
 def test_best_genome_json_includes_dataset_epoch_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """T058 PR 5: best_genome.json に dataset_epoch_id field 付与."""
+    """T059: best_genome.json に deterministic dataset_epoch_id field 付与."""
     run_dir, _ = _run_artifacts(monkeypatch, tmp_path, sub_dir="t058_best")
     bg = json.loads((run_dir / "best_genome.json").read_text(encoding="utf-8"))
-    assert bg["dataset_epoch_id"] == "epoch_legacy"
+    assert bg["dataset_epoch_id"] == _EXPECTED_EPOCH_ID
     # 既存 genome_to_dict 構造 (name 等) も維持
     assert "name" in bg
 
@@ -296,13 +302,13 @@ def test_best_genome_json_includes_dataset_epoch_id(
 def test_population_jsonl_each_line_includes_dataset_epoch_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """T058 PR 5: population.jsonl の各 line に dataset_epoch_id 付与."""
+    """T059: population.jsonl の各 line に deterministic dataset_epoch_id 付与."""
     run_dir, _ = _run_artifacts(monkeypatch, tmp_path, sub_dir="t058_pop")
     lines = (run_dir / "population.jsonl").read_text(encoding="utf-8").splitlines()
     assert lines, "population.jsonl should be non-empty"
     for raw in lines:
         d = json.loads(raw)
-        assert d["dataset_epoch_id"] == "epoch_legacy"
+        assert d["dataset_epoch_id"] == _EXPECTED_EPOCH_ID
         assert "name" in d
         assert "fitness" in d
 
@@ -310,7 +316,7 @@ def test_population_jsonl_each_line_includes_dataset_epoch_id(
 def test_run_cache_json_includes_dataset_epoch_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """T058 PR 5: .cache/alpha_factory/runs/{run_id}.json に dataset_epoch_id 付与."""
+    """T059: .cache/alpha_factory/runs/{run_id}.json に deterministic dataset_epoch_id 付与."""
     out_root = _setup_smoke_run_env(monkeypatch, tmp_path, sub_dir="t058_cache")
     rc = run_ga_module.main(
         [
@@ -326,4 +332,4 @@ def test_run_cache_json_includes_dataset_epoch_id(
     cache_path = out_root / "cache" / "run_t058_pr5_cache_check.json"
     cache = json.loads(cache_path.read_text(encoding="utf-8"))
     assert cache["run_id"] == "run_t058_pr5_cache_check"
-    assert cache["dataset_epoch_id"] == "epoch_legacy"
+    assert cache["dataset_epoch_id"] == _EXPECTED_EPOCH_ID

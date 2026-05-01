@@ -74,6 +74,7 @@ from src.alpha_factory.diagnostics_sidecar import (
     sidecar_relative_path,
     write_stage_a_provenance,
 )
+from src.alpha_factory.epoch_manager import EpochWindow, make_epoch_id
 from src.alpha_factory.parallel_eval import (
     GenomeEvaluator,
     LaneEvalContext,
@@ -1128,10 +1129,30 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     cfg = load_config(args.config, overrides=_args_to_overrides(args))
 
-    # T058 PR 5: dataset_epoch_id を起動初期で確定 (T059 stub)。
+    # T059: dataset_epoch_id の deterministic 生成 (T058 stub からの卒業).
     # RunContext は run_id 確定後 (下方) に生成するが、 threshold 解決が
     # それより前にあるため、 epoch_id 値だけ先取りして両方に渡す SSOT。
-    dataset_epoch_id = generate_epoch_id_stub(cfg.dataset)
+    #
+    # 戦略: ``make_epoch_id(EpochWindow(start, end))`` で deterministic 生成。
+    # cfg.dataset の (start, end) を window として直接使う (Phase 2 で
+    # ``EpochManager.reserve_run_slot`` 経由に切替予定)。
+    # backward compat: ``EpochWindow.__post_init__`` の ``ValueError`` (= end<=start)
+    # は cfg load 時点で既に弾かれている (config.py: ``DatasetConfig.__post_init__``)
+    # が、 万一の防御として ``ValueError`` のみ捕捉して ``generate_epoch_id_stub``
+    # に fallback する (= T058 PR 1-7 の規範、 silent regression を避けるため
+    # warning log を必ず出力)。 broad ``except Exception`` は意図的に避け、
+    # 真に想定された例外型のみ救済する (Codex impl-review-pr1 Round 1 NIT C1)。
+    try:
+        dataset_epoch_id = make_epoch_id(
+            EpochWindow(start=cfg.dataset.start, end=cfg.dataset.end)
+        )
+    except ValueError as exc:
+        logger.warning(
+            "run_ga.epoch_id_deterministic_fallback",
+            error=str(exc),
+            fallback_to="generate_epoch_id_stub",
+        )
+        dataset_epoch_id = generate_epoch_id_stub(cfg.dataset)
 
     # T054: Stage A threshold の effective 値と source を確定し cfg に反映する。
     # source 単一値 ("config" | "history" | "cli") を必ず確定 (詳細設計 §0b)。

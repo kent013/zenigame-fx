@@ -61,15 +61,19 @@ class RunContext:
 def generate_epoch_id_stub(dataset_cfg: DatasetConfig) -> str:
     """T058 stub: dataset_epoch_id の固定 stub 値を返す.
 
-    T058 段階では deterministic 生成 (T059 で実装) が未着手のため、
-    全経路で同一の ``"epoch_legacy"`` を返す。 grammar [a-z0-9_]+ 適合済。
+    .. deprecated:: T059
+        T059 で ``src.alpha_factory.epoch_manager.make_epoch_id`` による
+        deterministic 生成に切替済 (``run_ga.py`` の主経路は make_epoch_id 経由)。
+        本関数は backward compat 用 fallback として残してあり、 T067 切替コミット
+        で削除予定。 新規 caller は ``make_epoch_id(EpochWindow(start, end))`` を
+        使うこと。
 
-    T059 完了後、 dataset の (instrument / start / end / data hash 等) から
-    deterministic な epoch-rolling 識別子を生成する関数に置換される。
+    T058 段階では deterministic 生成が未着手のため、 全経路で同一の
+    ``"epoch_legacy"`` を返していた。 grammar [a-z0-9_]+ 適合済。
 
     Args:
-        dataset_cfg: 現段階では参照しないが、 T059 移行時の signature 互換のため
-            受け取る (実装側が引数欠落で壊れない)。
+        dataset_cfg: 現段階では参照しないが、 signature 互換のため受け取る
+            (実装側が引数欠落で壊れない)。
     """
-    del dataset_cfg  # T058 段階では未使用 (T059 で hash 計算に使う)
+    del dataset_cfg  # 未使用 (deprecated; make_epoch_id へ移行済)
     return "epoch_legacy"
