@@ -69,6 +69,7 @@
 | T064 | T064-stage-bc-evaluator | stage-gate | Critical | 2026-05-01 22:35 | - |
 | T065 | T065-nsga2-core-and-main-selection | ga-architecture | Critical | 2026-05-01 23:10 | - |
 | T066 | T066-cpps-fsm-and-archive | ga-architecture | Critical | 2026-05-01 23:54 | - |
+| T067 | T067-loop-closure-warmstart-emergency | ga-architecture | Critical | 2026-05-02 00:57 | - |
 
 ## Obsoleted
 
