@@ -666,3 +666,85 @@ backward-compat: `default_factory=tuple` のため既存 caller (= session_block
   promotion 実行
 - `divergence_threshold` 再校正: 実測 corr 分布から T071 仮説値 (0.30) を
   Phase 2 smoke 後に更新検討
+
+## T072: DST/holiday session boundary contract
+
+cascade port v2 Phase 2 配線 15 番目 TODO。 broker 配信 schedule
+(`BrokerTradingSchedule`) と市場 holiday 観測 (`MarketHolidayCalendar`) を
+**完全分離** し、 DST table + date_overrides + 半開区間 [start, end) で
+SessionBlock を駆動する。 holiday を expected_bar_count に混ぜないことが
+SSOT (= collider bias 規範)。
+
+### 主要 dataclass / 関数 (Phase 1)
+
+| Symbol | 責務 |
+|---|---|
+| `BrokerSeasonalCloseSpec` | DST season 別 close/reopen spec (= region_start/end inclusive、 disjoint、 連続 cover) |
+| `BrokerTradingSchedule` | broker 配信 schedule SSOT (= dst_aware_close_table + broker_full_close_holidays + date_overrides) |
+| `MarketHolidayCalendar` | 単一市場の取引所公式 holiday (観測情報のみ、 expected_bar_count に touch しない) |
+| `ObservabilityFlags` | `dst_transition_markets` (≤2) + `holiday_markets` (≤3) の audit/log 用 mark |
+| `BrokerSchedulingProvenance` | YAML schema 出典の provenance (source / verified_at / confidence / notes) |
+| `is_dst_transition(market, d)` | zoneinfo (IANA tz) 経由 DST transition 判定 (London / NY、 Tokyo は常に False) |
+| `is_market_holiday(market, d, calendar)` | 検証済 calendar の raw lookup |
+| `compute_observability_flags(d, calendars)` | business_date 単位の flags 集計 |
+| `compute_bucket_open_minutes(d, bucket, schedule)` | bucket UTC ∩ broker open window (半開区間 overlap) |
+| `compute_expected_bar_count(open_minutes, granularity_seconds)` | floor 演算 (= H4 で 120 min → 0) |
+| `validate_calendar_coverage(calendars, schedule, span)` | 全 3 市場 + broker schedule の period が dataset_span を覆うか集約検証 |
+| `load_market_holiday_calendar(market, yaml_path)` / `load_broker_trading_schedule(yaml_path)` | YAML loader (= `_DuplicateKeyRejectLoader` 経由 duplicate / merge key reject) |
+| `aggregate_session_blocks(...)` | mode 必須 (Round D1 [C4])。 production caller は wrapper 経由 |
+| `aggregate_session_blocks_production(...)` | production-only wrapper (Round D2 [C3])、 mode="production" を構造的強制 |
+
+### SessionBlock 改造
+
+T070 既存 8 field に **3 field 追加**:
+- `open_minutes` (primary、 0..480、 default 480)
+- `granularity_seconds` (M1_PLUS_GRANULARITIES、 default 60)
+- `observability_flags`
+
+derived (property):
+- `expected_bar_count = open_minutes * 60 // granularity_seconds`
+- `schedule_status` ∈ {regular, closed_full, closed_partial}
+- `is_partial_bar_block`
+
+`to_record(include_derived: bool)` で audit/export schema を固定
+(= `SESSION_BLOCK_STORAGE_FIELDS` 12 path / `SESSION_BLOCK_DERIVED_FIELD_PATHS`
+4 path、 `RECORD_SCHEMA_VERSION="1.0.0"`)。
+
+### YAML schema (config/calendars/)
+
+- `broker_trading_schedule.yaml`: 2022-2027 の DST season 完全列挙 (= 13 region) +
+  `broker_full_close_holidays` (= クリスマス / 新年) + `date_overrides` (= 早閉まり)
+- `tokyo_market_holidays.yaml`: 国民の祝日 + TSE close 日 110 件
+- `london_market_holidays.yaml`: UK bank holidays 51 件
+- `ny_market_holidays.yaml`: NYSE / Federal Reserve holidays 60 件
+
+すべて `_DuplicateKeyRejectLoader` で duplicate key + merge key (`<<`) を YAML
+段階で reject する。
+
+### collider bias 規範 (T071/T064/T066 詳細設計改訂申し送り)
+
+`holiday_markets` 単独で session_pass_pattern / SR 計算分母を drop / filter
+してはならない。 必ず stratified audit (= holiday_markets 値別の集計) を行い、
+conditioning set を明示する。 holiday を expected_bar_count に混ぜることは
+T072 SSOT で禁止。
+
+### Phase 2 申し送り
+
+- `scripts/alpha_factory/run_ga.py`: `aggregate_session_blocks_production` wrapper
+  に切替 + broker_schedule / calendars を load 経由で渡す + `validate_calendar_coverage`
+  を caller が一回呼ぶ
+- `src/backtest/engine.py`: 同様に Phase 2 で wrapper 化
+  (= 現状は `mode="test"` で T070 互換)
+- T070 BLOCK_BUCKET_RANGES_UTC への DST 例外連携 caller (= T070 follow-up)
+- T061 canonical_metrics: `expected_bar_count` 駆動の HAC SR / WR 計算
+- T064 stage_bc_evaluator: fold 境界の closed_partial / closed_full 扱い
+  (pnl=0 重みづけ or 除外、 holiday_markets は別軸 audit)
+- T066 cpps_archive: archive admission 時の `session_pass_pattern` 生成で
+  `expected_bar_count > 0` を分母条件、 holiday_markets を condition として
+  stratified
+- T071 SessionEntropyMetric: 同 semantic で `session_pass_pattern` 入力
+- run report / archive: `to_record(include_derived=True)` 経由で
+  observability_flags / schedule_status / expected_bar_count を log / report 露出
+- OANDA Developer Portal 公式 spec 確認後に Phase 2 で
+  `broker_full_close_holidays` / `date_overrides` を production 反映 (Phase 1 は
+  単体テスト範囲、 confidence=medium)

@@ -1,0 +1,70 @@
+market: "london"
+schema_version: "1.0.0"
+period_start: "2022-01-01"
+period_end: "2027-12-31"
+provenance:
+  source: "LSE 公式 trading days / UK bank holidays (gov.uk) — 要再確認 Phase 2"
+  verified_at: "2026-04-30"
+  confidence: "medium"
+  notes: |
+    UK bank holidays + LSE 早閉まり日 (= early close は対象外、 full close のみ列挙).
+    confidence=medium: gov.uk 公式 announcement で再確認する.
+
+holidays:
+  # 2022
+  - "2022-01-03"  # New Year (replacement, 1/1 = Sat)
+  - "2022-04-15"  # Good Friday
+  - "2022-04-18"  # Easter Monday
+  - "2022-05-02"  # Early May bank holiday
+  - "2022-06-02"  # Spring bank holiday (moved)
+  - "2022-06-03"  # Platinum Jubilee (one-off)
+  - "2022-08-29"  # Summer bank holiday
+  - "2022-09-19"  # Queen's State Funeral (one-off)
+  - "2022-12-26"  # Boxing Day (Monday, since 12/26 = Mon)
+  - "2022-12-27"  # Christmas Day replacement
+  # 2023
+  - "2023-01-02"  # New Year replacement
+  - "2023-04-07"  # Good Friday
+  - "2023-04-10"  # Easter Monday
+  - "2023-05-01"  # Early May bank holiday
+  - "2023-05-08"  # Coronation bank holiday (one-off)
+  - "2023-05-29"  # Spring bank holiday
+  - "2023-08-28"  # Summer bank holiday
+  - "2023-12-25"  # Christmas Day
+  - "2023-12-26"  # Boxing Day
+  # 2024
+  - "2024-01-01"
+  - "2024-03-29"  # Good Friday
+  - "2024-04-01"  # Easter Monday
+  - "2024-05-06"
+  - "2024-05-27"
+  - "2024-08-26"
+  - "2024-12-25"
+  - "2024-12-26"
+  # 2025
+  - "2025-01-01"
+  - "2025-04-18"
+  - "2025-04-21"
+  - "2025-05-05"
+  - "2025-05-26"
+  - "2025-08-25"
+  - "2025-12-25"
+  - "2025-12-26"
+  # 2026
+  - "2026-01-01"
+  - "2026-04-03"  # Good Friday
+  - "2026-04-06"  # Easter Monday
+  - "2026-05-04"
+  - "2026-05-25"
+  - "2026-08-31"
+  - "2026-12-25"
+  - "2026-12-28"  # Boxing Day replacement (12/26 = Sat)
+  # 2027
+  - "2027-01-01"
+  - "2027-03-26"  # Good Friday
+  - "2027-03-29"  # Easter Monday
+  - "2027-05-03"
+  - "2027-05-31"
+  - "2027-08-30"
+  - "2027-12-27"  # Christmas replacement (12/25 = Sat)
+  - "2027-12-28"  # Boxing replacement

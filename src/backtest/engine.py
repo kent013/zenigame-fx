@@ -200,7 +200,9 @@ def run_backtest(
     )
 
     # T070: SessionBlock 集計 (Round 1 [C3] transport SSOT). caller 再計算禁止 (§6.4).
-    session_blocks = aggregate_session_blocks(bars_list, broker.trades)
+    # T072 (詳細設計 § 4.9 / 2.2): mode="test" で broker_schedule / calendars は未配線.
+    # Phase 2 で aggregate_session_blocks_production wrapper に置換予定 (= production caller).
+    session_blocks = aggregate_session_blocks(bars_list, broker.trades, mode="test")
 
     return BacktestResult(
         config=config,

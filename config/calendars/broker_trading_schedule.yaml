@@ -1,0 +1,108 @@
+version: "1.0.0"
+period_start: "2022-01-01"
+period_end: "2027-12-31"
+provenance:
+  source: "OANDA Developer Portal v20 (https://developer.oanda.com/rest-live-v20/instrument-ep/)"
+  verified_at: "2026-04-30"
+  confidence: "medium"
+  notes: |
+    NY DST 切替は IANA tz database (zoneinfo) America/New_York の transition から導出
+    (春 = 3月第2日曜 / 秋 = 11月第1日曜、 ただし 2027 春 = 3-14 は 3月第2日曜の例外).
+    OANDA broker_full_close_holidays / date_overrides は OANDA spec 確認後に Phase 2 で
+    production 反映する (= 現状は経験則ベース、 confidence=medium). Phase 1 は単体テスト
+    範囲、 production 反映前に OANDA spec 一次資料を URL 含めて再確認.
+
+dst_aware_close_table:
+  - name: "ny_standard_2022_pre"
+    region_start: "2022-01-01"
+    region_end:   "2022-03-12"
+    close_hour_utc: 22
+    reopen_hour_utc: 22
+  - name: "ny_dst_2022"
+    region_start: "2022-03-13"
+    region_end:   "2022-11-05"
+    close_hour_utc: 21
+    reopen_hour_utc: 21
+  - name: "ny_standard_2022_2023"
+    region_start: "2022-11-06"
+    region_end:   "2023-03-11"
+    close_hour_utc: 22
+    reopen_hour_utc: 22
+  - name: "ny_dst_2023"
+    region_start: "2023-03-12"
+    region_end:   "2023-11-04"
+    close_hour_utc: 21
+    reopen_hour_utc: 21
+  - name: "ny_standard_2023_2024"
+    region_start: "2023-11-05"
+    region_end:   "2024-03-09"
+    close_hour_utc: 22
+    reopen_hour_utc: 22
+  - name: "ny_dst_2024"
+    region_start: "2024-03-10"
+    region_end:   "2024-11-02"
+    close_hour_utc: 21
+    reopen_hour_utc: 21
+  - name: "ny_standard_2024_2025"
+    region_start: "2024-11-03"
+    region_end:   "2025-03-08"
+    close_hour_utc: 22
+    reopen_hour_utc: 22
+  - name: "ny_dst_2025"
+    region_start: "2025-03-09"
+    region_end:   "2025-11-01"
+    close_hour_utc: 21
+    reopen_hour_utc: 21
+  - name: "ny_standard_2025_2026"
+    region_start: "2025-11-02"
+    region_end:   "2026-03-07"
+    close_hour_utc: 22
+    reopen_hour_utc: 22
+  - name: "ny_dst_2026"
+    region_start: "2026-03-08"
+    region_end:   "2026-10-31"
+    close_hour_utc: 21
+    reopen_hour_utc: 21
+  - name: "ny_standard_2026_2027"
+    region_start: "2026-11-01"
+    region_end:   "2027-03-13"
+    close_hour_utc: 22
+    reopen_hour_utc: 22
+  - name: "ny_dst_2027"
+    region_start: "2027-03-14"
+    region_end:   "2027-11-06"
+    close_hour_utc: 21
+    reopen_hour_utc: 21
+  - name: "ny_standard_2027_end"
+    region_start: "2027-11-07"
+    region_end:   "2027-12-31"
+    close_hour_utc: 22
+    reopen_hour_utc: 22
+
+broker_full_close_holidays:
+  # OANDA が bar 配信を完全停止する holiday (= クリスマス / 新年).
+  # 経験則ベース、 OANDA Developer Portal spec で要再確認 (Phase 2 production gate).
+  - "2022-12-25"
+  - "2023-01-01"
+  - "2023-12-25"
+  - "2024-01-01"
+  - "2024-12-25"
+  - "2025-01-01"
+  - "2025-12-25"
+  - "2026-01-01"
+  - "2026-12-25"
+  - "2027-01-01"
+  - "2027-12-25"
+
+date_overrides:
+  # 早閉まり / 遅 open / 部分閉鎖の date 単位上書き.
+  # クリスマス前日 18:00 UTC close (= 米国早閉まり慣行)
+  "2022-12-23": [0, 1080]
+  "2023-12-22": [0, 1080]
+  "2024-12-24": [0, 1080]
+  "2025-12-24": [0, 1080]
+  "2026-12-24": [0, 1080]
+  "2027-12-24": [0, 1080]
+  # 米独立記念日早閉まり 17:00 UTC (= 7/3 の前後)
+  "2024-07-03": [0, 1020]
+  "2025-07-03": [0, 1020]

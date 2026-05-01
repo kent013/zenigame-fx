@@ -237,7 +237,7 @@ class TestAggregateSessionBlocks:
     def test_F7_empty_block_generated_when_no_trades(self) -> None:
         # F7: trade_count=0 でも block 生成 (synthesis § 6.3 0.5 neutral)
         bars = _make_bars_for_full_day(date(2024, 1, 15))
-        blocks = aggregate_session_blocks(bars, trades=[])
+        blocks = aggregate_session_blocks(bars, trades=[], mode="test")
         assert len(blocks) == 3  # 1 day × 3 bucket
         assert all(b.is_empty_trade_block for b in blocks)
         # M1 full day: tokyo / london / ny = 480 bars each
@@ -249,7 +249,7 @@ class TestAggregateSessionBlocks:
         bars_d1 = _make_bars_for_full_day(date(2024, 1, 15))
         bars_d2 = _make_bars_for_full_day(date(2024, 1, 16))
         bars = bars_d1 + bars_d2
-        blocks = aggregate_session_blocks(bars, trades=[])
+        blocks = aggregate_session_blocks(bars, trades=[], mode="test")
         assert len(blocks) == 6  # 2 dates × 3 bucket
 
     def test_F12_invariant_holds_for_aggregated(self) -> None:
@@ -263,7 +263,7 @@ class TestAggregateSessionBlocks:
                 holding_cost=Decimal(1),
             )
         ]
-        blocks = aggregate_session_blocks(bars, trades)
+        blocks = aggregate_session_blocks(bars, trades, mode="test")
         for b in blocks:
             assert b.pnl_before_costs == (
                 b.pnl_net + b.spread_cost_total + b.holding_cost_total
@@ -278,7 +278,7 @@ class TestAggregateSessionBlocks:
             spread_cost=Decimal(3),
             holding_cost=Decimal(1),
         )
-        blocks = aggregate_session_blocks(bars, [trade])
+        blocks = aggregate_session_blocks(bars, [trade], mode="test")
         tokyo_block = next(
             b for b in blocks if b.bucket == "tokyo" and b.business_date == date(2024, 1, 15)
         )
@@ -307,7 +307,7 @@ class TestAggregateSessionBlocks:
             spread_cost=Decimal(1),
             holding_cost=Decimal(0),
         )
-        blocks = aggregate_session_blocks(bars, [trade])
+        blocks = aggregate_session_blocks(bars, [trade], mode="test")
         tokyo_block = next(
             b for b in blocks if b.bucket == "tokyo" and b.business_date == date(2024, 1, 15)
         )
@@ -327,7 +327,7 @@ class TestAggregateSessionBlocks:
             spread_cost=Decimal(0),
             holding_cost=Decimal(0),
         )
-        blocks = aggregate_session_blocks(bars, [trade])
+        blocks = aggregate_session_blocks(bars, [trade], mode="test")
         # 2 dates × 3 buckets = 6 blocks
         assert len(blocks) == 6
         d16_tokyo = next(
@@ -341,7 +341,7 @@ class TestAggregateSessionBlocks:
         bars = _make_bars_for_full_day(date(2024, 1, 16)) + _make_bars_for_full_day(
             date(2024, 1, 15)
         )
-        blocks = aggregate_session_blocks(bars, trades=[])
+        blocks = aggregate_session_blocks(bars, trades=[], mode="test")
         # date 昇順 + bucket は dict insertion 順 (tokyo / london / ny)
         seq = [(b.business_date, b.bucket) for b in blocks]
         assert seq == [
