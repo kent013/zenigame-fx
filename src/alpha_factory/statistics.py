@@ -159,12 +159,23 @@ def deflated_sharpe_ratio(
     観測 Sharpe Ratio が、N 個の独立試行の最大値 (null hypothesis: 真の SR=0) を
     有意に上回る確率を返す。値域 [0, 1]。0.95 以上で 5% 水準で有意。
 
-    NOTE (T-sharpe Phase 1A): 本関数は v1 bar-level annualized Sharpe を入力として
-    期待しています。Phase 1A で GA / Stage Gate / Alpha Sieve の Sharpe が
-    ``trade_sharpe_raw`` (v2, annualize なし, trade-level) に切り替わったため、
-    DSR の入力意味論が一致しなくなっています。Phase 1A 時点では DSR は monitor only で
-    ゲート判定には使われていない (archive `dsr` 列のみ書き込み)。Phase 2 (別 TODO) で
-    DSR の入力定義を v2 trade-level Sharpe + 適切な n_observations 解釈に更新します。
+    NOTE (T-sharpe Phase 1A / T073 audit layer):
+        Phase 1A: 本関数は v1 bar-level annualized Sharpe を入力前提、
+        archive ``dsr`` field は v1 経路で計算済 (sharpe_calc_version v1)。
+        Phase 1A で GA / Stage Gate / Alpha Sieve の Sharpe が
+        ``trade_sharpe_raw`` (v2, annualize なし, trade-level) に切り替わったため、
+        DSR の入力意味論が一致しなくなっており、 archive ``dsr`` 列は monitor only
+        でゲート判定には使われていない.
+
+        T073 audit layer (Phase 2 配線後): ``src/alpha_factory/audit.py`` の
+        ``compute_audit_dsr_for_genome`` 経由で、 v2 SessionBlock pnl_net
+        (= non-annualized) + ``AuditNullModel`` 駆動で本関数を呼出。 数式
+        (Bailey & Lopez de Prado 2014 Eq.(7)/(9)) は不変、 入力尺度は
+        ``AuditNullModel.sr_scale="session_block_non_annualized"`` SSOT で固定。
+
+        archive ``dsr`` field の v1 → v2 切替は Phase 2 別 PR で
+        sharpe_calc_version 同期 + ``dsr_v1`` rename + ``dsr_v2`` 追加
+        (= 履歴比較互換) で行う。
 
     Args:
         sharpe_ratio: 観測 Sharpe Ratio ``SR_obs``。**bar 単位 (non-annualized)**。
