@@ -67,6 +67,7 @@
 | T062 | T062-mission-inf-gap-engine | ga-architecture | Critical | 2026-05-01 21:11 | - |
 | T063 | T063-stage-a-evaluator | stage-gate | Critical | 2026-05-01 21:36 | - |
 | T064 | T064-stage-bc-evaluator | stage-gate | Critical | 2026-05-01 22:35 | - |
+| T065 | T065-nsga2-core-and-main-selection | ga-architecture | Critical | 2026-05-01 23:10 | - |
 
 ## Obsoleted
 
