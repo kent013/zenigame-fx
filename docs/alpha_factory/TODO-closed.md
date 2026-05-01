@@ -63,6 +63,7 @@
 | T058 | T058-schema-v2-contract | infrastructure | Critical | 2026-05-01 15:35 | - |
 | T059 | T059-epoch-window-manager | infrastructure | Critical | 2026-05-01 17:03 | - |
 | T060 | T060-partition-fold-generator | stage-gate | Critical | 2026-05-01 17:48 | - |
+| T061 | T061-canonical-five-engine | stage-gate | Critical | 2026-05-01 20:01 | - |
 
 ## Obsoleted
 
