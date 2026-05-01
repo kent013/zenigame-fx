@@ -1,0 +1,88 @@
+"""Observability layer (T071): RunObservabilityReport hub.
+
+T071 Phase 1 (本 PR 範囲): library 関数 + dataclass のみ。 caller 配線は Phase 2
+(scripts/alpha_factory/run_ga.py + stage_a_evaluator.py + run report Markdown 化)
+で実施。
+
+main 実装 SSOT 規範 (T058-T070 で確立):
+    詳細設計と main 実装に field 名/存在の乖離がある場合、 main 実装を SSOT として
+    T071 側を調整。 不在 field (例: pareto_front1_size, session_pass_pattern,
+    warmstart_share_target, fingerprint_dedup_top_n, run_aborted) は caller 注入
+    (= 関数引数) で受ける設計に切替。 詳細は run_metrics.py docstring を参照。
+"""
+
+from src.alpha_factory.observability.run_metrics import (
+    AB_MIN_ACTIONABLE_PAIRS,
+    DELTA_PER_RUN,
+    DIVERGENCE_THRESHOLD,
+    Q_FORCE_MAX,
+    Q_FORCE_MIN,
+    RESTORE_THRESHOLD,
+    SESSION_PATTERN_BITS,
+    SESSION_PATTERN_REGEX,
+    SESSION_PATTERN_SPACE_SIZE,
+    WARMSTART_SHARE_TOLERANCE,
+    WEEKLY_WINDOW_SIZE,
+    ABDivergenceMetric,
+    ABDivergenceStatus,
+    ArchiveChurnMetric,
+    ArchiveChurnStatus,
+    BypassRatioMetric,
+    FailureMetric,
+    FailureMetricStage,
+    FeasibleRatioMetric,
+    InflowConsistencyMetric,
+    QForceReason,
+    QForceRecommendation,
+    RunObservabilityReport,
+    SelectionMetric,
+    SessionEntropyMetric,
+    SessionEntropyStatus,
+    build_run_observability_report,
+    compute_ab_divergence_on_b_evaluated,
+    compute_archive_churn,
+    compute_bypass_ratio,
+    compute_session_entropy,
+    extract_failure_metrics,
+    extract_inflow_consistency,
+    extract_selection_metrics,
+    recommend_q_force_adjust,
+)
+
+__all__ = [
+    "AB_MIN_ACTIONABLE_PAIRS",
+    "DELTA_PER_RUN",
+    "DIVERGENCE_THRESHOLD",
+    "Q_FORCE_MAX",
+    "Q_FORCE_MIN",
+    "RESTORE_THRESHOLD",
+    "SESSION_PATTERN_BITS",
+    "SESSION_PATTERN_REGEX",
+    "SESSION_PATTERN_SPACE_SIZE",
+    "WARMSTART_SHARE_TOLERANCE",
+    "WEEKLY_WINDOW_SIZE",
+    "ABDivergenceMetric",
+    "ABDivergenceStatus",
+    "ArchiveChurnMetric",
+    "ArchiveChurnStatus",
+    "BypassRatioMetric",
+    "FailureMetric",
+    "FailureMetricStage",
+    "FeasibleRatioMetric",
+    "InflowConsistencyMetric",
+    "QForceReason",
+    "QForceRecommendation",
+    "RunObservabilityReport",
+    "SelectionMetric",
+    "SessionEntropyMetric",
+    "SessionEntropyStatus",
+    "build_run_observability_report",
+    "compute_ab_divergence_on_b_evaluated",
+    "compute_archive_churn",
+    "compute_bypass_ratio",
+    "compute_session_entropy",
+    "extract_failure_metrics",
+    "extract_inflow_consistency",
+    "extract_selection_metrics",
+    "recommend_q_force_adjust",
+]

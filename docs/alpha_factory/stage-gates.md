@@ -559,3 +559,110 @@ backward-compat: `default_factory=tuple` のため既存 caller (= session_block
   (F17 / F20 解消)
 - broker `entry_spread` 保持改造: `spread_cost` を「entry_spread + exit_spread」
   で正確化 (現状 `exit × 2` 近似、 Roll 1984 で代用)
+
+## T071: Observability hub (RunObservabilityReport / A→B 乖離 / archive churn / front1 / FailureSummary 消費)
+
+### 責務
+
+1 Run 全体の observability metric を **集約 dataclass** に集めるライブラリ層
+(`src/alpha_factory/observability/run_metrics.py`)。 caller (Phase 2 で
+`scripts/alpha_factory/run_ga.py`) は本層が公開する pure function を呼び、
+`RunObservabilityReport` を構築して log / report / Phase 2 audit (T073) へ
+受け渡す。
+
+### 11 dataclass + 9 関数 (Phase 1 範囲)
+
+| dataclass | 役割 |
+|---|---|
+| `ABDivergenceMetric` | A→B 乖離 Pearson corr (B 評価対象に conditioning、 status field で None 排除) |
+| `QForceRecommendation` | A→B 乖離に応じた q_force 補正推奨 (raise/hold/restore + clamp) |
+| `ArchiveChurnMetric` | 直近 N Run (max 3) の eviction 率 |
+| `BypassRatioMetric` | archive 流入のうち score_bypass 割合 |
+| `SessionEntropyMetric` | archive 内 session_pass_pattern Shannon entropy (3 bit、 weekly window) |
+| `FeasibleRatioMetric` | Push/Pull FSM 切替指標 (T063 既存値の観測) |
+| `SelectionMetric` | T065 GenerationSelectionResult からの抽出 (front1 cardinality 等) |
+| `InflowConsistencyMetric` | warmstart + admission の inflow 整合性 |
+| `FailureMetricStage` / `FailureMetric` | T068 RunFailureSummary からの per-stage / Run 横断抽出 |
+| `RunObservabilityReport` | 上記 9 metric の集約 hub |
+
+| 関数 | 役割 |
+|---|---|
+| `compute_ab_divergence_on_b_evaluated` | Pearson corr 計算 (n<10 で insufficient_data、 zero variance 検出) |
+| `recommend_q_force_adjust` | hysteresis (0.30 / 0.50) + delta 0.02 + min/max clamp |
+| `compute_archive_churn` | 直近 3 Run eviction 率 |
+| `compute_bypass_ratio` | role 別 admission count から bypass 比率 |
+| `compute_session_entropy` | 3 bit pattern の Shannon entropy (weekly window) |
+| `extract_selection_metrics` | T065 result + caller 注入 (feasible_ratio 等) |
+| `extract_inflow_consistency` | T067 share + T066 admission + caller 注入 (target share) |
+| `extract_failure_metrics` | T068 summary + caller 注入 (fingerprint top-N) |
+| `build_run_observability_report` | 集約 pure function |
+
+### 主要定数
+
+| 定数 | 値 | 出処 |
+|---|---|---|
+| `DELTA_PER_RUN` | `Decimal("0.02")` | synthesis § 8.7 |
+| `Q_FORCE_MAX` | `Decimal("0.40")` | synthesis § 8.7 |
+| `RESTORE_THRESHOLD` | `Decimal("0.50")` | synthesis § 8.7 |
+| `Q_FORCE_MIN` | `Decimal("0.15")` | T071 仮説値 (Phase 2 で再校正) |
+| `DIVERGENCE_THRESHOLD` | `Decimal("0.30")` | T071 仮説値 (Phase 2 で再校正) |
+| `AB_MIN_ACTIONABLE_PAIRS` | `10` | C7 規範 (n<10 相関 claim 禁止) |
+| `WEEKLY_WINDOW_SIZE` | `7` | weekly entropy 集計窓 |
+| `WARMSTART_SHARE_TOLERANCE` | `Decimal("0.01")` | inflow drift 許容範囲 |
+
+### main 実装 SSOT 規範 (T058-T070 で確立)
+
+詳細設計の前提と main 実装の field 名 / 存在に乖離がある場合、 main 実装を SSOT
+として T071 側を調整する (= caller 注入式に変更)。 主要乖離点:
+
+- T065 `GenerationSelectionResult`: `pareto_front1_size` / `feasible_ratio` /
+  `mean_constraint_violation` / `generation` 不在 → T071 は `front_assignments`
+  から front1 を再計算 + 残り 3 field は caller 注入
+- T066 `AdmissionReport`: `n_admitted_ca/da` / `n_evicted_ca/da` / `n_admitted_by_role`
+  不在 → role 別 (mission/progress/bypass) を str key dict に集約、
+  eviction は `len(evicted_genome_ids)`
+- T066 `ArchiveRole` enum 不在 → str key (`"mission_pass"` / `"progress_pass"`
+  / `"score_bypass"`)
+- T066 `ArchiveMember.session_pass_pattern` 不在 → caller (Phase 2) が
+  事前計算した 3 bit string list を引数注入
+- T067 `WarmstartConfig` / `warmstart_share_target` / `warmstart_share_actual`
+  / `per_source_run_violations` 不在 → caller 注入 (target / violations)、
+  `WarmstartReport.share` を actual 扱い
+- T068 `RunFailureSummary.run_aborted` 不在 → `any_stage_all_failed` を抽出
+- T068 `FailureSummary.fingerprint_dedup_top_n` 不在 → caller 注入 (per-stage
+  fingerprint top-N dict、 default 空)
+
+### F1-F15 失敗モード対応 (Phase 1 unit test)
+
+| failure | 対応 | test prefix |
+|---|---|---|
+| F1 n<10 actionable 抑止 | `status="insufficient_data"` | `test_F1` |
+| F2 var=0 で nan | `status="zero_variance"` sentinel | `test_F2` |
+| F3 数値誤差 [-1, 1] 越境 | post compute clamp | `test_F3` |
+| F4 q_force max/min 越境 | clamp + `clamped_at_*` field | `test_F4` |
+| F5 hysteresis 振動 | `divergence_threshold (0.30) < restore_threshold (0.50)` | `test_F5` |
+| F6 archive_churn denom 0 / 不足 | zero check + status 判定 | `test_F6` |
+| F7 bypass_ratio denom 0 | zero check | `test_F7` |
+| F8 session_entropy archive 空 / window 不足 | `empty_archive` / `insufficient_window` | `test_F8` |
+| F9 InflowConsistency tolerance | `WARMSTART_SHARE_TOLERANCE = 0.01` | `test_F9` |
+| F10 status 不整合 | `__post_init__` 完全強制 | `test_F10` |
+| F11 T065-T068 field rename | extract function fixture テスト | `test_F11` |
+| F12 a/b 個体対応ずれ | length 一致 check | `test_F12` |
+| F13 divergence_threshold 仮説値 | T071 仮説 + Phase 2 再校正申し送り | (Phase 2-IT) |
+| F14 連続乖離 Run カウント | caller 保持 + `RunObservabilityReport` invariant | `test_F14` |
+| F15 q_force delta 適用順序 | delta → max/min clamp の順 | `test_F15` |
+
+### Phase 2 申し送り
+
+- `scripts/alpha_factory/run_ga.py`: `build_run_observability_report` 呼び出し
+  + 連続乖離 Run state file 保持 + log / report 出力
+- `src/alpha_factory/stage_a_evaluator.py` (T063): `q_force_recommendation` を
+  `StageAControllerState` 更新に配線
+- `docs/alpha_factory/observability.md` 新設: RunObservabilityReport の
+  Markdown 表現 + 監視運用ガイド
+- run report Markdown 化: `RunObservabilityReport` を report.md に整形
+- T073 audit layer: DSR/PBO/SPA + `ab_divergence` を audit input
+- pop promotion (192→256) trigger: `front1_cardinality < 20` 連続 2 Run 検出 →
+  promotion 実行
+- `divergence_threshold` 再校正: 実測 corr 分布から T071 仮説値 (0.30) を
+  Phase 2 smoke 後に更新検討
