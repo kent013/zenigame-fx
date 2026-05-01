@@ -71,6 +71,7 @@
 | T066 | T066-cpps-fsm-and-archive | ga-architecture | Critical | 2026-05-01 23:54 | - |
 | T067 | T067-loop-closure-warmstart-emergency | ga-architecture | Critical | 2026-05-02 00:57 | - |
 | T068 | T068-failure-handling | infrastructure | Critical | 2026-05-02 01:56 | - |
+| T069 | T069-calibrate-gate-scope | stage-gate | Δ | 2026-05-02 02:14 | - |
 
 ## Obsoleted
 
