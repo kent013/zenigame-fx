@@ -55,7 +55,7 @@ stage_gate:
       aggregation_mode: {mode}
       aggregation_window: 5
       pass_rate_tolerance_abs: 0.05
-      threshold_delta_abs_max: 0.5
+      threshold_delta_abs_max: 0.03
       threshold_floor: -100.0
       threshold_ceiling: 100.0
       min_sample_size: {min_sample}
@@ -178,8 +178,8 @@ def test_cli_writes_yaml_atomically_when_decision_is_loosen(
     assert code == CLI.EXIT_OK
     assert _yaml_sha256(yaml_path) != sha_before
     new_yaml = yaml_path.read_text(encoding="utf-8")
-    # threshold: 10.0 から max_delta=0.5 で 9.5 に下がっているはず
-    assert "threshold: 9.5" in new_yaml
+    # T069: threshold_delta_abs_max=0.03 contract → 10.0 - 0.03 = 9.97
+    assert "threshold: 9.97" in new_yaml
     # tmp / lock の残骸が無い
     assert list(yaml_path.parent.glob("*.tmp")) == []
 

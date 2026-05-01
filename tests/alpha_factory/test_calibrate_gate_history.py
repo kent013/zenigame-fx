@@ -183,6 +183,42 @@ class TestComputeDrift:
         analysis = compute_drift(recs)
         assert analysis.max_abs_gap == pytest.approx(0.10)
 
+    # T069: n_skip_frozen 集計 (epoch 内 3 Run freeze 判定 record の数)
+    def test_F12_compute_drift_counts_skip_frozen(self) -> None:
+        # F12 (concept §10): drift 監視で skip_frozen を可視化
+        recs = [
+            _record(run_id="r0", decision="skip_frozen", actual=0.15),
+            _record(run_id="r1", decision="tighten", actual=0.30),
+            _record(run_id="r2", decision="skip_frozen", actual=0.15),
+        ]
+        analysis = compute_drift(recs)
+        assert analysis.n_skip_frozen == 2
+        assert analysis.n_tighten == 1
+        assert analysis.n_loosen == 0
+        assert analysis.n_in_band == 0
+        # skip_frozen は monotone alert に寄与しない
+        # (n_tighten=1 < monotone_threshold=4)
+        assert analysis.alerts.monotone_tighten is False
+        assert analysis.alerts.monotone_loosen is False
+
+    def test_n_skip_frozen_zero_when_no_frozen_records(self) -> None:
+        # default ケース: skip_frozen ゼロ
+        recs = [_record(run_id=f"r{i}", decision="in_band") for i in range(3)]
+        analysis = compute_drift(recs)
+        assert analysis.n_skip_frozen == 0
+
+    def test_n_skip_frozen_does_not_trigger_monotone_loosen(self) -> None:
+        # skip_frozen が 4 件あっても monotone_loosen=False のまま
+        # (loosen の monotone とは別 channel)
+        recs = [
+            _record(run_id=f"r{i}", decision="skip_frozen") for i in range(4)
+        ]
+        analysis = compute_drift(recs, monotone_threshold=4)
+        assert analysis.n_skip_frozen == 4
+        assert analysis.n_loosen == 0
+        assert analysis.alerts.monotone_loosen is False
+        assert analysis.alerts.monotone_tighten is False
+
 
 class TestDriftAlertsAnyAlert:
     def test_all_false_means_no_alert(self) -> None:

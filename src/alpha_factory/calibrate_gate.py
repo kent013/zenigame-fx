@@ -75,6 +75,7 @@ DecisionLabel = Literal[
     "skip_sample_size",
     "skip_zero_variance",
     "skip_schema_mismatch",
+    "skip_frozen",  # T069: epoch 内 3 Run freeze (calibrate_freeze.py)
 ]
 
 
@@ -193,6 +194,13 @@ class CalibrateConfig:
             raise ConfigError(
                 f"threshold_delta_abs_max must be > 0, "
                 f"got {self.threshold_delta_abs_max}"
+            )
+        # T069 (synthesis § 8.6 SSOT): |Δ| ≤ 0.03 contract 強化。
+        # config 違反 (> 0.03) は起動時に fail-closed。
+        if self.threshold_delta_abs_max > 0.03:
+            raise ConfigError(
+                f"threshold_delta_abs_max must be <= 0.03 "
+                f"(synthesis § 8.6 SSOT), got {self.threshold_delta_abs_max}"
             )
         if self.threshold_floor > self.threshold_ceiling:
             raise ConfigError(

@@ -101,7 +101,7 @@ stage_gate:
       aggregation_mode: last_k_generations
       aggregation_window: 5
       pass_rate_tolerance_abs: 0.05      # dead-band 半幅 (pass_rate 絶対)
-      threshold_delta_abs_max: 0.1       # cycle 6 (Codex 案A): 0.5→0.1 で再 tighten 過補正を抑制し ratchet 再発を防ぐ
+      threshold_delta_abs_max: 0.03      # T069 (synthesis § 8.6 SSOT): ≤0.03 fail-closed contract。 0.1→0.03 で over-correction を抑制
       threshold_floor: -100.0
       threshold_ceiling: 100.0
       min_sample_size: 30                # この未満は skip + WARN

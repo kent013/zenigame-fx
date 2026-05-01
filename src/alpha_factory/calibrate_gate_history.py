@@ -218,13 +218,19 @@ class DriftAlerts:
 
 @dataclass(frozen=True)
 class DriftAnalysis:
-    """直近 N Run の drift 分析結果 (records + alerts + summary stats)."""
+    """直近 N Run の drift 分析結果 (records + alerts + summary stats).
+
+    T069: ``n_skip_frozen`` を追加 (epoch 内 freeze 判定で
+    ``decision="skip_frozen"`` となった record 数)。 drift 監視で freeze 中は
+    monotone alert に寄与しないことを可視化する。
+    """
 
     records: tuple[HistoryRecord, ...]
     alerts: DriftAlerts
     n_tighten: int
     n_loosen: int
     n_in_band: int
+    n_skip_frozen: int  # T069: epoch 内 3 Run freeze 集計
     n_clamped_floor_ceiling: int
     max_abs_gap: float
 
@@ -248,6 +254,8 @@ def compute_drift(
     n_tighten = sum(1 for r in rec_tuple if r.decision == "tighten")
     n_loosen = sum(1 for r in rec_tuple if r.decision == "loosen")
     n_in_band = sum(1 for r in rec_tuple if r.decision == "in_band")
+    # T069: epoch 内 freeze 判定 record の集計 (synthesis § 8.6)
+    n_skip_frozen = sum(1 for r in rec_tuple if r.decision == "skip_frozen")
     n_clamped = sum(
         1 for r in rec_tuple if r.clamped_by_floor_or_ceiling
     )
@@ -271,6 +279,7 @@ def compute_drift(
         n_tighten=n_tighten,
         n_loosen=n_loosen,
         n_in_band=n_in_band,
+        n_skip_frozen=n_skip_frozen,
         n_clamped_floor_ceiling=n_clamped,
         max_abs_gap=max_abs_gap,
     )

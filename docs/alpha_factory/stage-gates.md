@@ -380,3 +380,58 @@ archive Parquet schema に `stage_b_unavailable_reason_counts` (JSON 文字列�
 - `n_fold_effective` (int64, nullable)
 - `positive_fold_ratio_effective` (float64, nullable)
 - `stage_b_reason_codes` (string, nullable; ";" 区切りで複数 reason 永続化)
+
+## T069: epoch key + 3 Run freeze + Δ ≤ 0.03 (synthesis § 8.6)
+
+### 凍結窓 3 Run
+
+`dataset_epoch_id` を scope key として、 同 epoch 内の最初 3 distinct Run は
+calibrate-gate を **freeze** (= threshold 適用なし、 `decision="skip_frozen"`)。
+4 Run 目以降から通常の `tighten` / `loosen` 判定が有効化される。
+
+count は `HistoryRecord.applied_from_run_id` の distinct set で測る (= 同 run_id
+二重 append / retry に耐性)。 `applied_from_run_id` が `None` / 空文字の v2
+record は count から除外し、 `calibrate_freeze.invalid_run_id` warning で可視
+化する (defense-in-depth)。
+
+### |Δ| ≤ 0.03
+
+`stage_gate.stage_a.calibrate.threshold_delta_abs_max` を `0.03` に SSOT 固定
+(`config/alpha_factory/default.yaml`)。 config 違反 (`> 0.03`) は起動時に
+`CalibrateConfig.__post_init__` で `ConfigError` を raise し fail-closed。
+
+### scope key
+
+freeze 判定は `dataset_epoch_id` 単独で行う (synthesis § 8.6 1 軸 SSOT)。
+cross-run contamination guard は T058 `load_calibrated_threshold` の 4 軸
+verify (`base_config_hash` + `dataset_epoch_id` + `instrument` +
+`stage_gate_version`) が別 layer で担保 (多層防御)。
+
+### epoch 跨ぎ再利用遮断
+
+T069 (Phase 1) では yaml への threshold 書き戻し経路は新設しない (= 既存
+`scripts/alpha_factory/calibrate_gate.py` 経路を継承)。 Phase 2 (cascade port
+切替) で以下のいずれかを確定:
+- 案 A: yaml = immutable seed、 calibrate は history JSONL 専用 (推奨)
+- 案 B: epoch 切替時に yaml reset
+- 案 C: `stage_a_threshold` 自体を削除 (synthesis § 12.3 厳密準拠)
+
+### library API (T069 PR1 scope)
+
+| シンボル | 場所 | 役割 |
+|---|---|---|
+| `FreezeStatus` | `src/alpha_factory/calibrate_freeze.py` | epoch 内 freeze 判定結果 (immutable, pure data) |
+| `evaluate_freeze_status` | 同上 | history record + dataset_epoch_id から `FreezeStatus` を計算 (pure function) |
+| `decide_with_freeze` | 同上 | freeze 中は `skip_frozen` 即返、 そうでなければ `decide()` に委譲 |
+| `DecisionLabel` | `src/alpha_factory/calibrate_gate.py` | `"skip_frozen"` を追加 |
+| `DriftAnalysis.n_skip_frozen` | `src/alpha_factory/calibrate_gate_history.py` | drift 監視で `skip_frozen` record 数を可視化 |
+
+### Phase 2 申し送り (T069 detailed-design § 12.2 連動)
+
+- `scripts/alpha_factory/calibrate_gate.py` で `evaluate_freeze_status` +
+  `decide_with_freeze` を配線 + skip_frozen record を history append + yaml
+  書き戻し方式 (案 A 推奨) 確定
+- `scripts/alpha_factory/calibrate_gate_drift.py` で `n_skip_frozen` を出力
+- `scripts/alpha_factory/run_ga.py` で freeze 中の log (任意)
+- 運用契約 preflight check: `dataset_epoch_id` 空なら calibrate 起動しない
+- T058 詳細設計改訂依頼: `HistoryRecord.applied_from_run_id: str` を v2 必須化

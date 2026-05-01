@@ -67,7 +67,7 @@ def _default_config(**overrides: Any) -> CalibrateConfig:
         "aggregation_mode": "last_k_generations",
         "aggregation_window": 5,
         "pass_rate_tolerance_abs": 0.05,
-        "threshold_delta_abs_max": 0.5,
+        "threshold_delta_abs_max": 0.03,  # T069: synthesis § 8.6 SSOT (≤0.03)
         "threshold_floor": -100.0,
         "threshold_ceiling": 100.0,
         "min_sample_size": 10,
@@ -165,7 +165,8 @@ def test_decide_tighten_when_pass_rate_above_target_plus_tol() -> None:
         for i in range(100)
     ]
     s = aggregate_sample(rows, mode="all_generations", window=5)
-    cfg = _default_config(target_pass_rate=0.15, threshold_delta_abs_max=10.0)
+    # T069: threshold_delta_abs_max は default fixture (0.03) を使用 (≤0.03 contract)
+    cfg = _default_config(target_pass_rate=0.15)
     d = decide(s, cfg)
     assert d.decision == "tighten"
     assert d.new_threshold > cfg.prev_threshold
@@ -178,9 +179,8 @@ def test_decide_loosen_when_pass_rate_below_target_minus_tol() -> None:
         for i in range(100)
     ]
     s = aggregate_sample(rows, mode="all_generations", window=5)
-    cfg = _default_config(
-        target_pass_rate=0.15, prev_threshold=0.0, threshold_delta_abs_max=200.0
-    )
+    # T069: threshold_delta_abs_max は default fixture (0.03) を使用 (≤0.03 contract)
+    cfg = _default_config(target_pass_rate=0.15, prev_threshold=0.0)
     d = decide(s, cfg)
     assert d.decision == "loosen"
     assert d.new_threshold < cfg.prev_threshold
@@ -193,18 +193,21 @@ def test_decide_clamps_delta() -> None:
         for i in range(100)
     ]
     s = aggregate_sample(rows, mode="all_generations", window=5)
+    # T069: threshold_delta_abs_max=0.03 (≤0.03 contract)。
+    # 巨大分布の q_target に対して 0.03 で clamp されることを確認。
     cfg = _default_config(
-        target_pass_rate=0.15, threshold_delta_abs_max=0.5, prev_threshold=0.0
+        target_pass_rate=0.15, threshold_delta_abs_max=0.03, prev_threshold=0.0
     )
     d = decide(s, cfg)
     assert d.decision == "tighten"
     assert d.clamped_by_delta is True
-    assert d.delta == 0.5
-    assert d.new_threshold == 0.5
+    assert d.delta == 0.03
+    assert d.new_threshold == 0.03
 
 
 def test_decide_clamps_floor_ceiling() -> None:
-    # prev=99.9, max_delta=10 → new_after_delta=109.9 → ceiling=100 で clamp
+    # T069: max_delta は ≤0.03 contract に従う。
+    # prev=99.99, max_delta=0.03 → new_after_delta=100.02 → ceiling=100 で clamp
     rows = [
         _row(generation=0, stage_a_pass=(i < 50), fitness_pen=float(i * 100))
         for i in range(100)
@@ -212,8 +215,8 @@ def test_decide_clamps_floor_ceiling() -> None:
     s = aggregate_sample(rows, mode="all_generations", window=5)
     cfg = _default_config(
         target_pass_rate=0.15,
-        threshold_delta_abs_max=10.0,
-        prev_threshold=99.9,
+        threshold_delta_abs_max=0.03,
+        prev_threshold=99.99,
         threshold_ceiling=100.0,
     )
     d = decide(s, cfg)
@@ -332,6 +335,49 @@ def test_config_rejects_non_positive_eps_var() -> None:
         _default_config(eps_var=0)
 
 
+# T069: CalibrateConfig.threshold_delta_abs_max contract 強化 (synthesis § 8.6) ====
+
+
+class TestT069ThresholdDeltaAbsMaxContract:
+    """T069: ``threshold_delta_abs_max`` の値域 contract.
+
+    ``> 0`` の既存 contract に加え、 synthesis § 8.6 SSOT で ``≤ 0.03``
+    を fail-closed 必須化する。
+    """
+
+    def test_F8_threshold_delta_abs_max_at_synthesis_limit_ok(self) -> None:
+        # F8 (boundary): 0.03 ちょうどは OK
+        cfg = _default_config(threshold_delta_abs_max=0.03)
+        assert cfg.threshold_delta_abs_max == 0.03
+
+    def test_F8_threshold_delta_abs_max_below_synthesis_limit_ok(self) -> None:
+        # 0.03 未満は OK
+        cfg = _default_config(threshold_delta_abs_max=0.01)
+        assert cfg.threshold_delta_abs_max == 0.01
+
+    def test_F8_threshold_delta_abs_max_above_synthesis_limit_raises(self) -> None:
+        # F8 main: 0.03 超は ConfigError (synthesis § 8.6 SSOT)
+        with pytest.raises(ConfigError, match=r"must be <= 0\.03"):
+            _default_config(threshold_delta_abs_max=0.05)
+
+    def test_F8_threshold_delta_abs_max_far_above_raises(self) -> None:
+        # 旧来 default 0.1 / 0.5 は全部 reject される (atomic cut)
+        with pytest.raises(ConfigError, match=r"must be <= 0\.03"):
+            _default_config(threshold_delta_abs_max=0.1)
+        with pytest.raises(ConfigError, match=r"must be <= 0\.03"):
+            _default_config(threshold_delta_abs_max=0.5)
+
+    def test_threshold_delta_abs_max_zero_raises(self) -> None:
+        # 既存挙動 (T069 で変更なし、 既存 contract > 0)
+        with pytest.raises(ConfigError, match="must be > 0"):
+            _default_config(threshold_delta_abs_max=0.0)
+
+    def test_threshold_delta_abs_max_negative_raises(self) -> None:
+        # 既存挙動: 負値も > 0 contract で reject
+        with pytest.raises(ConfigError, match="must be > 0"):
+            _default_config(threshold_delta_abs_max=-0.01)
+
+
 def test_aggregation_modes_constant_complete() -> None:
     assert set(AGGREGATION_MODES) == {
         "last_k_generations",
@@ -356,7 +402,7 @@ def test_load_calibrate_config_succeeds_on_complete_yaml() -> None:
                     "aggregation_mode": "last_k_generations",
                     "aggregation_window": 5,
                     "pass_rate_tolerance_abs": 0.05,
-                    "threshold_delta_abs_max": 0.5,
+                    "threshold_delta_abs_max": 0.03,
                     "threshold_floor": -100.0,
                     "threshold_ceiling": 100.0,
                     "min_sample_size": 30,
