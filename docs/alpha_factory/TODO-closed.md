@@ -73,6 +73,7 @@
 | T068 | T068-failure-handling | infrastructure | Critical | 2026-05-02 01:56 | - |
 | T069 | T069-calibrate-gate-scope | stage-gate | Δ | 2026-05-02 02:14 | - |
 | T070 | T070-backtest-engine-extension | infrastructure | Critical | 2026-05-02 02:47 | - |
+| T071 | T071-observability | infrastructure | Critical | 2026-05-02 03:38 | - |
 
 ## Obsoleted
 
