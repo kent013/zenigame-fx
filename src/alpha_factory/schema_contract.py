@@ -275,12 +275,23 @@ def assert_epoch_id_present_for_display(
 ) -> None:
     """Tier 2 派生表示 artifact 用の軽量 non-blocking ガード.
 
-    ``dataset_epoch_id`` 引用漏れを log warning + Counter 計測。 fail させない
-    (Tier 2 は表示用なので運用事故化を避ける、 Codex Round 3 [Suggestion])。
+    ``dataset_epoch_id`` 引用漏れ (key 欠落 / None / 空文字) を log warning で
+    通知。 fail させない (Tier 2 は表示用なので運用事故化を避ける、 Codex
+    Round 3 [Suggestion]、 詳細設計 行 1469-1470 「副作用なし、 warning のみ」)。
+
+    PR 6 拡張: 空文字 / None 値も missing 扱いで warning (T058 PR 6)。
     """
-    if obj is None or "dataset_epoch_id" not in obj:
+    if obj is None:
         logger.warning(
             "schema_contract.tier2_epoch_id_missing",
             artifact=artifact,
-            keys=sorted((obj or {}).keys()),
+            keys=[],
+        )
+        return
+    epoch_id = obj.get("dataset_epoch_id")
+    if epoch_id is None or (isinstance(epoch_id, str) and not epoch_id):
+        logger.warning(
+            "schema_contract.tier2_epoch_id_missing",
+            artifact=artifact,
+            keys=sorted(obj.keys()),
         )

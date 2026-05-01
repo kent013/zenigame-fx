@@ -20,6 +20,10 @@ from pathlib import Path
 from statistics import mean, median, pstdev
 from typing import Any
 
+from src.alpha_factory.schema_contract import (
+    assert_epoch_id_present_for_display,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_REPORTS_DIR = REPO_ROOT / "reports" / "run-reports"
 
@@ -330,6 +334,7 @@ def main(argv: list[str] | None = None) -> int:
     lines.append(f"# Run {args.run_number} — {summary.get('run_id', '—')}")
     lines.append("")
     lines.append(f"**Generated**: {summary.get('generated_at', '—')}")
+    lines.append(f"**dataset_epoch_id**: `{summary.get('dataset_epoch_id') or '—'}`")
     ds = summary.get("dataset", {})
     if isinstance(ds, dict):
         lines.append(
@@ -796,6 +801,10 @@ def main(argv: list[str] | None = None) -> int:
             lines.append("")
             lines.append(content)
             lines.append("")
+
+    # T058 PR 6: Tier 2 軽量ガード — run_report.md 出力前に
+    # dataset_epoch_id 引用漏れ検知 (詳細設計 § 施策 11、 fail-open)
+    assert_epoch_id_present_for_display(summary, artifact="run_report.md")
 
     out_path = RUN_REPORTS_DIR / f"run-{args.run_number}.md"
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

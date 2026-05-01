@@ -283,3 +283,43 @@ def test_assert_epoch_id_present_for_display_silent_when_present() -> None:
     ) as mock_logger:
         assert_epoch_id_present_for_display(obj, artifact="alpha_sieve_display")
         mock_logger.warning.assert_not_called()
+
+
+def test_assert_epoch_id_present_for_display_warns_on_empty_string() -> None:
+    """T058 PR 6: ``dataset_epoch_id`` が空文字でも warning を発火する
+    (詳細設計 行 1469-1470 fail-open、 但し empty value は missing 扱い)."""
+    obj = {"dataset_epoch_id": ""}
+    with patch(
+        "src.alpha_factory.schema_contract.logger"
+    ) as mock_logger:
+        assert_epoch_id_present_for_display(obj, artifact="some_display_artifact")
+        mock_logger.warning.assert_called_once()
+        assert (
+            mock_logger.warning.call_args[0][0]
+            == "schema_contract.tier2_epoch_id_missing"
+        )
+
+
+def test_assert_epoch_id_present_for_display_warns_on_none_value() -> None:
+    """T058 PR 6: ``dataset_epoch_id`` が None でも warning を発火する."""
+    obj: dict[str, object] = {"dataset_epoch_id": None}
+    with patch(
+        "src.alpha_factory.schema_contract.logger"
+    ) as mock_logger:
+        assert_epoch_id_present_for_display(obj, artifact="some_display_artifact")
+        mock_logger.warning.assert_called_once()
+
+
+def test_assert_epoch_id_present_for_display_includes_artifact_name_in_log() -> None:
+    """T058 PR 6: artifact 引数が log の kwarg `artifact` に渡されること."""
+    obj: dict[str, object] = {"foo": "bar"}
+    with patch(
+        "src.alpha_factory.schema_contract.logger"
+    ) as mock_logger:
+        assert_epoch_id_present_for_display(
+            obj, artifact="generate_run_report.run-7.md"
+        )
+        assert (
+            mock_logger.warning.call_args[1]["artifact"]
+            == "generate_run_report.run-7.md"
+        )

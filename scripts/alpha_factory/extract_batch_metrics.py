@@ -27,6 +27,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from src.alpha_factory.schema_contract import (
+    assert_epoch_id_present_for_display,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_REPORTS_DIR = REPO_ROOT / "reports" / "run-reports"
 
@@ -135,6 +139,12 @@ def extract(run_id: str | None, run_number: int | None) -> dict[str, Any]:
     run_dir, n, resolved_run_id = _resolve_run_dir(run_id, run_number)
     summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
 
+    # T058 PR 6: Tier 2 軽量ガード — summary.json の dataset_epoch_id 引用漏れ検知
+    # (詳細設計 § 施策 11、 fail-open / warning のみ)
+    assert_epoch_id_present_for_display(
+        summary, artifact="extract_batch_metrics.summary"
+    )
+
     best = summary.get("best") or {}
     best_metrics = best.get("metrics") or {}
     lc = summary.get("live_criteria") or {}
@@ -154,6 +164,7 @@ def extract(run_id: str | None, run_number: int | None) -> dict[str, Any]:
     metrics = {
         "run_id": resolved_run_id,
         "run_number": n,
+        "dataset_epoch_id": summary.get("dataset_epoch_id"),
         "generated_at": summary.get("generated_at"),
         "dataset": {
             "instrument": ds.get("instrument"),
@@ -215,6 +226,7 @@ def render_markdown(m: dict[str, Any]) -> str:
         f"# Batch metrics — Run {m['run_number']} ({m['run_id']})",
         "",
         f"**Generated**: {m.get('generated_at', '—')}",
+        f"**dataset_epoch_id**: `{m.get('dataset_epoch_id') or '—'}`",
         f"**Dataset**: {m['dataset'].get('instrument', '—')} "
         f"`{m['dataset'].get('start', '—')}` → `{m['dataset'].get('end', '—')}` "
         f"(bars={m['dataset'].get('bars', '—')})",
@@ -278,6 +290,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[done] metrics written to {args.output}")
 
     if args.report is not None:
+        # T058 PR 6: Tier 2 軽量ガード — extract report.md 出力前に
+        # dataset_epoch_id 引用漏れ検知 (詳細設計 § 施策 11)
+        assert_epoch_id_present_for_display(
+            metrics, artifact="extract_batch_metrics.report.md"
+        )
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(render_markdown(metrics), encoding="utf-8")
         print(f"[done] report written to {args.report}")

@@ -19,6 +19,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from src.alpha_factory.schema_contract import (
+    assert_epoch_id_present_for_display,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_REPORTS_DIR = REPO_ROOT / "reports" / "run-reports"
 
@@ -105,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         f"# Run {args.run_number} 分析",
         "",
         f"**run_id**: `{summary['run_id']}`",
+        f"**dataset_epoch_id**: `{summary.get('dataset_epoch_id') or '—'}`",
         f"**generated_at**: {summary['generated_at']}",
         "",
         "## 観察事実",
@@ -163,6 +168,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif curr_fit > prev_fit:
             lines.append("- 前回より改善。方向性は正しい可能性。")
+
+    # T058 PR 6: Tier 2 軽量ガード — analysis-claude.md 書込前に
+    # dataset_epoch_id 引用漏れ検知 (詳細設計 § 施策 11、 fail-open)
+    assert_epoch_id_present_for_display(
+        summary, artifact="analyze_run.analysis-claude.md"
+    )
 
     args.tmp_dir.mkdir(parents=True, exist_ok=True)
     out_path = args.tmp_dir / "analysis-claude.md"

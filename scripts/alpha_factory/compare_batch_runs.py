@@ -27,6 +27,10 @@ from pathlib import Path
 from statistics import mean, median, pstdev
 from typing import Any
 
+from src.alpha_factory.schema_contract import (
+    assert_epoch_id_present_for_display,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,6 +114,11 @@ def _aggregate(metrics_list: list[dict[str, Any]]) -> dict[str, Any]:
         "n_pass": n_pass,
         "rate": (n_pass / n_known) if n_known > 0 else None,
     }
+    # T058 PR 6: per-run dataset_epoch_id を batch_summary に保存
+    # (詳細設計 § 施策 11 — Tier 2 propagation)
+    summary["dataset_epoch_ids"] = [
+        m.get("dataset_epoch_id") for m in metrics_list
+    ]
     return summary
 
 
@@ -163,14 +172,23 @@ def _render_single(batch_id: str, label: str | None, summary: dict[str, Any], ru
     lines += [
         "## Per-run 一覧",
         "",
-        "| run_number | run_id | best_fit | best_sharpe | A | B | C | best_b_sharpe | best_c_sharpe | all_pass |",
-        "|----------:|--------|---------:|------------:|--:|--:|--:|--------------:|--------------:|:--------:|",
+        (
+            "| run_number | run_id | dataset_epoch_id | best_fit | "
+            "best_sharpe | A | B | C | best_b_sharpe | best_c_sharpe | "
+            "all_pass |"
+        ),
+        (
+            "|----------:|--------|-----------------|---------:|"
+            "------------:|--:|--:|--:|--------------:|--------------:|"
+            ":--------:|"
+        ),
     ]
     for m in runs:
         sp = m.get("stage_pass") or {}
         best = m.get("best") or {}
         lines.append(
             f"| {m.get('run_number', '—')} | `{m.get('run_id', '—')}` | "
+            f"`{m.get('dataset_epoch_id') or '—'}` | "
             f"{_format_value(_to_float(best.get('fitness')))} | "
             f"{_format_value(_to_float(best.get('sharpe')))} | "
             f"{sp.get('stage_a_pass', '—')} | {sp.get('stage_b_pass', '—')} | "
@@ -248,9 +266,28 @@ def _run_single(batch_dir: Path) -> int:
     label = _read_label(batch_dir)
     batch_id = batch_dir.name
 
+    # T058 PR 6: Tier 2 軽量ガード — per-run metrics に dataset_epoch_id 引用
+    # 漏れがないか warning ベースで検知 (詳細設計 § 施策 11、 fail-open)
+    for m in runs:
+        assert_epoch_id_present_for_display(
+            m, artifact=f"compare_batch_runs.metrics[{m.get('run_id', '—')}]"
+        )
+
     summary_out = {"batch_id": batch_id, "label": label, **summary}
+    # T058 PR 6: batch_summary.json 書込前に Tier 2 軽量ガード
+    assert_epoch_id_present_for_display(
+        {"dataset_epoch_id": summary_out.get("dataset_epoch_ids", [None])[0]
+            if summary_out.get("dataset_epoch_ids") else None},
+        artifact="compare_batch_runs.batch_summary.json",
+    )
     (batch_dir / "batch_summary.json").write_text(
         json.dumps(summary_out, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    # T058 PR 6: comparison_report.md 書込前に Tier 2 軽量ガード
+    assert_epoch_id_present_for_display(
+        {"dataset_epoch_id": summary_out.get("dataset_epoch_ids", [None])[0]
+            if summary_out.get("dataset_epoch_ids") else None},
+        artifact="compare_batch_runs.comparison_report.md",
     )
     md = _render_single(batch_id, label, summary, runs)
     (batch_dir / "comparison_report.md").write_text(md, encoding="utf-8")
@@ -268,6 +305,15 @@ def _run_compare(baseline: Path, treatment: Path, output: Path | None) -> int:
     if not t_runs:
         print(f"[error] no treatment metrics under {treatment / 'metrics'}", file=sys.stderr)
         return 1
+    # T058 PR 6: Tier 2 軽量ガード — baseline/treatment 両方の metrics 引用漏れ検知
+    for m in b_runs:
+        assert_epoch_id_present_for_display(
+            m, artifact=f"compare_batch_runs.baseline[{m.get('run_id', '—')}]"
+        )
+    for m in t_runs:
+        assert_epoch_id_present_for_display(
+            m, artifact=f"compare_batch_runs.treatment[{m.get('run_id', '—')}]"
+        )
     b_sum = _aggregate(b_runs)
     t_sum = _aggregate(t_runs)
     md = _render_compare(baseline.name, treatment.name, b_sum, t_sum)
