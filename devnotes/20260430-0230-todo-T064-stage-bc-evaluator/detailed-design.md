@@ -35,6 +35,31 @@ zenigame-fx Alpha Factory 使命: live_criteria 全指標同時充足 + (ii-lite
 | [W2] truth table 優先順位衝突全列挙 | テスト計画に追加: `test_stage_c_live_fail_and_cross_pair_fail_yields_reason_live_criteria` (live=False が cross_pair=FAIL より優先)、 `test_stage_c_cross_pair_fail_and_stress_fail_yields_reason_cross_pair` (cross_pair > stress) |
 | [W3] anchor_bundle 自体の妥当性チェック未記載 | evaluate_stage_c で `if individual_input.anchor_bundle.pair != STAGE_C_ANCHOR_PAIR: raise StageBCInputError(...)` を追加、 anchor pair 整合性確保 |
 
+## Follow-up review 反映 (T066 c_pass_depth field 追加、 Phase 0 dependency 解消)
+
+T066 概念 Round 4 [R4] / [R9] および詳細 Round 1 [C3] / Round 2 で確定した「BCEvaluationResult への `c_pass_depth: float` field 追加」 を本 follow-up で T064 詳細設計に反映する。 計算式は T066 設計時に確定済 (CA eviction lex key #4 で必要)。 本 follow-up は Phase 0 として T066/T067/T068 Phase 2 配線実装より先に着地必須 (T064 PR は設計改訂のみ、 実装は Phase 2 で T064 evaluate_bc_for_a_pass を src/ に配線する際に実装)。
+
+| Follow-up review [反映元] | 修正対応 |
+|---|---|
+| [T066 概念 R4] BCEvaluationResult.c_pass_depth field 追加 | BCEvaluationResult dataclass に `c_pass_depth: float` 追加 (値域 [0.0, 1.75])、 計算式: `c_pass_depth = c_lite_n_pass_windows × 0.25 + (1.0 if c_result.mission_pass==PASS else 0.5 if PENDING else 0.0)` |
+| [T066 概念 R4] c_lite_n_pass_windows の SSOT | StageCLiteResult dataclass に `n_pass_windows: int` 追加 (値域 [0, 3])、 evaluate_stage_c_lite 内で `sum(1 for w in per_window_results if w.cf_result.gate_pass)` で deterministic 計算 |
+| [T066 概念 R9] Phase 0 として先着地 | 本 follow-up は T064 設計改訂 PR のみ (実装なし)、 T066/T067/T068 Phase 2 配線時に T064 evaluate_bc_for_a_pass の実装が `c_pass_depth` を BCEvaluationResult に注入する責務 |
+| [T066 詳細 C3] T064 follow-up 不成立を T066 単体で早期検知 | T066 contract test (`test_bc_evaluation_result_has_c_pass_depth_field`) は T064 PR/Phase 2 に同期済の前提を明文化 |
+| [T066 詳細 R2 W1] hasattr 偽陰性回避 | contract test の判定ロジックは `__dataclass_fields__` または `typing.get_type_hints` ベースで実装する旨を Phase 2 申し送りに明記 |
+
+### Follow-up Round 1 review 反映 (Codex 詳細レビュー、 follow-up セッション)
+
+| Follow-up Round 1 [Critical/Warning/Suggestion] | 修正対応 |
+|---|---|
+| [Critical] テスト計画「4 status × 4 n = 12」 算術不整合 (StagePassStatus は PASS/PENDING/FAIL の 3 値) | テスト計画を **「3 StagePassStatus × 4 n_pass_windows = 12 組合せ」** で再明記 (`test_compute_c_pass_depth_value_range_inclusive_zero_and_one_point_seven_five`)、 status 母集合を designed 表現で明示固定 |
+| [Warning 1] `compute_c_pass_depth` の `else: 0.0` で未知 enum 値が silent FAIL 等価扱い、 契約逸脱検知が弱い | StagePassStatus の 3 値を全て明示分岐 (PASS=1.0 / PENDING=0.5 / FAIL=0.0)、 未知値は `ValueError` raise (将来 enum 拡張時 fail-fast)、 contract test `test_compute_c_pass_depth_rejects_unknown_status` 追加 |
+| [Warning 2] `n_pass_windows ∈ [0, 3]` の dataclass 生成時 invariant 検証なし | `StageCLiteResult.__post_init__` で `0 <= n_pass_windows <= STAGE_C_LITE_NUM_WINDOWS` + `n_pass_windows <= len(per_window_results)` の二重検証、 contract test `test_stage_c_lite_result_rejects_n_pass_windows_out_of_range` 追加。 加えて `compute_c_pass_depth` 入口でも guard (mock dataclass bypass test 用) |
+| [Suggestion 2] T072 collider bias 規範との独立性を一文で明示 | `compute_c_pass_depth` docstring + Follow-up section に「c_lite_result.n_pass_windows と c_result.mission_pass のみに依存、 holiday_markets / dst_transition_markets / observability_flags 系には触れない、 stratified audit は本 module で扱わない」 を明記 |
+
+**Collider bias 独立性 (T072 規範継承、 Round 1 [S2] 反映)**: `c_pass_depth` および `n_pass_windows` の計算経路は **`StageCLiteResult.per_window_results.cf_result.gate_pass` と `StageCResult.mission_pass` の 2 input のみ**に依存する。 holiday_markets / dst_transition_markets / observability_flags / schedule_status 系の boundary observability 情報は `compute_c_pass_depth` および `evaluate_stage_c_lite.n_pass_windows` 計算で参照しない (= T072 で確立した「stratified audit は T071 RunObservabilityReport 経由」 規範を継承)。 Phase 2 配線時 (T065/T066) も同規範を維持し、 `c_pass_depth` を condition variable として使った直接 stratification は禁止 (= caller の上流で T071 経由 audit する)。
+
+**Phase 0 着地基準**: 本 follow-up は detailed-design.md / conceptual-design.md の改訂 + Codex 詳細レビュー APPROVED まで。 src/ 実装は Phase 2 (T064 配線) で実施。 T066 Phase 2 配線着手時には T064 詳細設計の `c_pass_depth` field 定義が固定済であることが必須前提 (= T066 CA eviction lex key の意味論が SSOT 確定)。
+
 ## 施策一覧 (Phase 1: T064 PR、 Phase 2 は別 PR)
 
 | # | 施策名 | 変更ファイル | 優先度 |
@@ -236,6 +261,24 @@ class StageCLiteResult:
     mission_pass: StagePassStatus                     # 全 3 windows AND
     progress_pass: StagePassStatus                    # 2/3 windows pass
     sample_size_flag: SampleSizeFlag                  # Round 1 [W5]
+    n_pass_windows: int                               # Follow-up: per_window_results のうち cf_result.gate_pass が True の数 (値域 [0, STAGE_C_LITE_NUM_WINDOWS=3])。 c_pass_depth 計算 SSOT (T066 CA eviction lex key #4 で消費)
+
+    def __post_init__(self) -> None:
+        """Follow-up Round 1 [W2] 反映: n_pass_windows 値域 invariant 検証.
+
+        生成時に [0, STAGE_C_LITE_NUM_WINDOWS=3] 外なら ValueError raise.
+        len(per_window_results) との整合性 (= n_pass_windows <= len) も検証 (caller bug 早期検知).
+        """
+        if not 0 <= self.n_pass_windows <= STAGE_C_LITE_NUM_WINDOWS:
+            raise ValueError(
+                f"n_pass_windows must be in [0, {STAGE_C_LITE_NUM_WINDOWS}], "
+                f"got {self.n_pass_windows}"
+            )
+        if self.n_pass_windows > len(self.per_window_results):
+            raise ValueError(
+                f"n_pass_windows ({self.n_pass_windows}) cannot exceed "
+                f"len(per_window_results)={len(self.per_window_results)}"
+            )
 
 
 @dataclass(frozen=True)
@@ -289,6 +332,7 @@ class BCEvaluationResult:
     mission_pass: StagePassStatus
     b_pooled_cf: CanonicalFiveResult | None           # GA Pareto 軸 source、 None で除外
     pareto_axis_usable: bool                          # b_pooled_cf is not None で True
+    c_pass_depth: float                               # Follow-up (T066 Phase 0): 値域 [0.0, 1.75]、 計算式: c_lite_result.n_pass_windows × 0.25 + (1.0 if c_result.mission_pass==PASS else 0.5 if c_result.mission_pass==PENDING else 0.0)。 T066 CA eviction lex key #4 で消費 (大が上位)
 
 
 # ---------------------------------------------------------------------------
@@ -707,6 +751,57 @@ def derive_stage_c_thresholds(live_criteria: dict) -> CanonicalFiveThresholds:
     """Stage C (12w) 用 thresholds. window 比例 (12w / 24m)."""
 
 
+def compute_c_pass_depth(
+    c_lite_result: StageCLiteResult,
+    c_result: StageCResult,
+) -> float:
+    """Follow-up (T066 Phase 0) 反映: c_pass_depth 計算 SSOT.
+
+    計算式 (T066 概念 R4 確定):
+        c_pass_depth = c_lite_result.n_pass_windows × 0.25
+                     + bonus(c_result.mission_pass)
+        bonus(PASS) = 1.0 / bonus(PENDING) = 0.5 / bonus(FAIL) = 0.0
+
+    値域: [0.0, 1.75]
+        - n_pass_windows: 0..3 (× 0.25 = [0.0, 0.75])
+        - mission_pass status: PASS=1.0 / PENDING=0.5 / FAIL=0.0
+        - 合計: [0.0, 0.75] + [0.0, 1.0] = [0.0, 1.75]
+
+    用途 (T066 CA eviction lex key #4): 大が上位.
+    Stage C-lite を多く通過 ∧ Stage C で mission_pass に近い個体ほど archive 残留優先.
+
+    Determinism: pure function、 入力同値で出力同値. 浮動小数点誤差なし
+    (整数 × 0.25 + 整数定数 のみで構成、 IEEE 754 で exact).
+
+    Round 1 [W1] 反映: StagePassStatus 3 値全てを明示分岐、 未知値は ValueError raise
+    (将来 enum 拡張時の silent FAIL 同等扱いを早期検知).
+
+    Collider bias 独立性 (T072 規範継承): 本関数は c_lite_result.n_pass_windows と
+    c_result.mission_pass のみに依存し、 holiday_markets / dst_transition_markets /
+    observability_flags 系には触れない. stratified audit は本 module で扱わない.
+    """
+    # Round 2 [W1] 反映: SSOT 一貫性のため STAGE_C_LITE_NUM_WINDOWS 参照
+    # (StageCLiteResult.__post_init__ と同一定数を共有、 literal 3 を散在させない)
+    if not 0 <= c_lite_result.n_pass_windows <= STAGE_C_LITE_NUM_WINDOWS:
+        raise ValueError(
+            f"n_pass_windows must be in [0, {STAGE_C_LITE_NUM_WINDOWS}], "
+            f"got {c_lite_result.n_pass_windows}"
+        )
+    base = c_lite_result.n_pass_windows * 0.25
+    if c_result.mission_pass == StagePassStatus.PASS:
+        bonus = 1.0
+    elif c_result.mission_pass == StagePassStatus.PENDING:
+        bonus = 0.5
+    elif c_result.mission_pass == StagePassStatus.FAIL:
+        bonus = 0.0
+    else:
+        raise ValueError(
+            f"unknown StagePassStatus: {c_result.mission_pass!r} "
+            "(expected PASS / PENDING / FAIL)"
+        )
+    return base + bonus
+
+
 def filter_to_period(
     trades: tuple[TradeRecord, ...],
     bars: BarEquitySeries,
@@ -733,11 +828,15 @@ def evaluate_bc_for_a_pass(
     手順 (per individual):
     1. b_result = evaluate_stage_b(input, evaluate_fn, live_criteria)
     2. c_lite_result = evaluate_stage_c_lite(input, evaluate_fn, live_criteria)
+       (StageCLiteResult.n_pass_windows = sum(1 for w in per_window_results
+        if w.cf_result.gate_pass) を deterministic に同時計算、 値域 [0, 3])
     3. c_result = evaluate_stage_c(input, evaluate_fn, live_criteria, spread_stress_supported)
     4. mission_pass: c_result.mission_pass を採用 (Stage C が最終 mission gate、 synthesis § 5.4)
     5. b_pooled_cf = b_result.b_pooled_cf_result (None possible)
     6. pareto_axis_usable = b_pooled_cf is not None
-    7. BCEvaluationResult を返す
+    7. c_pass_depth = compute_c_pass_depth(c_lite_result, c_result)
+       (Follow-up (T066 Phase 0): 値域 [0.0, 1.75]、 T066 CA eviction lex key #4 で消費)
+    8. BCEvaluationResult を返す (c_pass_depth field 同梱)
     """
 ```
 
@@ -860,6 +959,36 @@ def evaluate_bc_for_a_pass(
 - `test_evaluate_bc_c_lite_insufficient_sample_yields_mission_pending_at_clite`
 - `test_evaluate_bc_stress_unsupported_default_yields_stage_c_mission_pending`
 
+#### Follow-up (T066 Phase 0): n_pass_windows / c_pass_depth contract + 計算
+- `test_stage_c_lite_result_has_n_pass_windows_field`
+  (`__dataclass_fields__` ベースで存在検証、 `int` annotation 確認 / Round 2 W1 hasattr 偽陰性回避)
+- `test_stage_c_lite_n_pass_windows_matches_per_window_gate_pass_count`
+  (per_window_results の gate_pass=True 数と一致、 値域 [0, 3])
+- `test_stage_c_lite_n_pass_windows_zero_when_all_windows_fail`
+- `test_stage_c_lite_n_pass_windows_three_when_all_windows_pass`
+- `test_bc_evaluation_result_has_c_pass_depth_field`
+  (T066 詳細 Round 1 [C3] 反映の contract test 同型、 `__dataclass_fields__` ベースで存在検証 + `float` annotation 確認)
+- `test_compute_c_pass_depth_pass_n3_yields_one_point_seven_five`
+  (上限境界: c_lite_n_pass_windows=3 + mission_pass=PASS → 0.75 + 1.0 = 1.75)
+- `test_compute_c_pass_depth_fail_n0_yields_zero`
+  (下限境界: n=0 + FAIL → 0.0)
+- `test_compute_c_pass_depth_pending_n1_yields_zero_point_seven_five`
+  (PENDING 中間: n=1 + PENDING → 0.25 + 0.5 = 0.75)
+- `test_compute_c_pass_depth_fail_n2_yields_zero_point_five`
+  (FAIL でも c_lite 通過分は加点: n=2 + FAIL → 0.5 + 0.0 = 0.5)
+- `test_compute_c_pass_depth_deterministic_for_same_input`
+  (pure function、 同入力で同出力、 浮動小数点 exact 比較で確認)
+- `test_compute_c_pass_depth_value_range_inclusive_zero_and_one_point_seven_five`
+  (全組合せ **3 StagePassStatus (PASS/PENDING/FAIL) × 4 n (0/1/2/3) = 12 ケース** で `0.0 <= depth <= 1.75`、 status=FAIL は 0.0..0.75、 PENDING は 0.5..1.25、 PASS は 1.0..1.75. Round 1 [Critical] 反映で組合せ数を再明記)
+- `test_compute_c_pass_depth_rejects_unknown_status`
+  (Round 1 [W1] 反映: StagePassStatus 互換だが PASS/PENDING/FAIL 以外の値 (= mock enum) を渡すと ValueError raise)
+- `test_compute_c_pass_depth_rejects_n_pass_windows_out_of_range`
+  (Round 1 [W2] 反映: c_lite_result.n_pass_windows < 0 または > 3 で ValueError raise. ただし StageCLiteResult __post_init__ で先に弾かれるため、 mock dataclass で迂回した bypass パスのみ test)
+- `test_stage_c_lite_result_rejects_n_pass_windows_out_of_range`
+  (Round 1 [W2] 反映: StageCLiteResult dataclass 生成時に n_pass_windows ∈ [0, 3] 外で ValueError raise、 n_pass_windows > len(per_window_results) でも ValueError raise)
+- `test_evaluate_bc_for_a_pass_yields_c_pass_depth_consistent_with_compute_c_pass_depth`
+  (top-level 経由で c_pass_depth が compute_c_pass_depth(c_lite, c) と一致)
+
 ### リスク
 
 - (テストのみ、 リスク軽微)
@@ -902,7 +1031,7 @@ T064 PR 完了基準:
 - [ ] 段階 4 (再エクスポート): 0 hit
 - [ ] 段階 5 (runtime シンボル): `grep -rn -E "evaluate_bc_for_a_pass|BCEvaluationResult|StagePassStatus|MissionFailReason" src/alpha_factory/stage_gate.py src/alpha_factory/swim_lane.py src/alpha_factory/cross_pair.py scripts/alpha_factory/run_ga.py` が 0 hit
 
-### Phase 2 (T065 統合 + T070 と同時、 別 PR) DoD (申し送り、 11 箇所)
+### Phase 2 (T065 統合 + T070 と同時、 別 PR) DoD (申し送り、 13 箇所)
 
 - [ ] `stage_gate.py:evaluate_stage_b` 全廃 → T064 evaluate_stage_b に置換 (T065)
 - [ ] `stage_gate.py:evaluate_stage_c` 全廃 → T064 evaluate_stage_c に置換 (T065)
@@ -916,16 +1045,29 @@ T064 PR 完了基準:
 - [ ] **(別 TODO) `TradeRecord.spread_cost` field 追加 + apply_spread_stress 正式実装** (T070)
 - [ ] `docs/alpha_factory/stage-gates.md` を新仕様に書き換え (T065)
 - [ ] **runtime wiring smoke** (T061-T063 と同型): `evaluate_stage_*` を実際に呼んで T064 が configured に走ることを確認 (T065 PR DoD)
+- [ ] **(Follow-up Phase 2)** evaluate_stage_c_lite 実装で `n_pass_windows = sum(1 for w in per_window_results if w.cf_result.gate_pass)` を deterministic 計算 + StageCLiteResult 注入、 evaluate_bc_for_a_pass 実装で `c_pass_depth = compute_c_pass_depth(c_lite_result, c_result)` を BCEvaluationResult 注入 (T065 統合 PR で T066 CA eviction 配線と同期確認)
+- [ ] **(Follow-up Phase 2)** T066 archive admission 実装が `BCEvaluationResult.c_pass_depth` を CA eviction lex key #4 として消費する箇所を 1 経路に集約 (`src/alpha_factory/archive.py` 内、 grep -rn "c_pass_depth" src/ で T064 実装 + T066 archive のみ hit、 重複定義禁止)
 
 ---
 
 ## 関連 / 後段 TODO
 
 - T058-T063: 依存先 (Schema v2 / EpochManager / Partition+Fold / canonical 5 / mission_inf_gap / Stage A)
-- T065-T066: NSGA-II + CPPS (T064 b_pooled_cf を Pareto 軸、 T062 mission_inf_gap で Pareto f3、 T064 mission_pass で archive 流入)
+- T065-T066: NSGA-II + CPPS (T064 b_pooled_cf を Pareto 軸、 T062 mission_inf_gap で Pareto f3、 T064 mission_pass で archive 流入、 **T064 c_pass_depth で T066 CA eviction lex key #4 = Follow-up Phase 0 依存**)
 - T067: Loop closure (T064 BCEvaluationResult の 3 層流入を archive admission で消費、 forced_pass の T064 出力消費)
 - T070: backtest engine (cross-pair 出力 + spread_cost field、 Phase 2 申し送り)
 - T071: observability (compute_a_b_correlation 計算 + T063 注入 orchestration)
+
+### Follow-up (T066 Phase 0) merge 順序契約
+
+T064 follow-up PR (本設計改訂) は **T066/T067/T068 Phase 2 配線 PR より先 merge 必須**。 理由:
+
+1. T066 詳細設計が `BCEvaluationResult.c_pass_depth` field を CA eviction lex key #4 として消費 (T066 R4 / R9)
+2. T066 PR の contract test (`test_bc_evaluation_result_has_c_pass_depth_field`) は T064 PR で field 定義された前提で fail-fast 動作
+3. T067 archive admission 実装も `c_pass_depth` を indirect 消費 (T066 経由)、 T068 graceful failure handling で `c_pass_depth` 不整合は import error or contract test fail で早期検知
+4. T064 follow-up は detailed-design.md / conceptual-design.md 改訂のみの **設計 PR** (Phase 1 範囲)、 src/ 実装は T065 統合 + T070 と同時 (Phase 2)
+
+**T064 follow-up Phase 1 (= 本 PR) 着地基準**: detailed + conceptual design 改訂、 Codex 詳細レビュー APPROVED、 1 commit、 src/ touch なし.
 
 ## 根拠 / 先行実装
 

@@ -7,6 +7,13 @@
 - cross-pair 母集団 → anchor を cross-pair 集計に**含めない**、 **shadow 5 pair (anchor 除く)** で全通過要求
 - A→B 乖離 corr score source → T064 で「higher is better に正規化した単一スカラー (= -gate_worst_gap or gate_score=1/(1+gap))」 を確定
 
+**Follow-up 反映** (T066 Phase 0 dependency 解消、 T066 概念 R4 / R9 反映):
+- `BCEvaluationResult.c_pass_depth: float` field 追加 (値域 [0.0, 1.75])、 計算式 `c_pass_depth = c_lite_n_pass_windows × 0.25 + (1.0 if mission_pass==PASS else 0.5 if PENDING else 0.0)`、 T066 CA eviction lex key #4 で消費 (大が上位)
+- `StageCLiteResult.n_pass_windows: int` field 追加 (値域 [0, 3])、 c_pass_depth 計算 SSOT、 evaluate_stage_c_lite 内で `sum(1 for w in per_window_results if w.cf_result.gate_pass)` で deterministic 計算
+- `compute_c_pass_depth(c_lite_result, c_result) -> float` helper 追加 (pure function、 浮動小数点 exact、 StagePassStatus 3 値を明示分岐し未知値は ValueError raise、 n_pass_windows 値域 invariant guard)
+- 本 follow-up は T064 設計改訂 PR のみ (= Phase 1)、 src/ 実装は T065 統合 + T070 と同時 (Phase 2、 申し送り)、 T066/T067/T068 Phase 2 配線より先 merge 必須 (= T066 contract test の前提)
+- **Collider bias 独立性 (T072 規範継承)**: `c_pass_depth` / `n_pass_windows` 計算は holiday_markets / dst_transition_markets / observability_flags / schedule_status 系に依存しない (`per_window_results.cf_result.gate_pass` と `mission_pass` の 2 input のみ)、 stratified audit は本 module で扱わず T071 RunObservabilityReport 経由
+
 ## 背景・課題
 
 synthesis § 5.2 / § 5.3 / § 5.4 で確定した **Stage B (5 fold pooled WF-OOS gate) / Stage C-lite (3 disjoint windows × 15 セル worst) / Stage C (12w + spread stress + cross-pair)** は selection cascade の主判定層。 Stage A 通過個体に対し:
@@ -63,7 +70,7 @@ src/alpha_factory/stage_bc_evaluator.py (新規、 T064 PR スコープ)
 │   ├── StageBFoldResult — 1 fold の cf_result + is_feasible_invariant
 │   ├── StageBResult — b_pooled_cf_result: CanonicalFiveResult | None (Round 1 [C2]) + per_fold + invariant_fail_fast
 │   ├── StageCLiteWindowResult — 1 window の cf_result
-│   ├── StageCLiteResult — 3 windows + cells_worst + mission_pass: StagePassStatus / progress_pass: StagePassStatus + sample_size_flag (Round 1 [W5])
+│   ├── StageCLiteResult — 3 windows + cells_worst + mission_pass: StagePassStatus / progress_pass: StagePassStatus + sample_size_flag (Round 1 [W5]) + n_pass_windows: int (Follow-up: 値域 [0, 3]、 c_pass_depth 計算 SSOT)
 │   ├── PairBacktestBundle — pair 別 (Round 1 [Suggestion] 4): pair / genome_id / config_hash / partition_label / trades / bars / business_day_universe
 │   ├── StageCResult — 12w cf_result + stress_cf_result | None + per_pair_results: dict[str, CanonicalFiveResult] +
 │   │     stress_pass: StagePassStatus + cross_pair_pass: StagePassStatus + mission_pass: StagePassStatus +
@@ -71,7 +78,8 @@ src/alpha_factory/stage_bc_evaluator.py (新規、 T064 PR スコープ)
 │   ├── BCEvaluationInput — 1 個体の (trades, bars, business_day_universe, partition, folds, shadow_pairs: dict[str, PairBacktestBundle])
 │   └── BCEvaluationResult — 全 stage 統合 (b_result, c_lite_result, c_result, mission_pass: StagePassStatus,
 │         b_pooled_cf: CanonicalFiveResult | None,  # Round 1 [C2]: feasible 個体のみ Pareto 軸 source
-│         pareto_axis_usable: bool)
+│         pareto_axis_usable: bool,
+│         c_pass_depth: float)  # Follow-up: 値域 [0.0, 1.75]、 T066 CA eviction lex key #4 で消費
 ├── Constants
 │   ├── STAGE_B_NUM_FOLDS = 5
 │   ├── STAGE_C_LITE_NUM_WINDOWS = 3
@@ -98,8 +106,12 @@ src/alpha_factory/stage_bc_evaluator.py (新規、 T064 PR スコープ)
 │   ├── build_pooled_oos_input(fold_results, individual_input) -> PoolFoldedInput
 │   │     # Round 1 [C3] / [Suggestion] 3: raw concat ではなく fold 境界 aware builder
 │   │     # invariant: fold.test 非重複・時系列順、 bar/equity boundary-aware 再構成
-│   └── select_top_clite_forced_pass_indices(per_individual_clite_results, ratio) -> frozenset[int]
-│         # Round 1 [W1] / [Suggestion] 2: deterministic ranking key 明文化
+│   ├── select_top_clite_forced_pass_indices(per_individual_clite_results, ratio) -> frozenset[int]
+│   │     # Round 1 [W1] / [Suggestion] 2: deterministic ranking key 明文化
+│   └── compute_c_pass_depth(c_lite_result: StageCLiteResult, c_result: StageCResult) -> float
+│         # Follow-up (T066 Phase 0): 値域 [0.0, 1.75]、 計算式
+│         # c_pass_depth = c_lite_result.n_pass_windows × 0.25 + (PASS=1.0 / PENDING=0.5 / FAIL=0.0)
+│         # T066 CA eviction lex key #4 SSOT (大が上位)、 pure function, IEEE 754 exact
 └── Top-level entry
     └── evaluate_bc_for_a_pass(a_pass_inputs, *, evaluate_fn, live_criteria, spread_stress_supported=False) -> dict[int, BCEvaluationResult]
 ```
