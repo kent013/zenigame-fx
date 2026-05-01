@@ -44,7 +44,9 @@ logger = structlog.get_logger(__name__)
 # state file format version. record.schema_version との比較に使う。
 # 既存 record (schema_version 欄なし) は **後方互換読み取り対象外**
 # (= 新 record のみ適用判定対象)。
-SCHEMA_VERSION: Final[int] = 1
+# T058 (PR 3): dataset_epoch_id 追加に伴い v2 へ更新。 既存 v1 record は
+# schema_version 不一致で自動排除される (再校正必要、 big-bang 前提)。
+SCHEMA_VERSION: Final[int] = 2
 
 # 既存 history record の互換読み取りで「decision filter のみ適用」とする
 # decision 値集合 (tighten / loosen)。
@@ -151,22 +153,37 @@ def _record_matches(
     record: Mapping[str, object],
     *,
     base_config_hash: str,
+    dataset_epoch_id: str,
     dataset_span: tuple[str, str],
     instrument: str,
     stage_gate_version: str,
 ) -> bool:
-    """record が現 RUN context にマッチするか判定 (cross-run contamination guard)."""
+    """record が現 RUN context にマッチするか判定 (cross-run contamination guard).
+
+    T058 (PR 3): ``dataset_epoch_id`` を **追加条件** (AND 結合) として導入。
+    既存 ``dataset_span`` ガードは T067 までは残す (synthesis § 12.1)。
+    """
     rec_schema = record.get("schema_version")
     if not isinstance(rec_schema, int) or rec_schema != SCHEMA_VERSION:
         return False
     rec_base = record.get("base_config_hash")
     if not isinstance(rec_base, str) or rec_base != base_config_hash:
         return False
+    # T058 (PR 3) → T067 移行手順: 下記 dataset_span ブロック (この 5 行) を
+    # T067 切替コミットで削除すれば、 epoch_id 単独 scope への移行完了。
+    # 具体的に削除するのは、 ``rec_span_obj`` 取得 + len/contents check + 比較の
+    # 3 行 (= dataset_span ブロックの全体)。 直後の dataset_epoch_id ガードは
+    # 残す (= moveable guard)。 詳細設計 行 1100-1102。
     rec_span_obj = record.get("dataset_span")
     if not isinstance(rec_span_obj, list) or len(rec_span_obj) != 2:
         return False
     rec_span = (str(rec_span_obj[0]), str(rec_span_obj[1]))
     if rec_span != dataset_span:
+        return False
+    # T058 (PR 3): dataset_epoch_id 追加条件 (AND)、 T067 で dataset_span 廃止後も
+    # 残る moveable guard。 上の dataset_span ブロック削除に対して non-移動。
+    rec_epoch_id = record.get("dataset_epoch_id")
+    if not isinstance(rec_epoch_id, str) or rec_epoch_id != dataset_epoch_id:
         return False
     rec_inst = record.get("instrument")
     if not isinstance(rec_inst, str) or rec_inst != instrument:
@@ -182,12 +199,13 @@ def _record_matches(
 
 
 def load_calibrated_threshold(
+    *,
     history_path: Path,
     base_config_hash: str,
+    dataset_epoch_id: str,
     dataset_span: tuple[str, str],
     instrument: str,
     stage_gate_version: str,
-    *,
     threshold_floor: float = -100.0,
     threshold_ceiling: float = 100.0,
 ) -> float | None:
@@ -196,7 +214,8 @@ def load_calibrated_threshold(
     cross-run contamination 防止のため、以下を全て verify (fail-closed):
         - record.schema_version == SCHEMA_VERSION
         - record.base_config_hash == 引数 base_config_hash (適応値除外の hash)
-        - record.dataset_span == 引数 dataset_span
+        - record.dataset_span == 引数 dataset_span (T067 で廃止予定)
+        - record.dataset_epoch_id == 引数 dataset_epoch_id (T058 新設、 AND 結合)
         - record.instrument == 引数 instrument
         - record.stage_gate_version == 引数 stage_gate_version
         - record.decision in (tighten, loosen)
@@ -206,9 +225,10 @@ def load_calibrated_threshold(
     Args:
         history_path: history.jsonl path
         base_config_hash: 適応値除外の現 RUN config hash
-        dataset_span: (start, end) の string tuple
+        dataset_span: (start, end) の string tuple (T067 で廃止予定)
         instrument: 通貨ペア
         stage_gate_version: Stage gate 識別子
+        dataset_epoch_id: T058 新設の epoch-rolling 識別子 (RunContext から渡す)
         threshold_floor: 適用 threshold の下限 (default -100.0)
         threshold_ceiling: 適用 threshold の上限 (default 100.0)
 
@@ -221,6 +241,7 @@ def load_calibrated_threshold(
         if not _record_matches(
             record,
             base_config_hash=base_config_hash,
+            dataset_epoch_id=dataset_epoch_id,
             dataset_span=dataset_span,
             instrument=instrument,
             stage_gate_version=stage_gate_version,

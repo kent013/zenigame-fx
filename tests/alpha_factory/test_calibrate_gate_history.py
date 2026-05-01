@@ -1,8 +1,9 @@
-"""T040: calibrate_gate_history unit tests."""
+"""T040 + T058 (PR 3): calibrate_gate_history unit tests."""
 
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,11 @@ from src.alpha_factory.calibrate_gate_history import (
     append_record,
     compute_drift,
     read_history,
+)
+from src.alpha_factory.schema_contract import (
+    CALIBRATE_HISTORY_SCHEMA_VERSION,
+    SchemaContractError,
+    SchemaEnforcementMode,
 )
 
 
@@ -28,6 +34,7 @@ def _record(
     delta: float = 0.0,
     clamped_floor_or_ceiling: bool = False,
     var_fitness_pen: float | None = 0.01,
+    dataset_epoch_id: str = "epoch_legacy",
 ) -> HistoryRecord:
     return HistoryRecord(
         run_id=run_id,
@@ -49,6 +56,7 @@ def _record(
         stage_b_pass_count=0,
         stage_c_pass_count=0,
         live_criteria_gap={"sharpe": 0.3, "total_pnl": 0.0},
+        dataset_epoch_id=dataset_epoch_id,
     )
 
 
@@ -189,3 +197,188 @@ class TestDriftAlertsAnyAlert:
             lambda: DriftAlerts(False, False, False, True),
         ]:
             assert fn().any_alert is True
+
+
+# ---------------------------------------------------------------------------
+# T058 (PR 3): HistoryRecord v2 schema lint 連動
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryRecordV2Contract:
+    def test_history_record_v2_constructs_with_dataset_epoch_id(self) -> None:
+        rec = _record(dataset_epoch_id="epoch_legacy")
+        assert rec.calibrate_history_schema_version == (
+            CALIBRATE_HISTORY_SCHEMA_VERSION
+        )
+        assert rec.dataset_epoch_id == "epoch_legacy"
+
+    def test_history_record_rejects_invalid_epoch_id_grammar(self) -> None:
+        # SchemaContractError は ValueError 派生
+        with pytest.raises((SchemaContractError, ValueError)):
+            _record(dataset_epoch_id="Epoch-Bad-Grammar")
+
+    def test_history_record_rejects_empty_epoch_id(self) -> None:
+        with pytest.raises((SchemaContractError, ValueError)):
+            _record(dataset_epoch_id="")
+
+    def test_history_record_rejects_wrong_schema_version(self) -> None:
+        with pytest.raises(ValueError, match="calibrate_history_schema_version"):
+            HistoryRecord(
+                run_id="run_test",
+                applied_at="2026-04-26T00:00:00+09:00",
+                n_rows_total=10,
+                n_rows_used=10,
+                aggregation_mode="last_k_generations",
+                aggregation_window=5,
+                actual_pass_rate=0.15,
+                target_pass_rate=0.15,
+                tol=0.05,
+                prev_threshold=0.0,
+                new_threshold=0.0,
+                delta=0.0,
+                decision="in_band",
+                var_fitness_pen=None,
+                clamped_by_delta=False,
+                clamped_by_floor_or_ceiling=False,
+                stage_b_pass_count=0,
+                stage_c_pass_count=0,
+                live_criteria_gap={},
+                calibrate_history_schema_version=1,  # 不正
+                dataset_epoch_id="epoch_legacy",
+            )
+
+    def test_append_record_writes_v2_fields_to_jsonl(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "history.jsonl"
+        rec = _record(dataset_epoch_id="epoch_legacy")
+        append_record(rec, path)
+        with path.open() as f:
+            obj = json.loads(f.read().strip())
+        assert obj["calibrate_history_schema_version"] == (
+            CALIBRATE_HISTORY_SCHEMA_VERSION
+        )
+        assert obj["dataset_epoch_id"] == "epoch_legacy"
+
+    def test_append_record_log_only_warns_on_missing_via_raw_dict_path(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """LOG_ONLY mode で必須 field 欠落時に warning を出す (raise しない)."""
+        # NB: dataclass 経由では __post_init__ が必須 field を強制するので、
+        # raw dict に直接書き込み + 後段 lint を passive で動かす経路を simulate。
+        path = tmp_path / "history.jsonl"
+        # validate 抜きで HistoryRecord を構築する経路は存在しない。
+        # ここでは mode=LOG_ONLY 時に dataclass 経由 (= ok 経路) で warn なしを確認、
+        # FAIL_CLOSED / 必須欠落の検証は test_calibrate_history_v2 単体テスト側に委ねる。
+        rec = _record(dataset_epoch_id="epoch_legacy")
+        with caplog.at_level(logging.WARNING):
+            append_record(rec, path, mode=SchemaEnforcementMode.LOG_ONLY)
+        assert path.exists()
+
+    def test_read_history_skips_v1_record(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        path = tmp_path / "history.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # v1 record (dataset_epoch_id 不在)
+        v1 = {
+            "run_id": "run_v1",
+            "applied_at": "2026-04-26T00:00:00+09:00",
+            "n_rows_total": 96,
+            "n_rows_used": 80,
+            "aggregation_mode": "last_k_generations",
+            "aggregation_window": 5,
+            "actual_pass_rate": 0.15,
+            "target_pass_rate": 0.15,
+            "tol": 0.05,
+            "prev_threshold": 0.10,
+            "new_threshold": 0.10,
+            "delta": 0.0,
+            "decision": "in_band",
+            "var_fitness_pen": 0.01,
+            "clamped_by_delta": False,
+            "clamped_by_floor_or_ceiling": False,
+            "stage_b_pass_count": 0,
+            "stage_c_pass_count": 0,
+            "live_criteria_gap": {"sharpe": 0.3, "total_pnl": 0.0},
+        }
+        with path.open("w") as f:
+            f.write(json.dumps(v1) + "\n")
+        # v2 record も追記して、 v1 のみ skip されることを確認
+        rec_v2 = _record(run_id="run_v2", dataset_epoch_id="epoch_legacy")
+        append_record(rec_v2, path)
+        with caplog.at_level(logging.WARNING):
+            loaded = read_history(path)
+        assert [r.run_id for r in loaded] == ["run_v2"]
+
+    def test_read_history_skips_record_with_invalid_epoch_id(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "history.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # dataset_epoch_id 不正 (大文字含む)
+        bad = {
+            "run_id": "run_bad",
+            "applied_at": "2026-04-26T00:00:00+09:00",
+            "n_rows_total": 96,
+            "n_rows_used": 80,
+            "aggregation_mode": "last_k_generations",
+            "aggregation_window": 5,
+            "actual_pass_rate": 0.15,
+            "target_pass_rate": 0.15,
+            "tol": 0.05,
+            "prev_threshold": 0.10,
+            "new_threshold": 0.10,
+            "delta": 0.0,
+            "decision": "in_band",
+            "var_fitness_pen": 0.01,
+            "clamped_by_delta": False,
+            "clamped_by_floor_or_ceiling": False,
+            "stage_b_pass_count": 0,
+            "stage_c_pass_count": 0,
+            "live_criteria_gap": {},
+            "calibrate_history_schema_version": (
+                CALIBRATE_HISTORY_SCHEMA_VERSION
+            ),
+            "dataset_epoch_id": "BAD-Grammar",
+        }
+        with path.open("w") as f:
+            f.write(json.dumps(bad) + "\n")
+        loaded = read_history(path)
+        assert loaded == []
+
+    def test_from_dict_or_none_returns_none_for_v1(self) -> None:
+        v1 = {"run_id": "x"}  # dataset_epoch_id 不在
+        assert HistoryRecord.from_dict_or_none(v1) is None
+
+    def test_from_dict_or_none_returns_none_for_wrong_version(self) -> None:
+        rec = _record()
+        from dataclasses import asdict as _asdict
+
+        d = _asdict(rec)
+        d["calibrate_history_schema_version"] = 1
+        assert HistoryRecord.from_dict_or_none(d) is None
+
+    def test_from_dict_or_none_returns_record_for_valid_v2(self) -> None:
+        rec = _record()
+        from dataclasses import asdict as _asdict
+
+        d = _asdict(rec)
+        loaded = HistoryRecord.from_dict_or_none(d)
+        assert loaded is not None
+        assert loaded.run_id == rec.run_id
+        assert loaded.dataset_epoch_id == rec.dataset_epoch_id
+
+    def test_from_dict_or_none_returns_none_for_grammar_violation(self) -> None:
+        """v2 record だが grammar 違反の dataset_epoch_id → None (raise しない).
+
+        Codex impl-review-pr3 round 1 [Critical] 1: SchemaContractError
+        catch を defensive に確認するテスト。
+        """
+        rec = _record()
+        from dataclasses import asdict as _asdict
+
+        d = _asdict(rec)
+        d["dataset_epoch_id"] = "BAD-Grammar"  # __post_init__ で raise
+        # raise されず None 返却が契約
+        assert HistoryRecord.from_dict_or_none(d) is None

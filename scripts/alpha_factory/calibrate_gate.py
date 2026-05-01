@@ -419,6 +419,9 @@ def main(argv: list[str] | None = None) -> int:
             instrument = None
             stage_gate_version = None
 
+        # T058 (PR 3): dataset_epoch_id を v2 必須 field として書込。
+        # 現段階では `epoch_legacy` stub (archive.py 既存 default と同値)。
+        # T059 で deterministic な epoch-rolling 識別子に置換予定。
         record = HistoryRecord(
             run_id=run_id_resolved,
             applied_at=datetime.now(UTC).isoformat(),
@@ -439,6 +442,8 @@ def main(argv: list[str] | None = None) -> int:
             stage_b_pass_count=monitoring.stage_b_pass_count,
             stage_c_pass_count=monitoring.stage_c_pass_count,
             live_criteria_gap=monitoring.live_criteria_gap,
+            # T058 (PR 3): v2 必須 field
+            dataset_epoch_id="epoch_legacy",
             # T054: cross-run contamination guard
             schema_version=SCHEMA_VERSION,
             base_config_hash=base_hash,

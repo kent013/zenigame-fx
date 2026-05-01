@@ -40,6 +40,8 @@ def _make_record(
     stage_gate_version: str,
     schema_version: int = SCHEMA_VERSION,
     applied_at: str | None = None,
+    dataset_epoch_id: str = "epoch_legacy",
+    calibrate_history_schema_version: int = 2,
 ) -> dict:
     return {
         "run_id": run_id,
@@ -61,6 +63,7 @@ def _make_record(
         "stage_b_pass_count": 100,
         "stage_c_pass_count": 0,
         "live_criteria_gap": {},
+        # T054
         "schema_version": schema_version,
         "base_config_hash": base_hash,
         "full_config_hash": "f" * 64,
@@ -68,6 +71,9 @@ def _make_record(
         "instrument": instrument,
         "stage_gate_version": stage_gate_version,
         "applied_from_run_id": run_id,
+        # T058 (PR 3): v2 必須 field
+        "dataset_epoch_id": dataset_epoch_id,
+        "calibrate_history_schema_version": calibrate_history_schema_version,
     }
 
 
@@ -87,6 +93,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result is None
 
@@ -100,6 +107,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result is None
 
@@ -112,6 +120,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=["2026-01-01", "2026-12-31"],
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         _write_history([rec], history)
         result = load_calibrated_threshold(
@@ -120,6 +129,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result == 0.0778
 
@@ -132,6 +142,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=["2026-01-01", "2026-12-31"],
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         _write_history([rec], history)
         result = load_calibrated_threshold(
@@ -140,6 +151,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result is None
 
@@ -150,6 +162,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=["2025-01-01", "2025-12-31"],  # 異なる span
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         _write_history([rec], history)
         result = load_calibrated_threshold(
@@ -158,6 +171,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result is None
 
@@ -168,6 +182,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=["2026-01-01", "2026-12-31"],
             instrument="EUR_USD",  # 異なる instrument
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         _write_history([rec], history)
         result = load_calibrated_threshold(
@@ -176,6 +191,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result is None
 
@@ -186,6 +202,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=["2026-01-01", "2026-12-31"],
             instrument="USD_JPY",
             stage_gate_version="v_old",  # 異なる version
+            dataset_epoch_id="epoch_legacy",
         )
         _write_history([rec], history)
         result = load_calibrated_threshold(
@@ -194,6 +211,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result is None
 
@@ -205,6 +223,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=["2026-01-01", "2026-12-31"],
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
             decision="in_band",  # 適用対象外
         )
         _write_history([rec], history)
@@ -214,6 +233,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result is None
 
@@ -227,6 +247,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=["2026-01-01", "2026-12-31"],
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
             decision="skip_sample_size",
         )
         _write_history([rec], history)
@@ -236,6 +257,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result is None
 
@@ -248,6 +270,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=["2026-01-01", "2026-12-31"],
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
             decision="loosen",
         )
         _write_history([rec], history)
@@ -257,6 +280,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result == -0.05
 
@@ -268,6 +292,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=["2026-01-01", "2026-12-31"],
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         del rec["schema_version"]
         _write_history([rec], history)
@@ -277,6 +302,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result is None
 
@@ -305,6 +331,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result is None
 
@@ -317,6 +344,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=["2026-01-01", "2026-12-31"],
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         _write_history([rec], history)
         result = load_calibrated_threshold(
@@ -325,6 +353,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result is None
 
@@ -339,6 +368,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=["2026-01-01", "2026-12-31"],
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
             applied_at="2026-04-26T17:45:00+00:00",
         )
         rec_new = _make_record(
@@ -347,6 +377,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=["2026-01-01", "2026-12-31"],
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
             applied_at="2026-04-26T20:42:00+00:00",
         )
         _write_history([rec_old, rec_new], history)
@@ -356,6 +387,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result == 0.20
 
@@ -367,6 +399,7 @@ class TestLoadCalibratedThreshold:
             dataset_span=["2026-01-01", "2026-12-31"],
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
             applied_at="not-a-date",
         )
         _write_history([rec], history)
@@ -376,6 +409,82 @@ class TestLoadCalibratedThreshold:
             dataset_span=("2026-01-01", "2026-12-31"),
             instrument="USD_JPY",
             stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
+        )
+        assert result is None
+
+    # ---------- T058 (PR 3): dataset_epoch_id AND 結合 ----------
+
+    def test_load_calibrated_threshold_filters_by_dataset_epoch_id(
+        self, tmp_path: Path
+    ) -> None:
+        """dataset_epoch_id が一致 → 適用される."""
+        history = tmp_path / "history.jsonl"
+        rec = _make_record(
+            new_threshold=0.0778,
+            base_hash="h",
+            dataset_span=["2026-01-01", "2026-12-31"],
+            instrument="USD_JPY",
+            stage_gate_version="v3",
+            dataset_epoch_id="epoch_2026q2",
+        )
+        _write_history([rec], history)
+        result = load_calibrated_threshold(
+            history_path=history,
+            base_config_hash="h",
+            dataset_span=("2026-01-01", "2026-12-31"),
+            instrument="USD_JPY",
+            stage_gate_version="v3",
+            dataset_epoch_id="epoch_2026q2",
+        )
+        assert result == 0.0778
+
+    def test_load_calibrated_threshold_skips_record_with_different_epoch_id(
+        self, tmp_path: Path
+    ) -> None:
+        """dataset_epoch_id が異なる → skip (cross-run guard)."""
+        history = tmp_path / "history.jsonl"
+        rec = _make_record(
+            new_threshold=0.0778,
+            base_hash="h",
+            dataset_span=["2026-01-01", "2026-12-31"],
+            instrument="USD_JPY",
+            stage_gate_version="v3",
+            dataset_epoch_id="epoch_2026q1",
+        )
+        _write_history([rec], history)
+        result = load_calibrated_threshold(
+            history_path=history,
+            base_config_hash="h",
+            dataset_span=("2026-01-01", "2026-12-31"),
+            instrument="USD_JPY",
+            stage_gate_version="v3",
+            dataset_epoch_id="epoch_2026q2",  # 異なる epoch
+        )
+        assert result is None
+
+    def test_load_calibrated_threshold_returns_none_for_v1_records(
+        self, tmp_path: Path
+    ) -> None:
+        """v1 record (dataset_epoch_id 不在) → None (T058 で v2 必須)."""
+        history = tmp_path / "history.jsonl"
+        rec = _make_record(
+            new_threshold=0.0778,
+            base_hash="h",
+            dataset_span=["2026-01-01", "2026-12-31"],
+            instrument="USD_JPY",
+            stage_gate_version="v3",
+        )
+        # v1 record (dataset_epoch_id 不在) を simulate
+        del rec["dataset_epoch_id"]
+        _write_history([rec], history)
+        result = load_calibrated_threshold(
+            history_path=history,
+            base_config_hash="h",
+            dataset_span=("2026-01-01", "2026-12-31"),
+            instrument="USD_JPY",
+            stage_gate_version="v3",
+            dataset_epoch_id="epoch_legacy",
         )
         assert result is None
 
@@ -450,6 +559,7 @@ class TestThresholdSourceCliOverridesHistory:
             dataset_span=[str(af_cfg.dataset.start), str(af_cfg.dataset.end)],
             instrument=af_cfg.dataset.instrument,
             stage_gate_version="v3_stage_b_fold_min_trade_count",
+            dataset_epoch_id="epoch_legacy",
         )
         _write_history([rec], history)
         # CLI override = 0.99 で history 値 0.0778 より優先される
@@ -475,6 +585,7 @@ class TestThresholdSourceCliOverridesHistory:
             dataset_span=[str(af_cfg.dataset.start), str(af_cfg.dataset.end)],
             instrument=af_cfg.dataset.instrument,
             stage_gate_version="v3_stage_b_fold_min_trade_count",
+            dataset_epoch_id="epoch_legacy",
         )
         _write_history([rec], history)
         threshold, source = _resolve_stage_a_threshold(

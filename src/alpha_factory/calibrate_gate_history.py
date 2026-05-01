@@ -8,14 +8,31 @@ CLI が直近 N Run を集計・drift 警告を出力する。
 制御則は変更しない)。
 
 詳細: devnotes/20260426-0024-calibrate-gate-drift-monitor/
+
+T058 (PR 3): HistoryRecord を v2 schema に拡張。 ``calibrate_history_schema_version``
++ ``dataset_epoch_id`` を必須化し、 ``__post_init__`` で grammar 検証を行う。
+``append_record`` は ``assert_calibrate_history_v2`` で passive lint。 v1 record は
+``read_history`` で skip + warning。 詳細:
+``devnotes/20260429-1912-todo-T058-schema-v2-contract/detailed-design.md`` 施策 5。
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
+
+import structlog
+
+from src.alpha_factory.schema_contract import (
+    CALIBRATE_HISTORY_SCHEMA_VERSION,
+    SchemaContractError,
+    SchemaEnforcementMode,
+    assert_calibrate_history_v2,
+    validate_epoch_id,
+)
 
 __all__ = [
     "DEFAULT_HISTORY_PATH",
@@ -27,12 +44,20 @@ __all__ = [
     "read_history",
 ]
 
+logger = structlog.get_logger(__name__)
+
 DEFAULT_HISTORY_PATH: Path = Path("reports/calibrate-gate/history.jsonl")
 
 
 @dataclass(frozen=True)
 class HistoryRecord:
-    """1 Run 1 record. JSONL の 1 行 = 1 dict (asdict で serialize)."""
+    """1 Run 1 record. JSONL の 1 行 = 1 dict (asdict で serialize).
+
+    T058 v2: ``calibrate_history_schema_version`` (= 2) と ``dataset_epoch_id``
+    を必須化。 ``__post_init__`` で grammar / version 検証を行う。
+    既存 ``schema_version`` (T054) は別目的で維持 (state file load の互換性
+    識別子)。
+    """
 
     run_id: str
     applied_at: str  # ISO 8601 (JST or UTC、loader 側の責務)
@@ -57,6 +82,9 @@ class HistoryRecord:
     # dict のまま JSONL に保存し、SSoT 矛盾を解消する。空 dict は「達成 (gap無し)」
     # を意味する。
     live_criteria_gap: dict[str, float]
+    # T058 (PR 3): v2 必須 (default 値で keyword 互換、 __post_init__ で検証)。
+    calibrate_history_schema_version: int = CALIBRATE_HISTORY_SCHEMA_VERSION
+    dataset_epoch_id: str = ""
     # T054: cross-run contamination guard 用メタデータ (optional、後方互換)。
     # 既存 record (これらが None) は state file load 時に schema_version 不一致で
     # 適用 skip となる (fail-closed)。新規書き込みでは必ず set される。
@@ -68,11 +96,57 @@ class HistoryRecord:
     stage_gate_version: str | None = None
     applied_from_run_id: str | None = None
 
+    def __post_init__(self) -> None:
+        """T058 v2 必須検証: schema_version 一致 + dataset_epoch_id grammar."""
+        if (
+            self.calibrate_history_schema_version
+            != CALIBRATE_HISTORY_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "calibrate_history_schema_version must be "
+                f"{CALIBRATE_HISTORY_SCHEMA_VERSION}, "
+                f"got {self.calibrate_history_schema_version}"
+            )
+        # validate_epoch_id は SchemaContractError (= ValueError 派生) を raise
+        validate_epoch_id(self.dataset_epoch_id)
 
-def append_record(record: HistoryRecord, path: Path = DEFAULT_HISTORY_PATH) -> None:
-    """JSONL 1 行を append-only で追記する (parent dir 自動作成)。"""
+    @classmethod
+    def from_dict_or_none(cls, obj: Mapping[str, Any]) -> HistoryRecord | None:
+        """v1 record (dataset_epoch_id 不在) は None を返す (skip 用).
+
+        v2 record は ``cls(**obj)`` で構築。 不正 record (TypeError /
+        ValueError / SchemaContractError) も None を返し、 caller 側で
+        skip + warning。 ``SchemaContractError`` は ``ValueError`` 派生だが
+        defensive に明示追記 (Codex impl-review-pr3 round 1 [Critical] 1)。
+        """
+        if "dataset_epoch_id" not in obj or not obj.get("dataset_epoch_id"):
+            return None
+        if obj.get("calibrate_history_schema_version") != (
+            CALIBRATE_HISTORY_SCHEMA_VERSION
+        ):
+            return None
+        try:
+            return cls(**obj)
+        except (TypeError, ValueError, SchemaContractError):
+            return None
+
+
+def append_record(
+    record: HistoryRecord,
+    path: Path = DEFAULT_HISTORY_PATH,
+    *,
+    mode: SchemaEnforcementMode = SchemaEnforcementMode.LOG_ONLY,
+) -> None:
+    """JSONL 1 行を append-only で追記する (parent dir 自動作成).
+
+    T058 (PR 3): 書込前に ``assert_calibrate_history_v2`` で passive lint。
+    LOG_ONLY mode (default) では warning + Counter のみ、 FAIL_CLOSED で
+    必須 field 欠落時に SchemaContractError raise。
+    """
+    record_dict = asdict(record)
+    assert_calibrate_history_v2(record_dict, mode=mode)
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(asdict(record), ensure_ascii=False, default=str)
+    line = json.dumps(record_dict, ensure_ascii=False, default=str)
     with path.open("a", encoding="utf-8") as f:
         f.write(line)
         f.write("\n")
@@ -91,6 +165,9 @@ def read_history(
     Returns:
         新しい順ではなく **追記順** (古い→新しい) の list。
         ファイル不在 / 空なら空 list。
+
+    T058 (PR 3): v1 record (dataset_epoch_id 不在) と invalid record は
+    ``HistoryRecord.from_dict_or_none`` 経由で skip + warning log を出力する。
     """
     if not path.exists():
         return []
@@ -105,11 +182,16 @@ def read_history(
             except json.JSONDecodeError:
                 # 破損行は skip (defensive、ログ出力は CLI 側の責務)
                 continue
-            try:
-                records.append(HistoryRecord(**obj))
-            except TypeError:
-                # スキーマ不整合 (古い record / 新規 field 追加直後) は skip
+            if not isinstance(obj, dict):
                 continue
+            record = HistoryRecord.from_dict_or_none(obj)
+            if record is None:
+                logger.warning(
+                    "calibrate_history.v1_or_invalid_record_skipped",
+                    obj_keys=sorted(obj.keys()),
+                )
+                continue
+            records.append(record)
     if last_n is not None and last_n >= 0:
         records = records[-last_n:]
     return records

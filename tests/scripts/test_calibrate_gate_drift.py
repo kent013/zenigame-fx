@@ -18,6 +18,7 @@ def _record_dict(
     actual: float = 0.15,
     target: float = 0.15,
     clamped: bool = False,
+    dataset_epoch_id: str = "epoch_legacy",
 ) -> dict:
     return {
         "run_id": run_id,
@@ -39,6 +40,9 @@ def _record_dict(
         "stage_b_pass_count": 0,
         "stage_c_pass_count": 0,
         "live_criteria_gap": {"sharpe": 0.3, "total_pnl": 0.0},
+        # T058 (PR 3): v2 必須 field
+        "calibrate_history_schema_version": 2,
+        "dataset_epoch_id": dataset_epoch_id,
     }
 
 

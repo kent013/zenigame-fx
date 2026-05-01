@@ -1075,9 +1075,14 @@ def _resolve_stage_a_threshold(
     # 2. history.jsonl から override 試行
     base_hash = compute_base_config_hash(cfg)
     dataset_span = (str(cfg.dataset.start), str(cfg.dataset.end))
+    # T058 (PR 3): dataset_epoch_id を AND 結合の追加条件として渡す。
+    # 現段階では `epoch_legacy` stub (archive.py / calibrate_gate.py と同値)。
+    # T059 で deterministic な epoch-rolling 識別子に置換、 PR 5 で
+    # RunContext 経由の full propagate に移行予定 (synthesis § 12.1)。
     calibrated = load_calibrated_threshold(
         history_path=history_path,
         base_config_hash=base_hash,
+        dataset_epoch_id="epoch_legacy",
         dataset_span=dataset_span,
         instrument=cfg.dataset.instrument,
         stage_gate_version=STAGE_GATE_VERSION,
