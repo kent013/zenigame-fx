@@ -28,6 +28,12 @@ import structlog
 
 from src.alpha_factory.archive import GENOMES_SCHEMA
 from src.alpha_factory.config import FspConfig
+from src.alpha_factory.schema_contract import (
+    GENOME_ENTRY_SCHEMA_VERSION,
+    SchemaContractError,
+    SchemaEnforcementMode,
+    SchemaVersionError,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -41,6 +47,7 @@ __all__ = [
     "_check_key_integrity",
     "_compute_fsp_stats",
     "_decide_runtime_mode",
+    "_detect_archive_schema_version",
     "_load_dxy_series",
     "_read_archive_with_fsp_compat",
     "evaluate_h1",
@@ -48,6 +55,11 @@ __all__ = [
     "rolling_spearman",
     "run_fsp_updater",
 ]
+
+# T058: FSP archive write が要求する v2 必須 field (genome_entry contract と同期)
+_FSP_V2_REQUIRED_COLUMNS: Final[frozenset[str]] = frozenset(
+    {"genome_entry_schema_version", "dataset_epoch_id"}
+)
 
 FSP_RUNTIME_MODES: Final[frozenset[str]] = frozenset(
     {
@@ -111,9 +123,57 @@ def _decide_runtime_mode(
 # ---------------------------------------------------------------------------
 
 
-def _read_archive_with_fsp_compat(archive_path: Path) -> pd.DataFrame:
-    """旧/新 両方の archive Parquet を読み込み、FSP 列を None 補完する。"""
+def _detect_archive_schema_version(table: pa.Table) -> int | None:
+    """T058: archive Parquet の genome_entry_schema_version を判定 helper.
+
+    判定ロジック:
+        - 列が存在しない → v1 archive とみなして ``None``
+        - 列が存在 + 行 0 件 → schema 自体は v2 を宣言済み (PR 2 の SCHEMA で
+          field 定義済) なので ``GENOME_ENTRY_SCHEMA_VERSION`` (= 2) を返す。
+          これは「物理 schema は v2 だが書込が未実行な空 archive」を v1
+          扱いで誤検出しないため (= ``None`` 返却 → FAIL_CLOSED で誤 raise を防ぐ)。
+        - 列が存在 + 値が全て None → v1 互換 (None) を返す。
+        - それ以外 → 値の最大値 (mixed-version archive 観測時の保守的見積もり)。
+
+    Returns:
+        ``None`` (v1 archive 検出時) または ``int`` (v2+ schema_version)。
+    """
+    if "genome_entry_schema_version" not in table.column_names:
+        return None
+    versions = table.column("genome_entry_schema_version").to_pylist()
+    if not versions:
+        # 空 table: 物理 schema は v2 (列が存在) なので v2 と宣言。
+        # FAIL_CLOSED 経路でも誤 raise しない (空 archive は legitimate な
+        # initial state)。
+        return GENOME_ENTRY_SCHEMA_VERSION
+    valid_versions = [int(v) for v in versions if v is not None]
+    if not valid_versions:
+        return None
+    return max(valid_versions)
+
+
+def _read_archive_with_fsp_compat(
+    archive_path: Path,
+    *,
+    mode: SchemaEnforcementMode = SchemaEnforcementMode.LOG_ONLY,
+) -> pd.DataFrame:
+    """旧/新 両方の archive Parquet を読み込み、FSP 列を None 補完する。
+
+    T058: schema_version 判定を ``_detect_archive_schema_version`` 経由で実施。
+    既存返却契約 (df 単独) は維持。 v1 archive 検出時は ``mode`` に従い
+    LOG_ONLY なら warning、 FAIL_CLOSED なら ``SchemaVersionError`` raise。
+    """
     table = pq.read_table(archive_path)
+    schema_version = _detect_archive_schema_version(table)
+    if schema_version is None:
+        if mode == SchemaEnforcementMode.FAIL_CLOSED:
+            raise SchemaVersionError(
+                f"FSP read: v1 archive (no genome_entry_schema_version): {archive_path}"
+            )
+        logger.warning(
+            "fsp_updater.v1_archive_detected",
+            archive_path=str(archive_path),
+        )
     df = table.to_pandas()
     for col in FSP_NULLABLE_COLS:
         if col not in df.columns:
@@ -178,7 +238,11 @@ def _check_key_integrity(
 
 
 def _atomic_write_parquet(
-    df: pd.DataFrame, target_path: Path, schema: pa.Schema
+    df: pd.DataFrame,
+    target_path: Path,
+    schema: pa.Schema,
+    *,
+    mode: SchemaEnforcementMode = SchemaEnforcementMode.LOG_ONLY,
 ) -> None:
     """tmp → fsync(file) → atomic rename → fsync(dir) で耐クラッシュ書き出し.
 
@@ -186,7 +250,34 @@ def _atomic_write_parquet(
     PID + uuid で一意化し、複数プロセス並行更新でも互いの tmp を踏まないように
     する。POSIX rename は atomic 保証されるため tmp が一意なら最終 archive
     の整合性も保たれる。
+
+    T058: ``mode`` kwarg を default 付きで追加 (旧 caller 完全互換)。
+    v2 必須 field (``genome_entry_schema_version`` / ``dataset_epoch_id``)
+    が ``df`` に欠落していた場合:
+      - LOG_ONLY: warning + grammar 適合 fallback で補完して書込続行
+        (``epoch_legacy`` / ``GENOME_ENTRY_SCHEMA_VERSION``)。
+      - FAIL_CLOSED: ``SchemaContractError`` raise (= 書込しない)。
     """
+    missing = _FSP_V2_REQUIRED_COLUMNS - set(df.columns)
+    if missing:
+        if mode == SchemaEnforcementMode.FAIL_CLOSED:
+            raise SchemaContractError(
+                f"FSP archive write missing v2 fields: {sorted(missing)}"
+            )
+        logger.warning(
+            "fsp_updater.write.v2_fields_missing",
+            missing=sorted(missing),
+            target_path=str(target_path),
+        )
+        # LOG_ONLY: 最善努力で書込 (grammar 適合 fallback 補完)
+        # caller の DataFrame を mutate しないため shallow copy。
+        df = df.copy()
+        for col in missing:
+            if col == "dataset_epoch_id":
+                df[col] = "epoch_legacy"
+            elif col == "genome_entry_schema_version":
+                df[col] = GENOME_ENTRY_SCHEMA_VERSION
+
     tmp_token = f".fsp_tmp.{os.getpid()}.{uuid.uuid4().hex}.parquet"
     tmp_path = target_path.with_suffix(tmp_token)
     try:
@@ -389,13 +480,19 @@ def run_fsp_updater(
     run_id: str,
     is_multi_pair: bool = False,
     force_recalculate: bool = False,
+    *,
+    schema_mode: SchemaEnforcementMode = SchemaEnforcementMode.LOG_ONLY,
 ) -> str:
     """FSP を計算して archive Parquet を in-place 更新する。
+
+    T058: schema v2 enforcement mode を ``schema_mode`` kwarg で受け取り、
+    内部の ``_read_archive_with_fsp_compat`` / ``_atomic_write_parquet``
+    呼出に伝搬する (旧 caller は default LOG_ONLY で従来挙動を維持)。
 
     Returns:
         ``fsp_runtime_mode`` (active or skipped_*).
     """
-    archive_df = _read_archive_with_fsp_compat(archive_path)
+    archive_df = _read_archive_with_fsp_compat(archive_path, mode=schema_mode)
 
     # 再計算対象 (冪等性): fsp_runtime_mode が null の行のみ
     target_df = (
@@ -407,13 +504,15 @@ def run_fsp_updater(
     # Step A: 全件重複検知
     dup_mismatch = _check_archive_duplicate_keys(archive_df)
     if dup_mismatch:
-        mode = "skipped_conditioning_mismatch"
-        _write_mode_to_targets(archive_df, target_df.index, mode, fsp_cfg)
-        _atomic_write_parquet(
-            archive_df, archive_path, schema=GENOMES_SCHEMA
+        runtime_mode = "skipped_conditioning_mismatch"
+        _write_mode_to_targets(
+            archive_df, target_df.index, runtime_mode, fsp_cfg
         )
-        logger.warning("fsp_updater.skipped", mode=mode, run_id=run_id)
-        return mode
+        _atomic_write_parquet(
+            archive_df, archive_path, schema=GENOMES_SCHEMA, mode=schema_mode
+        )
+        logger.warning("fsp_updater.skipped", mode=runtime_mode, run_id=run_id)
+        return runtime_mode
 
     # 全行既処理 → no-op active (dispatch 判定の前にチェック、min_bars=0 で
     # 誤って skipped_window_too_short を返すことを防ぐ)
@@ -441,7 +540,7 @@ def run_fsp_updater(
             archive_df, target_df.index, initial_mode, fsp_cfg
         )
         _atomic_write_parquet(
-            archive_df, archive_path, schema=GENOMES_SCHEMA
+            archive_df, archive_path, schema=GENOMES_SCHEMA, mode=schema_mode
         )
         logger.info(
             "fsp_updater.skipped",
@@ -460,18 +559,20 @@ def run_fsp_updater(
 
     key_mismatch = _check_key_integrity(target_df, fsp_results)
     if key_mismatch:
-        mode = key_mismatch
-        _write_mode_to_targets(archive_df, target_df.index, mode, fsp_cfg)
+        runtime_mode = key_mismatch
+        _write_mode_to_targets(
+            archive_df, target_df.index, runtime_mode, fsp_cfg
+        )
         _atomic_write_parquet(
-            archive_df, archive_path, schema=GENOMES_SCHEMA
+            archive_df, archive_path, schema=GENOMES_SCHEMA, mode=schema_mode
         )
         logger.warning(
             "fsp_updater.skipped",
-            mode=mode,
+            mode=runtime_mode,
             run_id=run_id,
             reason="empty_fsp_results_phase1",
         )
-        return mode
+        return runtime_mode
 
     # Phase 2 で fsp_results が target_df と一致したらこの経路に来る
     for key, stats in fsp_results.items():
@@ -494,7 +595,9 @@ def run_fsp_updater(
             "fsp_rolling_corr_60d"
         ]
 
-    _atomic_write_parquet(archive_df, archive_path, schema=GENOMES_SCHEMA)
+    _atomic_write_parquet(
+        archive_df, archive_path, schema=GENOMES_SCHEMA, mode=schema_mode
+    )
     logger.info(
         "fsp_updater.completed",
         mode="active",

@@ -26,12 +26,19 @@ from src.alpha_factory.fsp_updater import (
     _check_key_integrity,
     _compute_fsp_stats,
     _decide_runtime_mode,
+    _detect_archive_schema_version,
     _load_dxy_series,
     _read_archive_with_fsp_compat,
     evaluate_h1,
     evaluate_key_integrity_failure_rate,
     rolling_spearman,
     run_fsp_updater,
+)
+from src.alpha_factory.schema_contract import (
+    GENOME_ENTRY_SCHEMA_VERSION,
+    SchemaContractError,
+    SchemaEnforcementMode,
+    SchemaVersionError,
 )
 
 # ---------------------------------------------------------------------------
@@ -675,3 +682,251 @@ class TestAtomicWriteUniqueTmpName:
         assert leftover == []
         # 念のため固定 tmp 名が存在しないことも確認
         assert not (tmp_path / "archive.fsp_tmp.parquet").exists()
+
+
+# ---------------------------------------------------------------------------
+# T058: schema v2 propagate (詳細設計 § 施策 8 行 1306-1311)
+# ---------------------------------------------------------------------------
+
+
+def _make_v1_archive_table(n_rows: int = 2) -> pa.Table:
+    """v1 archive (genome_entry_schema_version 列なし) を構築."""
+    old_fields = [
+        f
+        for f in GENOMES_SCHEMA
+        if f.name not in ("genome_entry_schema_version", "dataset_epoch_id")
+    ]
+    old_schema = pa.schema(old_fields)
+    rows = []
+    for i in range(n_rows):
+        r = _create_row_template()
+        r.update(
+            {
+                "run_id": "run_v1",
+                "individual_name": f"g0_i{i}",
+                "instrument": "USD_JPY",
+                "lane_id": "tier1_USD_JPY",
+                "genome_json": "{}",
+                "trade_count": 80 + i,
+            }
+        )
+        r.pop("_max_stage_seen", None)
+        r.pop("genome_entry_schema_version", None)
+        r.pop("dataset_epoch_id", None)
+        rows.append(r)
+    return pa.Table.from_pylist(rows, schema=old_schema)
+
+
+class TestDetectArchiveSchemaVersion:
+    """T058: _detect_archive_schema_version helper の直接検証."""
+
+    def test_detect_archive_schema_version_returns_none_for_v1_table(
+        self, tmp_path: Path
+    ) -> None:
+        """v1 archive (genome_entry_schema_version 列なし) で None を返す."""
+        path = tmp_path / "v1.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(_make_v1_archive_table(n_rows=2), path)
+        table = pq.read_table(path)
+        assert _detect_archive_schema_version(table) is None
+
+    def test_detect_archive_schema_version_returns_2_for_v2_table(
+        self, tmp_path: Path
+    ) -> None:
+        """v2 archive (genome_entry_schema_version=2) で 2 を返す."""
+        path = tmp_path / "v2.parquet"
+        _write_archive(path, _make_archive_table(n_rows=2))
+        table = pq.read_table(path)
+        assert (
+            _detect_archive_schema_version(table) == GENOME_ENTRY_SCHEMA_VERSION
+        )
+
+    def test_detect_archive_schema_version_returns_max_for_mixed_versions(
+        self,
+    ) -> None:
+        """mixed-version table では max を返す (保守的見積もり)."""
+        rows = []
+        for i, sv in enumerate([1, 2]):
+            r = _create_row_template()
+            r.update(
+                {
+                    "run_id": "run_mix",
+                    "individual_name": f"g{i}",
+                    "instrument": "USD_JPY",
+                    "lane_id": "tier1_USD_JPY",
+                    "genome_json": "{}",
+                    "genome_entry_schema_version": sv,
+                }
+            )
+            r.pop("_max_stage_seen", None)
+            rows.append(r)
+        table = pa.Table.from_pylist(rows, schema=GENOMES_SCHEMA)
+        assert _detect_archive_schema_version(table) == 2
+
+
+class TestReadArchiveSchemaModeProvenance:
+    """T058: _read_archive_with_fsp_compat の mode kwarg 検証."""
+
+    def test_read_archive_log_only_warns_on_v1(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """LOG_ONLY mode で v1 archive 検出 → warning ログ + df 返却 (既存契約維持)."""
+        path = tmp_path / "v1.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(_make_v1_archive_table(n_rows=2), path)
+
+        # LOG_ONLY default で例外なく df 返却
+        df = _read_archive_with_fsp_compat(
+            path, mode=SchemaEnforcementMode.LOG_ONLY
+        )
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 2
+        # FSP 列補完は維持
+        for col in FSP_NULLABLE_COLS:
+            assert col in df.columns
+
+    def test_read_archive_fail_closed_raises_on_v1(self, tmp_path: Path) -> None:
+        """FAIL_CLOSED mode で v1 archive 検出 → SchemaVersionError raise."""
+        path = tmp_path / "v1.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(_make_v1_archive_table(n_rows=2), path)
+
+        with pytest.raises(SchemaVersionError, match="v1 archive"):
+            _read_archive_with_fsp_compat(
+                path, mode=SchemaEnforcementMode.FAIL_CLOSED
+            )
+
+    def test_read_archive_v2_does_not_raise_in_fail_closed(
+        self, tmp_path: Path
+    ) -> None:
+        """v2 archive は FAIL_CLOSED mode でも raise しない."""
+        path = tmp_path / "v2.parquet"
+        _write_archive(path, _make_archive_table(n_rows=2))
+        df = _read_archive_with_fsp_compat(
+            path, mode=SchemaEnforcementMode.FAIL_CLOSED
+        )
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 2
+
+    def test_read_archive_default_mode_log_only(self, tmp_path: Path) -> None:
+        """既存 caller (kwarg 省略) は LOG_ONLY default で旧挙動互換."""
+        path = tmp_path / "v1.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(_make_v1_archive_table(n_rows=2), path)
+        # kwarg 省略でも例外なく df 返却 (旧 caller 互換)
+        df = _read_archive_with_fsp_compat(path)
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 2
+
+
+class TestAtomicWriteV2FieldsMissing:
+    """T058: _atomic_write_parquet の v2 必須 field 欠落動作検証."""
+
+    def test_atomic_write_log_only_warns_and_fills_defaults_when_v2_fields_missing(
+        self, tmp_path: Path
+    ) -> None:
+        """LOG_ONLY mode で v2 field 欠落 → warning + 'epoch_legacy' / version=2 補完."""
+        path = tmp_path / "archive.parquet"
+        # df から v2 必須 2 列を削除
+        df = _make_archive_table(n_rows=2).to_pandas()
+        df = df.drop(
+            columns=["genome_entry_schema_version", "dataset_epoch_id"]
+        )
+        # LOG_ONLY default で書き込み完了する
+        _atomic_write_parquet(
+            df,
+            path,
+            schema=GENOMES_SCHEMA,
+            mode=SchemaEnforcementMode.LOG_ONLY,
+        )
+        assert path.exists()
+
+        # 書き戻された Parquet は補完値を含む
+        rt = pq.read_table(path).to_pandas()
+        assert (rt["dataset_epoch_id"] == "epoch_legacy").all()
+        assert (
+            rt["genome_entry_schema_version"] == GENOME_ENTRY_SCHEMA_VERSION
+        ).all()
+
+    def test_atomic_write_fail_closed_raises_when_v2_fields_missing(
+        self, tmp_path: Path
+    ) -> None:
+        """FAIL_CLOSED mode で v2 field 欠落 → SchemaContractError raise."""
+        path = tmp_path / "archive.parquet"
+        df = _make_archive_table(n_rows=2).to_pandas()
+        df = df.drop(
+            columns=["genome_entry_schema_version", "dataset_epoch_id"]
+        )
+        with pytest.raises(SchemaContractError, match="missing v2 fields"):
+            _atomic_write_parquet(
+                df,
+                path,
+                schema=GENOMES_SCHEMA,
+                mode=SchemaEnforcementMode.FAIL_CLOSED,
+            )
+        # raise 後 Parquet は生成されない
+        assert not path.exists()
+
+    def test_atomic_write_default_mode_log_only_compat(
+        self, tmp_path: Path
+    ) -> None:
+        """既存 caller (kwarg 省略) は LOG_ONLY default で書込完走."""
+        path = tmp_path / "archive.parquet"
+        df = _make_archive_table(n_rows=2).to_pandas()
+        # 既存 v2 field 揃っている df は default mode でも raise しない
+        _atomic_write_parquet(df, path, schema=GENOMES_SCHEMA)
+        assert path.exists()
+
+    def test_atomic_write_does_not_mutate_caller_dataframe(
+        self, tmp_path: Path
+    ) -> None:
+        """v2 補完経路は caller の DataFrame を破壊的に書き換えない."""
+        path = tmp_path / "archive.parquet"
+        df = _make_archive_table(n_rows=2).to_pandas()
+        df = df.drop(
+            columns=["genome_entry_schema_version", "dataset_epoch_id"]
+        )
+        original_columns = set(df.columns)
+        _atomic_write_parquet(
+            df,
+            path,
+            schema=GENOMES_SCHEMA,
+            mode=SchemaEnforcementMode.LOG_ONLY,
+        )
+        # caller の df は v2 列が追加されていない
+        assert set(df.columns) == original_columns
+
+
+class TestRunFspUpdaterSchemaModePropagation:
+    """T058: run_fsp_updater から内部 caller への mode 伝搬検証."""
+
+    def test_run_fsp_updater_default_log_only_compat(self, tmp_path: Path) -> None:
+        """既存 caller (kwarg 省略) は LOG_ONLY default で旧挙動互換."""
+        archive = tmp_path / "archive.parquet"
+        _write_archive(archive, _make_archive_table(n_rows=2))
+        cfg = FspConfig(enabled=True, window_days=60)
+        fred = tmp_path / "fred"
+        _write_dxy_csv(fred / "DXY.csv", n_days=80)
+        # 旧 signature (schema_mode 省略) で例外なく完走
+        runtime_mode = run_fsp_updater(archive, fred, cfg, run_id="r")
+        # Phase 1 は fsp_results 空 dict → conditioning_mismatch 経由で skipped
+        assert runtime_mode in FSP_RUNTIME_MODES
+
+    def test_run_fsp_updater_fail_closed_raises_on_v1_archive(
+        self, tmp_path: Path
+    ) -> None:
+        """schema_mode=FAIL_CLOSED + v1 archive → SchemaVersionError raise."""
+        archive = tmp_path / "v1_archive.parquet"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(_make_v1_archive_table(n_rows=2), archive)
+        cfg = FspConfig(enabled=True, window_days=60)
+        fred = tmp_path / "fred"
+        _write_dxy_csv(fred / "DXY.csv", n_days=80)
+        with pytest.raises(SchemaVersionError):
+            run_fsp_updater(
+                archive,
+                fred,
+                cfg,
+                run_id="r",
+                schema_mode=SchemaEnforcementMode.FAIL_CLOSED,
+            )
