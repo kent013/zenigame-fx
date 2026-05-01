@@ -224,3 +224,9 @@ factor_shadow:
   window_days: 60
   factor_asof_lag: 1
   conditioning_set: "all_bars_all_individuals"
+
+# T058: schema_contract enforcement settings.
+# T058 段階は log_only (passive validation)、 T067 切替時に fail_closed へ。
+# 詳細: devnotes/20260429-1912-todo-T058-schema-v2-contract/conceptual-design.md
+schema_contract:
+  enforcement_mode: log_only

@@ -21,13 +21,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import yaml  # type: ignore[import-untyped]
 
 from src.alpha_factory.cross_pair import CrossPairConfig
 from src.alpha_factory.stage_gate import StageGateConfig
 from src.utils.time import to_utc
+
+if TYPE_CHECKING:
+    from src.alpha_factory.schema_contract import SchemaEnforcementMode
 
 __all__ = [
     "AlphaFactoryConfig",
@@ -37,6 +40,7 @@ __all__ = [
     "FspConfig",
     "GAConfig",
     "GAFeasibilityConfig",
+    "SchemaContractConfig",  # T058
     "StageGateConfig",
     "StageWindowsConfig",
     "load_config",
@@ -239,6 +243,32 @@ class FspConfig:
 
 
 @dataclass(frozen=True)
+class SchemaContractConfig:
+    """T058: schema_contract enforcement settings.
+
+    Attributes:
+        enforcement_mode: ``log_only`` (T058 default) or ``fail_closed`` (T067).
+    """
+
+    enforcement_mode: str = "log_only"
+
+    def __post_init__(self) -> None:
+        from src.alpha_factory.schema_contract import SchemaEnforcementMode
+
+        valid = {m.value for m in SchemaEnforcementMode}
+        if self.enforcement_mode not in valid:
+            raise ValueError(
+                f"schema_contract.enforcement_mode must be one of "
+                f"{sorted(valid)}: got {self.enforcement_mode!r}"
+            )
+
+    def to_mode(self) -> SchemaEnforcementMode:
+        from src.alpha_factory.schema_contract import SchemaEnforcementMode
+
+        return SchemaEnforcementMode(self.enforcement_mode)
+
+
+@dataclass(frozen=True)
 class AlphaFactoryConfig:
     """Alpha Factory 全体 config。loader から返される SSOT 構造。
 
@@ -253,6 +283,9 @@ class AlphaFactoryConfig:
     cross_pair: CrossPairConfig
     stage_windows: StageWindowsConfig
     fsp: FspConfig = field(default_factory=FspConfig)
+    schema_contract: SchemaContractConfig = field(  # T058
+        default_factory=SchemaContractConfig
+    )
 
     @property
     def live_criteria(self) -> Mapping[str, float | int]:
@@ -482,6 +515,22 @@ def load_config(
             raw.get("stage_windows") or {}, stage_gate
         ),
         fsp=_build_fsp(raw.get("factor_shadow") or {}),
+        schema_contract=_build_schema_contract(raw.get("schema_contract") or {}),
+    )
+
+
+def _build_schema_contract(raw: Mapping[str, Any]) -> SchemaContractConfig:
+    """T058: ``schema_contract`` yaml section → :class:`SchemaContractConfig`.
+
+    unknown key は明示的に reject する (Codex Round 3 [Suggestion])。
+    """
+    unknown_keys = set(raw.keys()) - {"enforcement_mode"}
+    if unknown_keys:
+        raise ValueError(
+            f"schema_contract: unknown keys {sorted(unknown_keys)}"
+        )
+    return SchemaContractConfig(
+        enforcement_mode=str(raw.get("enforcement_mode", "log_only")),
     )
 
 
