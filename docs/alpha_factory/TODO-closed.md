@@ -70,6 +70,7 @@
 | T065 | T065-nsga2-core-and-main-selection | ga-architecture | Critical | 2026-05-01 23:10 | - |
 | T066 | T066-cpps-fsm-and-archive | ga-architecture | Critical | 2026-05-01 23:54 | - |
 | T067 | T067-loop-closure-warmstart-emergency | ga-architecture | Critical | 2026-05-02 00:57 | - |
+| T068 | T068-failure-handling | infrastructure | Critical | 2026-05-02 01:56 | - |
 
 ## Obsoleted
 
