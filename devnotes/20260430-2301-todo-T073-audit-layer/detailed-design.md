@@ -720,9 +720,16 @@ def compute_marginal_dsr_strata(
     """Round 3 [W5] / 概念 § 11.4 stratification marginal default.
 
     SSOT: marginal 集計のみ (= 各 key 独立 1 軸 group_by).
+    Phase 1 で受理する key (= ObservabilityFlags 由来):
         - "by_holiday_markets":         {holiday_markets: [records...]}
         - "by_dst_transition_markets":  {dst_transition_markets: [records...]}
-        - "by_schedule_status":         {schedule_status: [records...]}
+
+    Phase 2 申し送り: schedule_status は SessionBlock.schedule_status 経由 (=
+    flag ではなく block 由来 derived) のため、 Phase 1 stratification API では
+    未対応。 Phase 2 で per-genome aggregate を caller 側 (= T071) で計算
+    + flag_lookup の signature 拡張 (= ScheduleStatus を含む新 namespace)
+    + AUDIT_REPORT_SCHEMA_VERSION MINOR bump で配線する.
+
     interaction (= 2 軸以上 cross product) は本関数では計算しない.
     interaction が必要な caller は compute_dsr_strata_with_allowlist を使う.
     """
@@ -733,7 +740,7 @@ def compute_dsr_strata_with_allowlist(
     report: RunAuditReport,
     *,
     flag_lookup: Mapping[str, ObservabilityFlags],
-    allowlist: Sequence[tuple[str, ...]],   # 例: (("holiday_markets", "schedule_status"),)
+    allowlist: Sequence[tuple[str, ...]],   # 例: (("holiday_markets", "dst_transition_markets"),)  Phase 1 ObservabilityFlags 由来 2 軸のみ受理
     schema_version: str = "1.0.0",          # Round D1 [S1] 将来拡張点
     flag_namespace: str = "t072",           # Round D1 [S1] 将来拡張点
 ) -> dict[tuple[str, ...], dict[Any, list[AuditGenomeRecord]]]:
@@ -842,7 +849,7 @@ def compute_dsr_strata_with_allowlist(
 
 #### F39-F40: stratification tests (Round 3 [W5])
 
-| F39_marginal_strata | compute_marginal_dsr_strata: 3 軸 marginal 集計のみ、 interaction 計算しない | `test_compute_marginal_dsr_strata_no_interaction` |
+| F39_marginal_strata | compute_marginal_dsr_strata: Phase 1 受理 2 軸 (= holiday_markets / dst_transition_markets) marginal 集計のみ、 interaction 計算しない. schedule_status は Phase 2 申し送り (= flag namespace 拡張時に追加). | `test_compute_marginal_dsr_strata_no_interaction` |
 | F40_allowlist_strata | compute_dsr_strata_with_allowlist: allowlist 内の 2 軸 cross product のみ集計 | `test_compute_dsr_strata_with_allowlist_only_listed` |
 | F40b_allowlist_empty_no_interaction | allowlist=() (= empty) → interaction 計算なし、 各 stratum に record なし | `test_compute_dsr_strata_with_allowlist_empty_returns_empty` |
 | F40c_allowlist_insufficient_n_warns | n<30 の stratum で warning log emit (= C7 規範、 Round 3 [W5]) | `test_compute_dsr_strata_with_allowlist_warns_on_small_stratum` |
