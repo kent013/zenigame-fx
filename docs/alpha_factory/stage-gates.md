@@ -259,9 +259,11 @@ effective threshold を自動適用する経路を追加 (T054):
 3. config 値 (yaml load 値) → `source="config"`
 
 cross-run contamination guard (`src/alpha_factory/calibrate_state.py`):
-- `schema_version == 1` (record format 互換)
+- `calibrate_history_schema_version == 2` (T058 で v2 に bump、 record format 互換)
 - `base_config_hash` (適応値除外) 一致 — `compute_base_config_hash` が `stage_a_threshold` を除く全 stage_gate / dataset 値で hash
 - `dataset_span` / `instrument` / `stage_gate_version` 一致
+- **`dataset_epoch_id` 一致** (T058 追加: epoch-rolling 識別子の AND 結合、 dataset の epoch
+  境界をまたいだ contamination を遮断)
 - `decision in (tighten, loosen)` のみ適用 (`in_band` / `skip_sample_size` は除外)
 - `applied_at` が ISO 8601 形式
 - `new_threshold` が isfinite かつ [floor, ceiling] 内
@@ -272,6 +274,34 @@ startup 時に必ず log 出力:
 ```
 stage_gate.effective_threshold stage_a_threshold=0.0778 source=history full_config_hash=...
 ```
+
+#### T058 v2 schema 移行ノート (2026-04-30)
+
+T058 (cascade port v2 contract) で `calibrate_history` の record schema は v1 → v2 に
+bump された (`calibrate_history_schema_version=2`)。 v2 で必須化された field:
+
+- `calibrate_history_schema_version` (int, default 2、 `__post_init__` で値固定検証)
+- `dataset_epoch_id` (string, grammar `[a-z0-9_]+`、 epoch-rolling 識別子)
+
+`read_history` は v1 record (= 上記 2 field を欠く record) を **skip + warning log**
+(`calibrate_history.v1_or_invalid_record_skipped`) で扱い、 後段の filter 処理に
+渡らないようにする (詳細設計 行 1027-1080)。
+
+**T058 段階の scope key**: T054 の `dataset_span` 一致条件は **撤廃せず維持** したまま
+`dataset_epoch_id` 一致条件を **AND 結合で追加** する (= scope key を「より厳しく」
+する追加変更、 backward compat を保つ)。 T058 段階では `dataset_epoch_id` は
+`generate_epoch_id_stub` (= `"epoch_legacy"` 固定) なので実質的に従来挙動のまま。
+
+**T067 (将来) の完全置換予定**: T067 で T058 の transitional 設計から定常設計に
+切り替える際、 移行 3 点セットを実施する:
+
+1. `schema_contract.enforcement_mode` を `log_only` → `fail_closed` に切替え
+2. cross-run scope key から `dataset_span` を **完全撤廃**
+3. cross-run scope key を `dataset_epoch_id` **単独化** (T059 deterministic
+   epoch_id 生成と組合せ)
+
+T059 の deterministic epoch_id 生成と合わせて、 v1 archive / v1 history record も
+全て排除する。
 
 ## 関連 TODO
 

@@ -95,17 +95,38 @@ aggregation_mode の既定は `last_k_generations` (window=5)。
 ### T054: state file 経由の自動適用
 
 calibrate-gate は yaml 直接書き戻しに加え、`reports/calibrate-gate/history.jsonl`
-に cross-run contamination guard 用 metadata 付き record を書き込む:
-- `schema_version=1`, `base_config_hash`, `full_config_hash`,
+に cross-run contamination guard 用 metadata 付き record を書き込む。
+
+T058 (2026-04-30) で record schema は **v2 に bump** された:
+- `calibrate_history_schema_version=2` (T058 で必須化、 `__post_init__` で値固定検証)
+- `dataset_epoch_id` (T058 で必須化、 grammar `[a-z0-9_]+`、 epoch-rolling 識別子)
+- T054 既存 metadata: `schema_version`, `base_config_hash`, `full_config_hash`,
   `dataset_span`, `instrument`, `stage_gate_version`, `applied_from_run_id`
+
+`read_history` は v1 record (`calibrate_history_schema_version` / `dataset_epoch_id`
+を欠く record) を **skip + warning log** (`calibrate_history.v1_or_invalid_record_skipped`)
+で扱う。 v1 record はそのまま filter 処理に流れず、 cross-run scope key 評価は
+v2 record のみが対象となる。
 
 run_ga.py 起動時、history の最新適用可能 record (decision in tighten/loosen,
 全 metadata 一致, value isfinite + range 内) から effective threshold を
 自動 override する。yaml 値を chore commit で reset しても、history 経由で
 最新の calibrate decision が継承される (cross-run 一貫性)。
 
+T058 段階で scope key は **`dataset_span` 一致 + `dataset_epoch_id` 一致 (AND 結合)**
+に拡張された。 T058 段階では `dataset_epoch_id` は `generate_epoch_id_stub`
+(= `"epoch_legacy"` 固定) なので実質的に従来挙動のまま (transitional 設計)。
+
+T067 (将来) で T058 transitional 設計から定常設計に完全置換予定。 移行 3 点セット:
+
+1. `schema_contract.enforcement_mode` を `log_only` → `fail_closed` に切替え
+2. cross-run scope key から `dataset_span` を **完全撤廃**
+3. cross-run scope key を `dataset_epoch_id` **単独化** (T059 deterministic
+   epoch_id 生成と組合せ)
+
 CLI override 優先順位 (高 → 低): `--stage-a-threshold X` > history > yaml。
-詳細: `docs/alpha_factory/stage-gates.md` § "T054: state file 経由の自動適用"。
+詳細: `docs/alpha_factory/stage-gates.md` § "T054: state file 経由の自動適用" /
+`devnotes/20260429-1912-todo-T058-schema-v2-contract/detailed-design.md` § 施策 5-6。
 
 ## 関連
 
