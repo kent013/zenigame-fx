@@ -78,6 +78,7 @@
 | T073 | T073-audit-layer-DSR-PBO-SPA-scaffold | statistics | Critical | 2026-05-02 05:32 | - |
 | T074 | T074-graduation-lane-batch-evaluator-scaffold | swim-lane | None active、 empty archive 業務不足扱い、 recent-first head N) / GraduationTriggerEvaluation (4 status / cross-field invariant / partial pass diagnostic 保持) / MultiPairAggregationSketch (status='not_implemented' 固定、 数値 field なし、 T073 SSOT 継承)。 6 batch pair = frozenset (= synthesis § 11.2 厳密準拠、 T064 STAGE_C_ANCHOR_PAIR ∪ STAGE_C_SHADOW_PAIR_LIST 集合等価)。 LANE_PARALLELISM=1 (synthesis § 11.2)。 recent_epochs_with_mission_pass_required は caller 引数 (Phase 1 で定数化しない)。 既存 swim_lane / archive / cross_pair touch しない (= 純ライブラリ + early gate ではない)。 collider bias 規範 (T072 / T073 継承) は T074 で判定しない、 Phase 2 で T071 経由 stratified audit。 robust 系 aggregation は synthesis_schema_version>=22 まで Literal 追加禁止。 Phase 2 で run_ga.py が唯一の SSOT adapter (= 同一 archive snapshot 単一 transaction、 案 A snapshot DTO 推奨)。 batch 系 dataclass (GraduationBatchInput / GraduationBatchReport) は Phase 4 で導入 | 2026-05-02 06:12 | - |
 | T075 | T075-bigbang-cleanup-smoke | infrastructure | config | 2026-05-02 07:10 | - |
+| T076 | synthesis Round 22 改訂 | general | High | 2026-05-02 11:24 | - |
 
 ## Obsoleted
 

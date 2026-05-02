@@ -1,8 +1,20 @@
 # Selection Cascade Port — fx 適用ロードマップ (最終確定版)
 
-**最終更新**: 2026-04-29
-**議論**: Codex gpt-5.4 / xhigh × 20 ラウンド (`round-1.md` 〜 `round-20.md`、 1-10 は前提誤りで `historical/` 隔離、 11-20 が確定議論)
-**位置付け**: zenigame の selection cascade 思想 (T508/T509/T511/T513) を zenigame-fx に big-bang 導入する**設計上位文書**。 Codex Round 20 で全構成合意確定済み (異論なし)。
+<!-- ============================================================
+  synthesis_schema_version: 22
+  last_revised: 2026-05-02
+  revision_lineage:
+    - round-21 (2026-04-30): mission_signed_margin SSOT 昇格 / mission_margin BACKWARD COMPAT 化
+      rationale: devnotes/20260430-1045-synthesis-revise-mission-signed-margin/rationale.md
+    - round-22 (2026-05-02): new_cascade 廃止 / FM enum 化 / DoD 二層分離 / threshold-free 規範 / stable clause anchor 体系
+      rationale: devnotes/20260502-1001-todo-T076-synthesis-round-22/rationale.md
+  retroactive_anchor_grant: round-1 〜 round-21 (= clause anchor は Round 22 から導入、 旧 round md 自体は不変保持、 anchor index は本 file § 22 で SSOT 提供)
+  scope: 5 改訂対象章 (= § 12.4 / § 16 / § 18.3 / § 21 / § 22) のみ anchor 付与、 § 12 / § 18 を除く残り 18 top-level 章 anchor / 自動 lint は後続別 TODO
+============================================================ -->
+
+**最終更新**: 2026-05-02
+**議論**: Codex gpt-5.4 / xhigh × 20 ラウンド (`round-1.md` 〜 `round-20.md`、 1-10 は前提誤りで `historical/` 隔離、 11-20 が確定議論) + Round 21 改訂 PR (mission_signed_margin) + Round 22 改訂 PR (Phase 2 配線完了後 SSOT 同期)
+**位置付け**: zenigame の selection cascade 思想 (T508/T509/T511/T513) を zenigame-fx に big-bang 導入する**設計上位文書**。 cascade port v2 Phase 2 配線 18/18 TODO 全完了 (`commit 09bd56d`) に伴う Round 22 同期改訂で実装 (= T058-T075 module 群 in `src/alpha_factory/`) と SSOT 整合済。
 **ベースライン**: 本設計をベースラインとする。 既存 zenigame-fx 実装 (絶対閾値 AND 直列フィルタ + post-RUN MD-only sieve + pop=40 / gen=15 / max_workers=2) はベースラインにせず、 全削除・big-bang 置換。
 
 ---
@@ -515,12 +527,21 @@ archive / report 層に置く (early gate ではない)。
 
 ### 12.4 切替戦略
 
-- 開発中は新実装を `new_cascade` 名前空間で実装
-- T918 smoke (1 Run E2E) + 5 Run 連続検証通過で切替
-- 切替コミットで旧 stage / 旧 GA / 旧 sieve を**同日削除**
-- dual-path 並走なし (分岐バグ温床)
+<!-- @clause-anchor: switching-strategy -->
 
-ロールバック条件: smoke で FM1/FM4 が強く出る場合のみ 1 サイクル延期、 旧実装は「実行不可の参照コード」 として一時凍結のみ (再有効化はしない)。
+- 新実装は `src/alpha_factory/` 配下に直接 module 追加で実装 (= `new_cascade` 名前空間は採用しない、 Phase 2 配線で確定)
+- T918 (= 実装上の identifier は T075) smoke (1 Run E2E) + 5 Run 連続検証通過で切替
+- 切替コミットで旧 stage / 旧 GA / 旧 sieve を**同日削除** (= T075 `DeletionTarget` / `MigrationTarget` manifest に従う)
+- dual-path 並走なし (分岐バグ温床、 T075 `DUAL_PATH_ENFORCE_TARGETS` 4 経路で機械検証)
+  - `source_import` (`src/**/*.py`) / `scripts` (`scripts/**/*.py`) / `config_yaml` (`config/**/*.yaml` + `config/**/*.yml`、 2 globs) の 3 経路は `parser_failure_mode="fail_closed"` + `severity="fail"`
+  - `docs_runbook` (`docs/runbook/**/*.md`) の 1 経路は `parser_failure_mode="fail_open"` + `severity="warning"` (= markdown 自然言語のため parse 失敗 warn のみ)
+  - `DUAL_PATH_ENFORCE_ALLOWLIST` 5 patterns (`docs/historical/**`, `devnotes/**`, `tests/**`, `.git/**`, `**/__pycache__/**`) は対象外
+
+ロールバック条件: smoke で「rollback 対象 FM 集合」 (= 本 synthesis § 16 で確定する FM1-FM5 のサブセット) のいずれかが `hard_fail` evidence_class で観測された場合のみ 1 サイクル延期 (旧実装は「実行不可の参照コード」 として一時凍結のみ、 再有効化はしない)。
+
+- **観測判定**: `T075 SmokeOutcomeClassification.observed_failure_modes: frozenset[FailureModeKind]`
+- **rollback 対象判定**: `T075 select_rollback_relevant_failure_modes(observed, policy) -> frozenset[FailureModeKind]` (= Phase 2 別 TODO で実装、 policy = 本 synthesis § 16 Risk Top 5 の FM 別 hard_fail 判定境界、 数値 threshold は smoke 後再校正の別 TODO で確定)
+- **inconclusive blocking** (= fail-closed): `EvidenceClass` 4 値のうち `inconclusive` は smoke pass として扱わず、 Phase 2 切替を **ブロックする**。 切替 commit (= 別 PR) の前提条件は「全 metric および全 DoD item が `ok` または `warning`」 (= `inconclusive` も `hard_fail` も含まない)。 `EvidenceClassifierProtocol` で unsupported metric_name は inconclusive 必須。
 
 ---
 
@@ -586,13 +607,22 @@ PBO/SPA 実装時期は smoke 後 (DSR 先行)、 cost model epoch 再校正は 
 
 ## 16. Risk Top 5 と緩和策
 
-| 順位 | リスク | 緩和 |
-|---|---|---|
-| 1 | A-pass / B-pooled 乖離で探索誤誘導 | A→B 乖離メトリクス毎 Run 記録、 q_force 自動引き上げ (上限 0.40)、 戻し条件あり |
-| 2 | epoch_id 伝搬漏れで cross-epoch 汚染 | schema lint で必須フィールド欠落 fail (fail-closed) |
-| 3 | 緊急時 warmstart 供給不足 | 35% 廃止、 25% 固定、 ramp 整合、 prev_epoch 20% 維持 |
-| 4 | archive bypass 偏重で品質低下 | bypass = B 評価済 + 品質床 (invariant_feasible AND margin_inf p<=70) |
-| 5 | DA 多様性形骸化 | DA eviction で novelty/coverage 主キー化、 entropy 週次監視 |
+<!-- @clause-anchor: risk-top-5 -->
+
+| 順位 | FM ID | リスク | 緩和方針 | 数値 threshold (= hard_fail 判定境界) |
+|---|---|---|---|---|
+| 1 | FM1 | A-pass / B-pooled 乖離で探索誤誘導 | A→B 乖離メトリクス毎 Run 記録、 q_force 自動引き上げ (仮値 0.40)、 戻し条件あり | smoke 後再校正 (別 TODO) |
+| 2 | FM2 | epoch_id 伝搬漏れで cross-epoch 汚染 | schema lint で必須フィールド欠落 fail (fail-closed) | threshold-free (= 必須=0 件、 lint で機械検証) |
+| 3 | FM3 | 緊急時 warmstart 供給不足 | 35% 廃止、 25% 固定、 ramp 整合、 prev_epoch 20% 維持 | smoke 後再校正 (別 TODO) |
+| 4 | FM4 | archive bypass 偏重で品質低下 | bypass = B 評価済 + 品質床 (invariant_feasible AND margin_inf p<=70) | smoke 後再校正 (別 TODO) |
+| 5 | FM5 | DA 多様性形骸化 | DA eviction で novelty/coverage 主キー化、 entropy 週次監視 | smoke 後再校正 (別 TODO) |
+
+### 16.1 評価規範 (Round 22 確定、 T075 SSOT 同期)
+
+- **threshold-free 4 値 EvidenceClass 採用**: T075 `EvidenceClass = Literal["hard_fail", "warning", "inconclusive", "ok"]` で評価する。 数値 threshold は T075 module の SSOT に **含めず**、 smoke 後再校正で別 TODO により確定する (= calibration data 必要)。
+- **classifier 注入規範**: `EvidenceClassifierProtocol` で caller-supplied (= classifier は smoke caller が提供)、 `supported_metric_names` 不在 metric_name は **`inconclusive` 必須** (= fail-closed、 unsupported を黙って ok にしない)。
+- **FM 紐付け**: 上記表の FM ID 5 値は T075 `FailureModeKind = Literal["FM1", "FM2", "FM3", "FM4", "FM5"]` enum と完全一致。 `select_rollback_relevant_failure_modes(observed, policy)` の policy 入力は本 § 16 表で確定 (= Phase 2 別 TODO で本実装)。
+- **別 TODO 着手条件**: smoke 5 Run 完走 + DoD8 全 PASS + 観測値分布が確認可能 (= calibration data 取得済)、 かつ T076 完了で synthesis Round 22 SSOT が確定済であること。
 
 ---
 
@@ -659,18 +689,47 @@ GA中核:   T908 → T909 → T910 → T911
 | **T917** | Graduation lane batch evaluator scaffold: 起動条件 (graduates>=24 + 3 epoch + mission 連続) + multi-pair 集約 sketch (詳細実装は Phase 4 別 TODO) |
 | **T918** | Big-bang cleanup + smoke: 旧 path 削除 + 1 run E2E smoke + 5 run 連続検証 |
 
-### 18.3 T918 Smoke DoD (Codex Round 20 確定)
+### 18.3 T918 (T075) Smoke DoD (Round 22 二層分離形式、 T075 `PerRunSmokeDoDResult` / `CrossRunSmokeDoDResult` SSOT 同期)
 
-以下を全て満たすと smoke 完了:
+<!-- @clause-anchor: smoke-dod -->
 
-- 1 Run 完走 (クラッシュ無し、 NaN/Inf fail-soft 動作)
-- A-pass only B-eval をログで検証 (A-fail が B/親選択へ入らない)
-- 主選抜が **B-pooled 指標のみ**で計算されている
-- archive 書込の全レコードで `dataset_epoch_id` 必須 (欠落=fail)
-- inflow / per_run_max / warmstart_share が設定通り
-- CA/DA 配分が state ごとに一致 (pop=192 push 84/108、 pull 120/72)
-- invariant fail-fast (session_close_drop, negative_equity_drop_open) が有効
-- 連続 5 Run で epoch 汚染なし (prev_epoch 20% 制約順守)
+T075 `src/alpha_factory/smoke.py` で機械検証する DoD は **per-run** (1 Run ごと、 7 項目) と **cross-run** (5 Run 集約、 1 項目) の二層に分離する。 Round 21 までの 8 bullet 混在表記は本 Round 22 で形式置換 (内容同等、 SSOT 同期目的)。
+
+#### Per-run DoD (= `PerRunSmokeDoDResult.items: tuple[SmokeDoDItem, ...]` 7 項目、 `DoDIdPerRun = Literal["DoD1"-"DoD7"]`)
+
+DoD 判定の主 SSOT は **`SmokeDoDItem.status: EvidenceClass`** (全 DoD 共通)。 caller (= smoke runner) が `SmokeObservabilityProjection` の各 field と `EvidenceClassifierProtocol` を組み合わせて `SmokeDoDItem.status` を導出する。 表中の「関連 projection field」 列は補助情報 (= `SmokeObservabilityProjection` の実 field 名、 caller が DoD 判定時に参照する元値)。
+
+| dod_id | 内容 | 主 SSOT | 関連参照 field / class (= caller 経由で参照、 projection に限らず関連 SSOT を含む) |
+|---|---|---|---|
+| DoD1 | 1 Run 完走 (クラッシュ無し、 NaN/Inf fail-soft 動作) | `SmokeDoDItem.status` | `SmokeOutcomeClassification.crashed` (`False` 期待) + caller 判定 |
+| DoD2 | A-pass only B-eval (A-fail が B/親選択へ入らない) | `SmokeDoDItem.status` | `SmokeObservabilityProjection.ab_divergence_class` 等を caller が参照 (= FM1 系) |
+| DoD3 | 主選抜が **B-pooled 指標のみ**で計算 | `SmokeDoDItem.status` | `SmokeObservabilityProjection.ab_divergence_class` 関連 (= FM1 系、 caller が parent selection の metric class を確認) |
+| DoD4 | archive 書込全レコードで `dataset_epoch_id` 必須 (欠落 = fail) | `SmokeDoDItem.status` | `SmokeObservabilityProjection.dataset_epoch_id_present` + `epoch_consistency_class` (= FM2 系) |
+| DoD5 | inflow / per_run_max / warmstart_share が設定通り | `SmokeDoDItem.status` | `SmokeObservabilityProjection.warmstart_shortfall_class` (= FM3 系) |
+| DoD6 | CA/DA 配分が state ごとに一致 (pop=192 push 84/108、 pull 120/72) | `SmokeDoDItem.status` | `SmokeObservabilityProjection.bypass_ratio_class` (= FM4 系、 caller が CA/DA 配分一致を確認) |
+| DoD7 | invariant fail-fast (session_close_drop, negative_equity_drop_open) 有効 | `SmokeDoDItem.status` | `SmokeObservabilityProjection.session_entropy_class` 等 (= FM5 系) + caller の invariant 確認 |
+
+`PerRunSmokeDoDResult` invariant: `len(items) == PER_RUN_DOD_ITEMS_COUNT(=7)`、 全 item が `scope == "per_run"`、 dod_id は DoD1-DoD7 完全網羅、 `overall_evidence_class` は items.status の max 集約 (順序: hard_fail > warning > inconclusive > ok)。
+
+#### Cross-run DoD (= `CrossRunSmokeDoDResult.item: SmokeDoDItem` 1 項目、 `DoDIdCrossRun = Literal["DoD8"]`)
+
+| dod_id | 内容 | 主 SSOT | 関連 projection field |
+|---|---|---|---|
+| DoD8 | 連続 5 Run で epoch 汚染なし (prev_epoch 20% 制約順守) | `CrossRunSmokeDoDResult.item.status` | `CrossRunSmokeObservabilityProjection.cross_run_epoch_pollution_class` (5 Run 集約後の EvidenceClass) |
+
+`CrossRunSmokeDoDResult` invariant: `item.scope == "cross_run"` + `item.dod_id == "DoD8"`。 5 Run 集約は `SMOKE_RUNS_REQUIRED(=5)` 固定。
+
+#### 完走判定 (= smoke 完了条件、 item-level fail-closed)
+
+- **item-level fail-closed**: 全 8 DoD item (= per-run 7 + cross-run 1) の各 `SmokeDoDItem.status` が **`ok` または `warning`** であること (= `inconclusive` も `hard_fail` も含まない、 個別 item レベルで fail-closed)。 `overall_evidence_class` の集約値ではなく **item-level** で判定する (= 集約順序 `hard_fail > warning > inconclusive > ok` で warning と inconclusive 混在時に overall=warning となり inconclusive を見落とす false PASS を防ぐ)
+- **per-run 補助条件**: `PerRunSmokeDoDResult.overall_evidence_class` は再集約 invariant (= `__post_init__` で items.status max と一致) のため、 全 item が ok or warning なら overall も ok or warning となる (= 補助条件として整合性確認に使用、 主判定ではない)
+- **cross-run 単一 item**: `CrossRunSmokeDoDResult.item.status` (= DoD8 単独) が ok or warning であること
+- すなわち: 切替 commit (= Phase 2 別 PR) の前提条件は「全 8 DoD item の status が ok または warning」 (= item-level 必須条件)
+- `inconclusive` 観測時は別 TODO で classifier / threshold を確定するまで切替不可 (= EvidenceClassifierProtocol の unsupported metric_name は inconclusive 必須、 fail-closed)
+
+#### SSOT 同期規範
+
+`dod_id` / `scope` / SSOT field 名は T075 module の `DoDIdPerRun` / `DoDIdCrossRun` Literal 型および `PerRunSmokeDoDResult` / `CrossRunSmokeDoDResult` invariant と完全一致。 synthesis 側の表記変更時は T075 module も同期改訂 (別 PR) すること。
 
 ---
 
@@ -697,6 +756,8 @@ zenigame 側合意済み。 fx で出した改善のうち zenigame に持ち帰
 
 ## 21. 議論履歴サマリー
 
+<!-- @clause-anchor: discussion-history -->
+
 | Round | 主題 | 確定内容 |
 |---|---|---|
 | 1-10 | (前提誤り、 historical/ 隔離) | pop=40/gen=15 等を hard constraint と誤認、 議論ベース崩壊 |
@@ -711,5 +772,42 @@ zenigame 側合意済み。 fx で出した改善のうち zenigame に持ち帰
 | 19 | gap 診断 + zenigame コード参照 (8 件修正) | FSM 2-state、 主選抜 B-pooled、 PBO/SPA 未実装、 fold=5、 schema 新設、 factor_shadow 縮退、 A→B warn-only、 端数規約 |
 | 20 | 最終 consensus | 全構成合意確定、 異論なし、 smoke DoD 確定、 逆輸入 4 候補 |
 | 21 | (T064 完了後 / 2026-04-30) synthesis 改訂 | T062 詳細設計で発見した `mission_margin` 命名矛盾 (= -mission_inf_gap、 値域 <= 0 で「達成超過」 表現不能) を解消、 `mission_signed_margin` (= min(slack_*)) を新設し archive CA #5 SSOT 化、 `mission_margin` は BACKWARD COMPAT 整理。 § 6.4 / § 6.5 / § 8.3 / § 15 / § 17 改訂、 実装影響なし (T062 で先行実装済)。 改訂 PR: `devnotes/20260430-1045-synthesis-revise-mission-signed-margin/` |
+| 22 | (cascade port v2 Phase 2 配線完了後 / 2026-05-02) synthesis Round 22 確定 | T075 Big-bang cleanup + smoke モジュール (commit `09bd56d`) で確定した詳細設計 SSOT (= `FailureModeKind` enum 5 値 / `EvidenceClass` 4 値 / `PerRunSmokeDoDResult` (DoD1-DoD7) / `CrossRunSmokeDoDResult` (DoD8) / `DUAL_PATH_ENFORCE_TARGETS` 4 経路 (3 fail_closed + 1 fail_open) / `select_rollback_relevant_failure_modes` API 予約) を上位設計 (synthesis Round 22) に反映する cycle 最終段。 § 12.4 / § 16 / § 18.3 / § 21 改訂 + § 22 anchor index 新設 + 冒頭 metadata block 追加。 改訂 PR: `devnotes/20260502-1001-todo-T076-synthesis-round-22/` |
 
-詳細は `round-11.md` 〜 `round-20.md` 参照。 旧議論は `historical/old-rounds-1-10/`。 Round 21 改訂の rationale は `devnotes/20260430-1045-synthesis-revise-mission-signed-margin/rationale.md` 参照。
+詳細は `round-11.md` 〜 `round-20.md` 参照。 旧議論は `historical/old-rounds-1-10/`。 Round 21 改訂の rationale は `devnotes/20260430-1045-synthesis-revise-mission-signed-margin/rationale.md` 参照。 Round 22 改訂の rationale は `devnotes/20260502-1001-todo-T076-synthesis-round-22/rationale.md` 参照。
+
+---
+
+## 22. Clause Anchor Index (Round 22 新設)
+
+<!-- @clause-anchor: clause-anchor-index -->
+
+stable clause anchor を提供する index 表。 章番号 shift に対する SSOT として、 cross-ref 参照は `@clause-anchor: <name>` 形式で記述すること。 Round 22 では 5 改訂対象章のみ anchor 付与、 残り 18 top-level 章 (= § 12 / § 18 を除く、 top-level としては未付与で subsection で部分付与あり) は後続別 TODO。
+
+| anchor | 章 | scope | 用途 |
+|---|---|---|---|
+| `switching-strategy` | § 12.4 切替戦略 | 1 subsection | Phase 2 切替 commit / 旧実装削除 / dual-path 規範参照 |
+| `risk-top-5` | § 16 Risk Top 5 | 1 top-level 章 | FM1-FM5 紐付け / threshold-free 評価規範 / `select_rollback_relevant_failure_modes` policy 参照 |
+| `smoke-dod` | § 18.3 T918 (T075) Smoke DoD | 1 subsection | per-run / cross-run 二層分離 DoD / 切替 commit 前提条件参照 |
+| `discussion-history` | § 21 議論履歴サマリー | 1 top-level 章 | Round 1-22 系譜参照 |
+| `clause-anchor-index` | § 22 Clause Anchor Index | 1 top-level 章 | 本 index 自身の self-reference |
+
+### 22.1 retroactive_anchor_grant 取扱
+
+旧 round md (round-1.md 〜 round-20.md + Round 21 rationale) は **不変保持** (= history 改変禁止)。 retroactive な anchor 付与は **不可**、 旧 round md からの synthesis 章参照は本 anchor index 経由で参照すること。 既存「§ 12.4」 等の section 番号参照は不変保持で問題なし (= 概念設計 § A-6 R-FM-3 失敗モード解析参照)。
+
+### 22.2 残り 18 top-level 章 + subsection anchor の後続 TODO 切出
+
+Round 22 anchor 付与 (= 5 clause units):
+- top-level 章付与: § 16 (`risk-top-5`) / § 21 (`discussion-history`) / § 22 (`clause-anchor-index`)
+- subsection 付与: § 12.4 (`switching-strategy`) / § 18.3 (`smoke-dod`)
+
+未付与 top-level 章 (= 計 18 個、 § 12 / § 18 を除く): § 0 / § 1 / § 2 / § 3 / § 4 / § 5 / § 6 / § 7 / § 8 / § 9 / § 10 / § 11 / § 13 / § 14 / § 15 / § 17 / § 19 / § 20
+
+未付与 subsection (= cross-ref 需要に応じて段階的付与): § 1.1-1.4 / § 4.1-4.4 / § 5.1-5.5 / § 6.1-6.7 / § 7.1-7.7 / § 8.1-8.7 / § 9.1-9.3 / § 10.1-10.2 / § 11.1-11.2 / § 12.1-12.3 (§ 12.4 は付与済) / § 18.1-18.2 (§ 18.3 は付与済)
+
+これら 18 top-level + 未付与 subsection への anchor 付与 / 自動 lint / CI 検証は本 T076 スコープ外、 後続別 TODO で実施 (= Round 23 以降の段階的付与を予定)。
+
+#### 詳細設計 § 9.3 との同期
+
+本節の clause unit 定義および 18 top-level 章列挙は、 詳細設計 [`devnotes/20260502-1001-todo-T076-synthesis-round-22/detailed-design.md`](../20260502-1001-todo-T076-synthesis-round-22/detailed-design.md) § 9.3 「anchor 未付与対象の明示」 と完全同期。 後続別 TODO 着手時は両 file (= synthesis § 22.2 + 詳細設計 § 9.3) を SSOT として参照する。
