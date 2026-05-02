@@ -34,10 +34,12 @@ Tier 1 (通貨ペア毎 1 lane) と Graduation lane (universal alpha 探索) を
 
 from __future__ import annotations
 
+import math
+import numbers
 import time as _time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 if TYPE_CHECKING:
     from src.alpha_factory.diagnostics_collector import DiagnosticsCollector
@@ -97,6 +99,15 @@ GRADUATION_LANE_ID = "graduation"
 GRADUATION_INSTRUMENT_SENTINEL = "multi"
 """Graduation lane row の archive `instrument` カラム sentinel 値。
 Run-GA 統合 TODO で archive row 生成時に使用する予約値。"""
+
+# T081 step 1: AB pair 集約用 score_source annotation 規範
+#
+# `ab_score_source` 値は run 内で **不変** であること (= mixing 検出 RuntimeError、
+# run_ga.py 経路で fail-fast)。 Phase 1 採用 = fitness_pen / median_oos_sharpe、
+# 後続別 TODO で SSOT (compute_a_b_correlation_source_score) に統一する場合は
+# 別 source 文字列を導入し新 Run で切替 (= 同 Run 内 mixing は禁止)。
+AB_SCORE_SOURCE_PHASE1: Final[str] = "fitness_pen+median_oos_sharpe_phase1"
+AB_SCORE_SOURCE_NOOP: Final[str] = "noop"
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +569,10 @@ class LaneManager:
         stage_b_pass = 0
         stage_c_pass = 0
         graduation_count = 0
+        # T081 step 1: AB pair 集約 (= ABDivergenceMetric 実値配線、 詳細設計 § 3.4.2)
+        ab_score_pairs: list[tuple[float, float]] = []
+        ab_b_evaluated_count = 0
+        ab_excluded_preflight_count = 0
         # T035 + T044: preflight feasibility (lane 単位で 1 回のみ計算)
         (
             lane_n_unique_dates,
@@ -612,6 +627,10 @@ class LaneManager:
                     wf_min_folds,
                     n_bars=len(lane.bars_18m),
                 )
+                # T081 step 1: preflight 個体は AB pair 収集対象外 (= 推定値で実
+                # backtest を走らせていない)、 但し counter で可視化
+                ab_excluded_preflight_count += 1
+                should_collect_ab_pair = False
             else:
                 b_result = evaluate_stage_b(
                     genome,
@@ -620,6 +639,14 @@ class LaneManager:
                     bt_cfg,
                     self._primitive_evaluator,
                     self._stage_gate_config,
+                )
+                ab_b_evaluated_count += 1
+                should_collect_ab_pair = True
+            # T081 step 1: AB pair 収集 (= 既存 archive collect / diagnostics record の
+            # 前で実施、 副作用なし、 早期 continue 禁止 = Codex Round 2 [Critical] 1 取込)
+            if should_collect_ab_pair:
+                self._collect_ab_pair(
+                    a_result, b_result, ab_score_pairs
                 )
             self._archive.collect_stage_b(
                 genome,
@@ -681,6 +708,11 @@ class LaneManager:
             "stage_b_pass": stage_b_pass,
             "stage_c_pass": stage_c_pass,
             "graduation_count": graduation_count,
+            # T081 step 1: ABDivergenceMetric 実値配線用必須キー (詳細設計 § 3.4.2)
+            "ab_score_pairs": ab_score_pairs,
+            "ab_score_source": AB_SCORE_SOURCE_PHASE1,
+            "ab_b_evaluated_count": ab_b_evaluated_count,
+            "ab_excluded_preflight_count": ab_excluded_preflight_count,
         }
 
     def _run_tier1_generation_via_evaluator(
@@ -707,6 +739,10 @@ class LaneManager:
         stage_a_seconds: list[float] = []
         stage_b_seconds: list[float] = []
         stage_c_seconds: list[float] = []
+        # T081 step 1: AB pair 集約 (= legacy 経路と同じ契約、 詳細設計 § 3.4.2)
+        ab_score_pairs: list[tuple[float, float]] = []
+        ab_b_evaluated_count = 0
+        ab_excluded_preflight_count = 0
 
         (
             lane_n_unique_dates,
@@ -765,6 +801,7 @@ class LaneManager:
             stage_a_pass += 1
 
             # Stage B: preflight_underfilled なら main 側で偽結果生成
+            should_collect_ab_pair = False
             if preflight_underfilled:
                 b_result = self._build_preflight_b_result(
                     genome,
@@ -774,8 +811,10 @@ class LaneManager:
                     wf_min_folds,
                     n_bars=len(lane.bars_18m),
                 )
+                # T081 step 1: preflight 個体は AB pair 収集対象外
+                ab_excluded_preflight_count += 1
             elif r.error is not None and r.stage_b is None:
-                # Stage B で worker 例外 → fail-closed
+                # Stage B で worker 例外 → fail-closed (= AB pair 収集対象外)
                 b_result = StageResult(
                     stage="B",
                     passed=False,
@@ -797,6 +836,13 @@ class LaneManager:
                 continue
             else:
                 b_result = r.stage_b
+                ab_b_evaluated_count += 1
+                should_collect_ab_pair = True
+            # T081 step 1: AB pair 収集 (= 既存処理の前で実施、 副作用なし)
+            if should_collect_ab_pair:
+                self._collect_ab_pair(
+                    a_result, b_result, ab_score_pairs
+                )
             self._archive.collect_stage_b(
                 genome, lane.lane_id, generation_index, b_result
             )
@@ -872,6 +918,11 @@ class LaneManager:
             "stage_b_seconds_max": max(stage_b_seconds, default=0.0),
             "stage_c_seconds_total": sum(stage_c_seconds),
             "stage_c_seconds_max": max(stage_c_seconds, default=0.0),
+            # T081 step 1: ABDivergenceMetric 実値配線用必須キー (詳細設計 § 3.4.2)
+            "ab_score_pairs": ab_score_pairs,
+            "ab_score_source": AB_SCORE_SOURCE_PHASE1,
+            "ab_b_evaluated_count": ab_b_evaluated_count,
+            "ab_excluded_preflight_count": ab_excluded_preflight_count,
         }
 
     def _build_cross_pair_args(
@@ -970,4 +1021,43 @@ class LaneManager:
             "stage_c_pass": 0,
             "graduation_count": 0,
             "wall_time_seconds": elapsed,
+            # T081 step 1: ABDivergenceMetric 実値配線用必須キー (= noop は空 + "noop" source)
+            "ab_score_pairs": [],
+            "ab_score_source": AB_SCORE_SOURCE_NOOP,
+            "ab_b_evaluated_count": 0,
+            "ab_excluded_preflight_count": 0,
         }
+
+    @staticmethod
+    def _collect_ab_pair(
+        a_result: StageResult,
+        b_result: StageResult,
+        ab_score_pairs: list[tuple[float, float]],
+    ) -> None:
+        """T081 step 1: AB pair (a_score, b_score) を集約 list に append.
+
+        Phase 1 score source (詳細設計 § 3.3 / § 3.4.2):
+            - a_proxy_score = a_result.metrics["payload"]["fitness_pen"]
+            - b_pooled_score = b_result.metrics["payload"]["median_oos_sharpe"]
+
+        非数値型 / NaN / Inf / None は skip (Codex Round 2 [Suggestion] 4 +
+        Round 3 [Warning] 1 取込: numbers.Real ガード、 bool 除外で
+        numpy.float32 / numpy.int64 等も covered)。
+        """
+        a_payload = a_result.metrics.get("payload", {})
+        b_payload = b_result.metrics.get("payload", {})
+        if not isinstance(a_payload, Mapping) or not isinstance(
+            b_payload, Mapping
+        ):
+            return
+        a_score = a_payload.get("fitness_pen")
+        b_score = b_payload.get("median_oos_sharpe")
+        if (
+            isinstance(a_score, numbers.Real)
+            and not isinstance(a_score, bool)
+            and isinstance(b_score, numbers.Real)
+            and not isinstance(b_score, bool)
+            and math.isfinite(float(a_score))
+            and math.isfinite(float(b_score))
+        ):
+            ab_score_pairs.append((float(a_score), float(b_score)))

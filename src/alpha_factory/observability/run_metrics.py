@@ -1133,6 +1133,123 @@ def build_run_observability_report(
 # ============================================================================
 
 
+# ============================================================================
+# T081 step 1: 個別 metric default constructor (= stub builder の DRY 化)
+# ============================================================================
+#
+# T080a の build_stub_run_observability_report が monolithic に 9 metric を構築
+# していたのを、 metric 単位の default constructor 8 件 + ABDivergence default 1 件
+# (= 計 9 件) に分解する。 step 1 caller (run_ga.py) が ABDivergence のみ実値で
+# 構築し、 残り 8 件は default constructor で stub default を取得する用途。
+# 後続 step 2-6 で各 default constructor が実値に置換される。
+#
+# 互換性契約 (Codex Round 2 [Suggestion] 1 取込): default constructor 8 件 +
+# ABDivergence default の combine 戻り値が、 既存 build_stub_run_observability_report
+# の戻り値と完全 equality (= JSON serialize で byte-for-byte 一致)。
+
+
+def build_default_ab_divergence_metric() -> ABDivergenceMetric:
+    """T080a stub default の ABDivergenceMetric (= n_pairs=0 / insufficient_data)."""
+    return ABDivergenceMetric(
+        status="insufficient_data",
+        corr=Decimal(0),
+        n_pairs=0,
+    )
+
+
+def build_default_q_force_recommendation() -> QForceRecommendation:
+    """T080a stub default の QForceRecommendation (= 連続乖離 Run カウント 0)."""
+    return QForceRecommendation(
+        new_q_force=Q_FORCE_MIN,
+        delta=Decimal(0),
+        reason="insufficient_data",
+        clamped_at_max=False,
+        clamped_at_min=False,
+        consecutive_divergent_runs=0,
+    )
+
+
+def build_default_archive_churn_metric() -> ArchiveChurnMetric:
+    """T080a stub default の ArchiveChurnMetric (= 直近 Run 1 件のみ、 insufficient_runs)."""
+    return ArchiveChurnMetric(
+        status="insufficient_runs",
+        churn_rate=Decimal(0),
+        n_total_admissions=0,
+        n_total_evictions=0,
+        n_runs_used=1,
+    )
+
+
+def build_default_bypass_ratio_metric() -> BypassRatioMetric:
+    """T080a stub default の BypassRatioMetric (= 全 role count 0)."""
+    return BypassRatioMetric(
+        bypass_ratio=Decimal(0),
+        n_admitted_by_role={
+            ARCHIVE_ROLE_MISSION_PASS: 0,
+            ARCHIVE_ROLE_PROGRESS_PASS: 0,
+            ARCHIVE_ROLE_SCORE_BYPASS: 0,
+        },
+        n_total_admissions=0,
+    )
+
+
+def build_default_session_entropy_metric() -> SessionEntropyMetric:
+    """T080a stub default の SessionEntropyMetric (= empty_archive)."""
+    return SessionEntropyMetric(
+        status="empty_archive",
+        shannon_entropy=Decimal(0),
+        relative_entropy=Decimal(0),
+        n_unique_patterns=0,
+        n_archive_members=0,
+        n_runs_aggregated=0,
+    )
+
+
+def build_default_feasible_ratio_metric() -> FeasibleRatioMetric:
+    """T080a stub default の FeasibleRatioMetric (= n_total=0、 fsm push)."""
+    return FeasibleRatioMetric(
+        feasible_ratio_ema=Decimal(0),
+        fsm_state="push",
+        n_feasible_individuals=0,
+        n_total_individuals=0,
+    )
+
+
+def build_default_selection_metric() -> SelectionMetric:
+    """T080a stub default の SelectionMetric (= front1=0 / 全 0)."""
+    return SelectionMetric(
+        front1_cardinality=0,
+        feasible_ratio=Decimal(0),
+        mean_constraint_violation=Decimal(0),
+        generation=0,
+    )
+
+
+def build_default_inflow_consistency_metric() -> InflowConsistencyMetric:
+    """T080a stub default の InflowConsistencyMetric (= 全 0、 within_tolerance)."""
+    return InflowConsistencyMetric(
+        warmstart_share_target=Decimal(0),
+        warmstart_share_actual=Decimal(0),
+        share_drift=Decimal(0),
+        within_tolerance=True,
+        relaxation_steps_count=0,
+        per_source_run_violations=0,
+        ca_inflow_actual=0,
+        da_inflow_actual=0,
+        bypass_inflow_actual=0,
+        inflow_summary_by_role={},
+    )
+
+
+def build_default_failure_metric(run_id: str) -> FailureMetric:
+    """T080a stub default の FailureMetric (= run_aborted=False / per_stage 空)."""
+    return FailureMetric(
+        run_id=run_id,
+        run_aborted=False,
+        per_stage=(),
+    )
+
+
 def build_stub_run_observability_report(
     *,
     run_id: str,
@@ -1141,22 +1258,28 @@ def build_stub_run_observability_report(
 ) -> RunObservabilityReport:
     """T080a Phase 2 配線 first step: 9 metric を stub 値で構築する.
 
-    後続別 TODO (T080b-g) で各 metric を実値配線に置換予定. 本 stub builder は
-    run_ga.py から ``build_run_observability_report`` を呼び出して
-    ``RunObservabilityReport`` を JSON 出力する経路を確立するための first step
-    として機能する (= 経路があることを先に保証し、 実値は段階的に差し替える).
+    後続別 TODO (T080b-g 相当 = T081 step 1-6) で各 metric を実値配線に置換予定.
+    本 stub builder は run_ga.py から ``build_run_observability_report`` を
+    呼び出して ``RunObservabilityReport`` を JSON 出力する経路を確立するための
+    first step として機能する (= 経路があることを先に保証し、 実値は段階的に
+    差し替える).
+
+    T081 step 1 (本改訂): 個別 default constructor 9 件 (上記関数群) を
+    combine する形に refactor。 step 1 caller (run_ga.py) は ABDivergence のみ
+    実値、 残り 8 件は default constructor で取得し、 同 build_run_observability_report
+    に注入する。 byte-for-byte equality は維持 (= test 16 で固定).
 
     各 stub 値は status enum / Literal type の **valid な** "insufficient_data" /
     "insufficient_runs" / "insufficient_window" / "empty_archive" / 0 default を
     使用 (= dataclass __post_init__ invariant 全 PASS).
 
-    後続別 TODO 担当範囲 (= handoff 申し送り):
-        - T080b: ABDivergenceMetric 実値配線 (cross-run history、 caller 計算)
-        - T080c: ArchiveChurnMetric / BypassRatioMetric 実値配線 (AdmissionReport)
-        - T080d: SessionEntropyMetric / FeasibleRatioMetric 実値配線
-        - T080e: SelectionMetric 実値配線 (GenerationSelectionResult)
-        - T080f: InflowConsistencyMetric / FailureMetric 実値配線
-        - T080g: QForceRecommendation 実値配線 (recommend_q_force_adjust)
+    後続別 TODO 担当範囲 (= T081 6 step segmentation):
+        - step 1: ABDivergenceMetric 実値配線 (本 step、 caller 計算)
+        - step 2: ArchiveChurnMetric / BypassRatioMetric 実値配線 (AdmissionReport)
+        - step 3: SessionEntropyMetric / FeasibleRatioMetric 実値配線
+        - step 4: SelectionMetric 実値配線 (GenerationSelectionResult)
+        - step 5: InflowConsistencyMetric / FailureMetric 実値配線
+        - step 6: QForceRecommendation 実値配線 (recommend_q_force_adjust)
 
     Args:
         run_id: 1 Run identifier (non-empty str).
@@ -1170,72 +1293,15 @@ def build_stub_run_observability_report(
         run_id=run_id,
         dataset_epoch_id=dataset_epoch_id,
         generation_count=generation_count,
-        ab_divergence=ABDivergenceMetric(
-            status="insufficient_data",
-            corr=Decimal(0),
-            n_pairs=0,
-        ),
-        q_force_recommendation=QForceRecommendation(
-            new_q_force=Q_FORCE_MIN,
-            delta=Decimal(0),
-            reason="insufficient_data",
-            clamped_at_max=False,
-            clamped_at_min=False,
-            consecutive_divergent_runs=0,
-        ),
-        archive_churn=ArchiveChurnMetric(
-            status="insufficient_runs",
-            churn_rate=Decimal(0),
-            n_total_admissions=0,
-            n_total_evictions=0,
-            n_runs_used=1,
-        ),
-        bypass_ratio=BypassRatioMetric(
-            bypass_ratio=Decimal(0),
-            n_admitted_by_role={
-                ARCHIVE_ROLE_MISSION_PASS: 0,
-                ARCHIVE_ROLE_PROGRESS_PASS: 0,
-                ARCHIVE_ROLE_SCORE_BYPASS: 0,
-            },
-            n_total_admissions=0,
-        ),
-        session_entropy=SessionEntropyMetric(
-            status="empty_archive",
-            shannon_entropy=Decimal(0),
-            relative_entropy=Decimal(0),
-            n_unique_patterns=0,
-            n_archive_members=0,
-            n_runs_aggregated=0,
-        ),
-        feasible_ratio=FeasibleRatioMetric(
-            feasible_ratio_ema=Decimal(0),
-            fsm_state="push",
-            n_feasible_individuals=0,
-            n_total_individuals=0,
-        ),
-        selection=SelectionMetric(
-            front1_cardinality=0,
-            feasible_ratio=Decimal(0),
-            mean_constraint_violation=Decimal(0),
-            generation=0,
-        ),
-        inflow_consistency=InflowConsistencyMetric(
-            warmstart_share_target=Decimal(0),
-            warmstart_share_actual=Decimal(0),
-            share_drift=Decimal(0),
-            within_tolerance=True,
-            relaxation_steps_count=0,
-            per_source_run_violations=0,
-            ca_inflow_actual=0,
-            da_inflow_actual=0,
-            bypass_inflow_actual=0,
-            inflow_summary_by_role={},
-        ),
-        failure=FailureMetric(
-            run_id=run_id,
-            run_aborted=False,
-            per_stage=(),
-        ),
+        ab_divergence=build_default_ab_divergence_metric(),
+        q_force_recommendation=build_default_q_force_recommendation(),
+        archive_churn=build_default_archive_churn_metric(),
+        bypass_ratio=build_default_bypass_ratio_metric(),
+        session_entropy=build_default_session_entropy_metric(),
+        feasible_ratio=build_default_feasible_ratio_metric(),
+        selection=build_default_selection_metric(),
+        inflow_consistency=build_default_inflow_consistency_metric(),
+        failure=build_default_failure_metric(run_id),
     )
 
 

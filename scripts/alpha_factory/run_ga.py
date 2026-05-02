@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import numbers
 import os
 import random
 import sys
@@ -76,7 +77,16 @@ from src.alpha_factory.diagnostics_sidecar import (
 )
 from src.alpha_factory.epoch_manager import EpochWindow, make_epoch_id
 from src.alpha_factory.observability import (
-    build_stub_run_observability_report,
+    build_default_archive_churn_metric,
+    build_default_bypass_ratio_metric,
+    build_default_failure_metric,
+    build_default_feasible_ratio_metric,
+    build_default_inflow_consistency_metric,
+    build_default_q_force_recommendation,
+    build_default_selection_metric,
+    build_default_session_entropy_metric,
+    build_run_observability_report,
+    compute_ab_divergence_on_b_evaluated,
     serialize_run_observability_report,
 )
 from src.alpha_factory.parallel_eval import (
@@ -1085,6 +1095,71 @@ def _check_memory_budget(max_workers: int, strict: bool) -> None:
             )
 
 
+def _aggregate_ab_summary(
+    *,
+    summary_out: Mapping[str, Any],
+    all_ab_score_pairs: list[tuple[float, float]],
+    b_evaluated_count: int,
+    excluded_preflight_count: int,
+    current_score_source: str | None,
+) -> tuple[int, int, str | None]:
+    """T081 step 1: lane_manager.run_generation の summary_out から AB pair / counter
+    / source 集約 (詳細設計 § 3.4.3)。
+
+    破壊的更新: ``all_ab_score_pairs`` に extend する。
+
+    Args:
+        summary_out: lane_manager.run_generation の戻り dict (= ab_score_pairs /
+            ab_score_source / ab_b_evaluated_count / ab_excluded_preflight_count
+            の必須 4 キーを含む)。
+        all_ab_score_pairs: Run loop 全世代の集約 list (in-place extend)。
+        b_evaluated_count: 集約済 b_evaluated_count (= 累積)。
+        excluded_preflight_count: 集約済 excluded_preflight_count (= 累積)。
+        current_score_source: 現在までに観測した source (= None / "noop" / Phase 1 source)。
+
+    Returns:
+        ``(new_b_evaluated_count, new_excluded_preflight_count, new_score_source)``
+
+    Raises:
+        RuntimeError: ab_score_source が run 内で異なる値が観測された場合
+            (= mixing 禁止、 Codex Round 1 [Critical] 1 取込)。
+    """
+    new_pairs = summary_out.get("ab_score_pairs", [])
+    if new_pairs:
+        for pair in new_pairs:
+            # consumer 側 defensive: numbers.Real (= numpy 数値型 covered) +
+            # bool 除外 (= producer 側でも弾いているが二重防御、 impl-review Round 1
+            # [Suggestion] 取込)
+            if (
+                isinstance(pair, tuple)
+                and len(pair) == 2
+                and isinstance(pair[0], numbers.Real)
+                and not isinstance(pair[0], bool)
+                and isinstance(pair[1], numbers.Real)
+                and not isinstance(pair[1], bool)
+            ):
+                all_ab_score_pairs.append(
+                    (float(pair[0]), float(pair[1]))
+                )
+    new_b_evaluated = b_evaluated_count + int(
+        summary_out.get("ab_b_evaluated_count", 0)
+    )
+    new_excluded = excluded_preflight_count + int(
+        summary_out.get("ab_excluded_preflight_count", 0)
+    )
+    new_source_value = summary_out.get("ab_score_source", "noop")
+    new_score_source: str | None = current_score_source
+    if isinstance(new_source_value, str) and new_source_value != "noop":
+        if new_score_source is None:
+            new_score_source = new_source_value
+        elif new_score_source != new_source_value:
+            raise RuntimeError(
+                f"ab_score_source mixing detected: "
+                f"existing={new_score_source!r} new={new_source_value!r}"
+            )
+    return new_b_evaluated, new_excluded, new_score_source
+
+
 def _resolve_stage_a_threshold(
     cfg: AlphaFactoryConfig,
     *,
@@ -1424,6 +1499,14 @@ def main(argv: list[str] | None = None) -> int:
             genome_evaluator=genome_evaluator,
         )
 
+        # T081 step 1: ABDivergenceMetric 実値配線用集約 (詳細設計 § 3.4.3)
+        # 全世代の (a_score, b_score) ペアを list で集約 (= 衝突回避)。
+        # ab_score_source は run 内で不変、 異なる source を検出したら fail-fast。
+        all_ab_score_pairs: list[tuple[float, float]] = []
+        all_ab_b_evaluated_count = 0
+        all_ab_excluded_preflight_count = 0
+        ab_score_source: str | None = None  # run 内 mixing 検出用 (= None / "noop" 以外で固定)
+
         for gen in range(cfg.ga.generations + 1):
             if gen == 0:
                 population = [
@@ -1454,6 +1537,18 @@ def main(argv: list[str] | None = None) -> int:
             tier1_lane.population = population
             tier1_lane.provenance = provenance
             summary_out = lane_manager.run_generation(lane_id)
+            # T081 step 1: AB pair 集約 (詳細設計 § 3.4.3、 helper 化で test 可能)
+            (
+                all_ab_b_evaluated_count,
+                all_ab_excluded_preflight_count,
+                ab_score_source,
+            ) = _aggregate_ab_summary(
+                summary_out=summary_out,
+                all_ab_score_pairs=all_ab_score_pairs,
+                b_evaluated_count=all_ab_b_evaluated_count,
+                excluded_preflight_count=all_ab_excluded_preflight_count,
+                current_score_source=ab_score_source,
+            )
             _update_cache(
                 cache,
                 population,
@@ -1568,16 +1663,40 @@ def main(argv: list[str] | None = None) -> int:
             note="reports/run-reports/ was not touched (archive + cache only)",
         )
 
-    # T080a Phase 2 配線 first step: RunObservabilityReport (stub) を JSON 出力
-    # 後続別 TODO (T080b-g) で各 metric を実値配線に置換予定. stub builder は
-    # caller 配線経路を確立するための first step として機能 (= 経路があることを
-    # 先に保証し、 実値は段階的に差し替える).
+    # T081 step 1: RunObservabilityReport を JSON 出力
+    # ABDivergenceMetric のみ実値配線、 残り 8 metric は stub default (= 後続 step 2-6 で実値置換)。
+    # 詳細設計: devnotes/20260502-2206-todo-T081-observability-real-values/detailed-design.md § 3.4.3
     # --no-report 時は reports/ ディレクトリを触らない契約と整合 (skip).
     if not args.no_report:
-        observability_report = build_stub_run_observability_report(
+        # 診断 log (Codex Round 1 [Warning] 4 取込: preflight 除外可視化)
+        logger.info(
+            "ga.observability.ab_score_pairs_collected",
+            run_id=run_id,
+            n_pairs=len(all_ab_score_pairs),
+            b_evaluated_count=all_ab_b_evaluated_count,
+            excluded_preflight_count=all_ab_excluded_preflight_count,
+            score_source=ab_score_source or "noop",
+        )
+        # ABDivergenceMetric 実値計算 (= list[tuple] → Sequence[Decimal] 2 本に分解)
+        a_scores = [Decimal(repr(a)) for a, _ in all_ab_score_pairs]
+        b_scores = [Decimal(repr(b)) for _, b in all_ab_score_pairs]
+        ab_divergence_metric = compute_ab_divergence_on_b_evaluated(
+            a_scores, b_scores
+        )
+        # 残り 8 metric は default constructor で stub default を取得 (= 後続 step で実値置換)
+        observability_report = build_run_observability_report(
             run_id=run_id,
             dataset_epoch_id=run_context.dataset_epoch_id,
             generation_count=cfg.ga.generations,
+            ab_divergence=ab_divergence_metric,  # ← step 1 で実値
+            q_force_recommendation=build_default_q_force_recommendation(),
+            archive_churn=build_default_archive_churn_metric(),
+            bypass_ratio=build_default_bypass_ratio_metric(),
+            session_entropy=build_default_session_entropy_metric(),
+            feasible_ratio=build_default_feasible_ratio_metric(),
+            selection=build_default_selection_metric(),
+            inflow_consistency=build_default_inflow_consistency_metric(),
+            failure=build_default_failure_metric(run_id),
         )
         observability_path = run_dir / "observability.json"
         observability_path.write_text(
@@ -1585,10 +1704,12 @@ def main(argv: list[str] | None = None) -> int:
             encoding="utf-8",
         )
         logger.info(
-            "ga.observability.stub_written",
+            "ga.observability.report_written",
             run_id=run_id,
             path=str(observability_path),
-            note="T080a stub (実値配線は T080b-g 後続別 TODO)",
+            ab_divergence_status=ab_divergence_metric.status,
+            ab_divergence_n_pairs=ab_divergence_metric.n_pairs,
+            note="T081 step 1: ABDivergenceMetric 実値、 残 8 metric は stub default",
         )
 
     # T058 PR 5: run cache JSON に dataset_epoch_id を伝搬 (詳細設計 行 1379-1381)

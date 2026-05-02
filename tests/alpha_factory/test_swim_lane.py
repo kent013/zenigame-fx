@@ -1255,3 +1255,385 @@ def test_run_generation_via_evaluator_returns_stage_timing_metrics() -> None:
     # _stage_*_result の wall_time_seconds=0.01 × 2 (pop=2) = 0.02 sum, 0.01 max
     assert summary["stage_a_seconds_total"] == pytest.approx(0.02)
     assert summary["stage_a_seconds_max"] == pytest.approx(0.01)
+
+
+# ---------------------------------------------------------------------------
+# T081 step 1: ABDivergenceMetric 実値配線 (swim_lane parity)
+# 詳細設計: devnotes/20260502-2206-todo-T081-observability-real-values/
+# ---------------------------------------------------------------------------
+
+
+_AB_REQUIRED_KEYS = (
+    "ab_score_pairs",
+    "ab_score_source",
+    "ab_b_evaluated_count",
+    "ab_excluded_preflight_count",
+)
+
+
+def test_swim_lane_legacy_returns_required_ab_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """legacy 経路 (genome_evaluator=None) で必須 4 キー (ab_*) を返す."""
+    _patch_stage_funcs(
+        monkeypatch,
+        a_result=_stage_a_result(passed=True),
+        b_result=_stage_b_result(passed=True),
+        c_result=_stage_c_result(passed=True),
+    )
+    archive = MagicMock(spec=GenomeArchive)
+    mgr = _make_lane_manager(archive=archive)
+    summary = mgr.run_generation("tier1_EUR_JPY")
+    for key in _AB_REQUIRED_KEYS:
+        assert key in summary, f"missing key: {key}"
+    assert summary["ab_score_source"] == "fitness_pen+median_oos_sharpe_phase1"
+    assert isinstance(summary["ab_score_pairs"], list)
+    assert summary["ab_b_evaluated_count"] == 2  # pop=2 / 全 B-evaluated
+    assert summary["ab_excluded_preflight_count"] == 0
+    # _stage_a_result(passed=True) → fitness_pen=0.44、 _stage_b_result(passed=True) → median_oos=0.4
+    assert summary["ab_score_pairs"] == [(0.44, 0.4), (0.44, 0.4)]
+
+
+def test_swim_lane_via_evaluator_returns_required_ab_keys() -> None:
+    """via_evaluator 経路で必須 4 キー (ab_*) を返す."""
+    archive = MagicMock(spec=GenomeArchive)
+    lane = _make_tier1_lane(pop_size=2)
+    evaluator = _StubGenomeEvaluator(
+        result_factory=lambda g: _gsr(g, a_passed=True, b_passed=True, c_passed=True),
+    )
+    mgr = LaneManager(
+        tier1={"tier1_EUR_JPY": lane},
+        graduation=_make_graduation_lane(),
+        stage_gate_config=StageGateConfig(
+            wf_train_days=2, wf_test_days=1, wf_step_days=1, wf_embargo_days=0,
+        ),
+        cross_pair_config=CrossPairConfig(),
+        primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
+        archive=archive,
+        backtest_config_factory=_stub_bt_factory_intraday(),
+        genome_evaluator=cast(Any, evaluator),
+    )
+    summary = mgr.run_generation("tier1_EUR_JPY")
+    for key in _AB_REQUIRED_KEYS:
+        assert key in summary, f"missing key: {key}"
+    assert summary["ab_score_source"] == "fitness_pen+median_oos_sharpe_phase1"
+    assert summary["ab_b_evaluated_count"] == 2
+    assert summary["ab_excluded_preflight_count"] == 0
+    assert len(summary["ab_score_pairs"]) == 2
+
+
+def test_swim_lane_legacy_and_via_evaluator_return_same_keys_for_ab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """legacy / via_evaluator 双方経路で 4 必須キーが同型 (Codex Round 1 [Critical] 3)."""
+    # legacy
+    _patch_stage_funcs(
+        monkeypatch,
+        a_result=_stage_a_result(passed=True),
+        b_result=_stage_b_result(passed=True),
+        c_result=_stage_c_result(passed=True),
+    )
+    legacy_mgr = _make_lane_manager(archive=MagicMock(spec=GenomeArchive))
+    legacy_summary = legacy_mgr.run_generation("tier1_EUR_JPY")
+    # via_evaluator
+    archive_v = MagicMock(spec=GenomeArchive)
+    lane_v = _make_tier1_lane(pop_size=2)
+    evaluator = _StubGenomeEvaluator(
+        result_factory=lambda g: _gsr(g, a_passed=True, b_passed=True, c_passed=True),
+    )
+    via_mgr = LaneManager(
+        tier1={"tier1_EUR_JPY": lane_v},
+        graduation=_make_graduation_lane(),
+        stage_gate_config=StageGateConfig(
+            wf_train_days=2, wf_test_days=1, wf_step_days=1, wf_embargo_days=0,
+        ),
+        cross_pair_config=CrossPairConfig(),
+        primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
+        archive=archive_v,
+        backtest_config_factory=_stub_bt_factory_intraday(),
+        genome_evaluator=cast(Any, evaluator),
+    )
+    via_summary = via_mgr.run_generation("tier1_EUR_JPY")
+    for key in _AB_REQUIRED_KEYS:
+        assert key in legacy_summary, f"legacy missing: {key}"
+        assert key in via_summary, f"via_evaluator missing: {key}"
+        # type parity
+        assert type(legacy_summary[key]) is type(via_summary[key]), (
+            f"key={key} type mismatch: legacy={type(legacy_summary[key])} "
+            f"via={type(via_summary[key])}"
+        )
+    # source parity (= 同じ Phase 1 source)
+    assert legacy_summary["ab_score_source"] == via_summary["ab_score_source"]
+
+
+def test_swim_lane_noop_summary_returns_empty_ab_score_pairs() -> None:
+    """state != "active" lane で必須キーが空 list / "noop" source で返る."""
+    lane = _make_tier1_lane("EUR_JPY", state="converged")
+    archive = MagicMock(spec=GenomeArchive)
+    mgr = _make_lane_manager(
+        tier1={"tier1_EUR_JPY": lane},
+        archive=archive,
+    )
+    summary = mgr.run_generation("tier1_EUR_JPY")
+    for key in _AB_REQUIRED_KEYS:
+        assert key in summary, f"noop missing key: {key}"
+    assert summary["ab_score_pairs"] == []
+    assert summary["ab_score_source"] == "noop"
+    assert summary["ab_b_evaluated_count"] == 0
+    assert summary["ab_excluded_preflight_count"] == 0
+
+
+def test_swim_lane_preflight_underfilled_does_not_skip_archive_collect_or_diagnostics_record() -> None:
+    """preflight 個体で archive.collect_stage_b と diagnostics.record_stage_b が必ず呼ばれる
+    (Codex Round 2 [Critical] 1 取込: 早期 continue 禁止、
+     impl-review Round 1 [Warning]: diagnostics 側も spy で確認)。"""
+    from src.alpha_factory.diagnostics_collector import DiagnosticsCollector
+
+    archive = MagicMock(spec=GenomeArchive)
+    diagnostics = MagicMock(spec=DiagnosticsCollector)
+    lane = _make_tier1_lane(pop_size=2)
+    evaluator = _StubGenomeEvaluator(
+        result_factory=lambda g: _gsr(g, a_passed=True, b_passed=None, c_passed=None),
+    )
+    # preflight underfilled (= wf_train_days=200 で fold 不足)
+    mgr = LaneManager(
+        tier1={"tier1_EUR_JPY": lane},
+        graduation=_make_graduation_lane(),
+        stage_gate_config=StageGateConfig(
+            wf_train_days=200, wf_test_days=20, wf_step_days=20, wf_embargo_days=1,
+        ),
+        cross_pair_config=CrossPairConfig(),
+        primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
+        archive=archive,
+        backtest_config_factory=_stub_bt_factory_intraday(),
+        genome_evaluator=cast(Any, evaluator),
+        diagnostics_collector=diagnostics,
+    )
+    summary = mgr.run_generation("tier1_EUR_JPY")
+    # archive collect_stage_b は preflight でも必ず呼ばれる (= 既存契約維持)
+    assert archive.collect_stage_b.call_count == 2
+    # diagnostics.record_stage_b も preflight でも必ず呼ばれる (= 既存契約維持)
+    assert diagnostics.record_stage_b.call_count == 2
+    # AB pair は preflight 個体なので空、 excluded counter は 2
+    assert summary["ab_score_pairs"] == []
+    assert summary["ab_excluded_preflight_count"] == 2
+    assert summary["ab_b_evaluated_count"] == 0
+
+
+def test_swim_lane_preflight_legacy_path_diagnostics_record_invoked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """legacy 経路の preflight 個体でも diagnostics.record_stage_b が呼ばれる
+    (impl-review Round 1 [Warning]: legacy / via_evaluator 双方確認)。"""
+    from src.alpha_factory.diagnostics_collector import DiagnosticsCollector
+
+    _patch_stage_funcs(
+        monkeypatch,
+        a_result=_stage_a_result(passed=True),
+        b_result=_stage_b_result(passed=True),
+        c_result=_stage_c_result(passed=True),
+    )
+    archive = MagicMock(spec=GenomeArchive)
+    diagnostics = MagicMock(spec=DiagnosticsCollector)
+    lane = _make_tier1_lane(pop_size=2)
+    mgr = LaneManager(
+        tier1={"tier1_EUR_JPY": lane},
+        graduation=_make_graduation_lane(),
+        # preflight underfilled (= wf_train_days=200 で fold 不足、 _build_preflight_b_result 経路)
+        stage_gate_config=StageGateConfig(
+            wf_train_days=200, wf_test_days=20, wf_step_days=20, wf_embargo_days=1,
+        ),
+        cross_pair_config=CrossPairConfig(),
+        primitive_evaluator=cast(PrimitiveEvaluator, ConstantPrimitiveEvaluator(0.0)),
+        archive=archive,
+        backtest_config_factory=_stub_bt_factory_intraday(),
+        diagnostics_collector=diagnostics,
+    )
+    summary = mgr.run_generation("tier1_EUR_JPY")
+    assert archive.collect_stage_b.call_count == 2
+    assert diagnostics.record_stage_b.call_count == 2
+    assert summary["ab_score_pairs"] == []
+    assert summary["ab_excluded_preflight_count"] == 2
+
+
+def test_swim_lane_payload_score_excludes_bool_and_includes_numpy_float(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """numbers.Real ガードの bool 除外 + numpy 数値型 covered を明示テスト
+    (impl-review Round 1 [Warning] 取込)."""
+    import numpy as np
+
+    # bool は除外 (= numbers.Real だが not bool ガードで弾く)
+    bool_a = StageResult(
+        stage="A",
+        passed=True,
+        metrics={
+            "stage": "A",
+            "genome_name": "g0_i0",
+            "n_bars": 4,
+            "wall_time_seconds": 0.01,
+            "payload": {
+                "fitness_pen": True,  # bool 型 (= 不正)
+                "fitness_raw": 0.5,
+                "size_norm": 0.2,
+                "alpha_a": 0.03,
+                "threshold": 0.0,
+                "trade_count": 10,
+            },
+        },
+        reason_codes=(),
+    )
+    _patch_stage_funcs(
+        monkeypatch,
+        a_result=bool_a,
+        b_result=_stage_b_result(passed=True),
+        c_result=_stage_c_result(passed=True),
+    )
+    archive = MagicMock(spec=GenomeArchive)
+    mgr = _make_lane_manager(
+        tier1={"tier1_EUR_JPY": _make_tier1_lane("EUR_JPY", pop_size=1)},
+        archive=archive,
+    )
+    summary = mgr.run_generation("tier1_EUR_JPY")
+    assert summary["ab_score_pairs"] == []  # bool は除外
+
+    # numpy.float32 / numpy.int64 は include される
+    numpy_a = StageResult(
+        stage="A",
+        passed=True,
+        metrics={
+            "stage": "A",
+            "genome_name": "g0_i0",
+            "n_bars": 4,
+            "wall_time_seconds": 0.01,
+            "payload": {
+                "fitness_pen": np.float32(0.42),  # numpy.float32
+                "fitness_raw": 0.5,
+                "size_norm": 0.2,
+                "alpha_a": 0.03,
+                "threshold": 0.0,
+                "trade_count": 10,
+            },
+        },
+        reason_codes=(),
+    )
+    numpy_b = StageResult(
+        stage="B",
+        passed=True,
+        metrics={
+            "stage": "B",
+            "genome_name": "g0_i0",
+            "n_bars": 8,
+            "wall_time_seconds": 0.01,
+            "payload": {
+                "n_fold": 3,
+                "n_fold_unavailable": 0,
+                "oos_sharpes": (0.3, 0.4, 0.5),
+                "median_oos_sharpe": np.int64(1),  # numpy.int64
+                "positive_fold_ratio": 1.0,
+                "dsr": None,
+                "is_full_sharpe": 0.6,
+                "is_full_total_pnl": 10000.0,
+                "is_full_trade_count": 30,
+            },
+        },
+        reason_codes=(),
+    )
+    _patch_stage_funcs(
+        monkeypatch,
+        a_result=numpy_a,
+        b_result=numpy_b,
+        c_result=_stage_c_result(passed=True),
+    )
+    archive = MagicMock(spec=GenomeArchive)
+    mgr = _make_lane_manager(
+        tier1={"tier1_EUR_JPY": _make_tier1_lane("EUR_JPY", pop_size=1)},
+        archive=archive,
+    )
+    summary = mgr.run_generation("tier1_EUR_JPY")
+    # numpy 数値型は covered (= numbers.Real subclass)
+    pairs = summary["ab_score_pairs"]
+    assert len(pairs) == 1
+    # np.float32 は precision の都合で 0.42 ≠ exact、 approx で確認
+    assert pairs[0][0] == pytest.approx(0.42, abs=1e-6)
+    assert pairs[0][1] == 1.0  # np.int64(1) → float = 1.0 exact
+
+
+def test_swim_lane_payload_score_must_be_numeric_for_ab_pair_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非数値型 (str / None) の payload score は ab_score_pairs に append されない
+    (Codex Round 2 [Suggestion] 4 + Round 3 [Warning] 1 取込: numbers.Real ガード)."""
+    bad_a = StageResult(
+        stage="A",
+        passed=True,
+        metrics={
+            "stage": "A",
+            "genome_name": "g0_i0",
+            "n_bars": 4,
+            "wall_time_seconds": 0.01,
+            "payload": {
+                "fitness_pen": "not_a_number",  # str 型 (= 不正)
+                "fitness_raw": 0.5,
+                "size_norm": 0.2,
+                "alpha_a": 0.03,
+                "threshold": 0.0,
+                "trade_count": 10,
+            },
+        },
+        reason_codes=(),
+    )
+    _patch_stage_funcs(
+        monkeypatch,
+        a_result=bad_a,
+        b_result=_stage_b_result(passed=True),
+        c_result=_stage_c_result(passed=True),
+    )
+    archive = MagicMock(spec=GenomeArchive)
+    mgr = _make_lane_manager(
+        tier1={"tier1_EUR_JPY": _make_tier1_lane("EUR_JPY", pop_size=1)},
+        archive=archive,
+    )
+    summary = mgr.run_generation("tier1_EUR_JPY")
+    # 非数値 score なので ab_score_pairs に append しない
+    assert summary["ab_score_pairs"] == []
+    # 但し b_evaluated_count は inc される (= 真評価が走った個体数)
+    assert summary["ab_b_evaluated_count"] == 1
+
+
+def test_swim_lane_legacy_excludes_nan_or_inf_scores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NaN / Inf score を持つ個体は ab_score_pairs から除外される."""
+    nan_a = StageResult(
+        stage="A",
+        passed=True,
+        metrics={
+            "stage": "A",
+            "genome_name": "g0_i0",
+            "n_bars": 4,
+            "wall_time_seconds": 0.01,
+            "payload": {
+                "fitness_pen": float("nan"),  # NaN
+                "fitness_raw": 0.5,
+                "size_norm": 0.2,
+                "alpha_a": 0.03,
+                "threshold": 0.0,
+                "trade_count": 10,
+            },
+        },
+        reason_codes=(),
+    )
+    _patch_stage_funcs(
+        monkeypatch,
+        a_result=nan_a,
+        b_result=_stage_b_result(passed=True),
+        c_result=_stage_c_result(passed=True),
+    )
+    archive = MagicMock(spec=GenomeArchive)
+    mgr = _make_lane_manager(
+        tier1={"tier1_EUR_JPY": _make_tier1_lane("EUR_JPY", pop_size=1)},
+        archive=archive,
+    )
+    summary = mgr.run_generation("tier1_EUR_JPY")
+    assert summary["ab_score_pairs"] == []  # NaN は除外
