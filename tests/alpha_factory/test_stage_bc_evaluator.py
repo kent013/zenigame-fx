@@ -1105,9 +1105,202 @@ class TestStageCCrossPair:
 
 
 class TestApplySpreadStress:
-    def test_apply_spread_stress_phase_1_raises_not_implemented_error(self) -> None:
-        with pytest.raises(NotImplementedError, match="T070"):
-            apply_spread_stress((), 1.5)
+    """T078 で skeleton (NotImplementedError raise) を正式実装に置換した結果の検証.
+
+    apply_spread_stress(trades, multiplier) は spread stress 倍率の余計分のみを
+    pnl_net から控除し、 spread_cost を multiplier 倍する pure function.
+    """
+
+    def test_empty_trades_returns_empty_tuple(self) -> None:
+        result = apply_spread_stress((), multiplier=1.5)
+        assert result == ()
+
+    def test_multiplier_1_is_noop(self) -> None:
+        t = TradeRecord(
+            entry_time_utc=datetime(2024, 1, 1, 9, 0, tzinfo=UTC),
+            exit_time_utc=datetime(2024, 1, 1, 10, 0, tzinfo=UTC),
+            pnl_net=100.0,
+            session_bucket="tokyo",
+            business_day_index=0,
+            is_session_close_drop=False,
+            is_negative_equity_drop_open=False,
+            spread_cost=2.5,
+            holding_cost=1.0,
+        )
+        result = apply_spread_stress((t,), multiplier=1.0)
+        assert len(result) == 1
+        assert result[0].pnl_net == pytest.approx(100.0)
+        assert result[0].spread_cost == pytest.approx(2.5)
+        # holding_cost は不変 (= stress 適用対象外)
+        assert result[0].holding_cost == pytest.approx(1.0)
+
+    def test_multiplier_1_5_applies_correctly(self) -> None:
+        t = TradeRecord(
+            entry_time_utc=datetime(2024, 1, 1, 9, 0, tzinfo=UTC),
+            exit_time_utc=datetime(2024, 1, 1, 10, 0, tzinfo=UTC),
+            pnl_net=100.0,
+            session_bucket="tokyo",
+            business_day_index=0,
+            is_session_close_drop=False,
+            is_negative_equity_drop_open=False,
+            spread_cost=2.5,
+            holding_cost=1.0,
+        )
+        result = apply_spread_stress((t,), multiplier=1.5)
+        # delta_factor = 0.5; new_pnl = 100.0 - 2.5 * 0.5 = 98.75
+        assert result[0].pnl_net == pytest.approx(98.75)
+        # new_spread_cost = 2.5 * 1.5 = 3.75
+        assert result[0].spread_cost == pytest.approx(3.75)
+        # holding_cost 不変
+        assert result[0].holding_cost == pytest.approx(1.0)
+
+    def test_zero_spread_cost_unaffected_by_stress(self) -> None:
+        t = TradeRecord(
+            entry_time_utc=datetime(2024, 1, 1, 9, 0, tzinfo=UTC),
+            exit_time_utc=datetime(2024, 1, 1, 10, 0, tzinfo=UTC),
+            pnl_net=100.0,
+            session_bucket="tokyo",
+            business_day_index=0,
+            is_session_close_drop=False,
+            is_negative_equity_drop_open=False,
+            # default spread_cost=0.0
+        )
+        result = apply_spread_stress((t,), multiplier=2.0)
+        # spread_cost=0 なら何も変わらない
+        assert result[0].pnl_net == pytest.approx(100.0)
+        assert result[0].spread_cost == pytest.approx(0.0)
+
+    def test_multiplier_below_one_raises(self) -> None:
+        with pytest.raises(ValueError, match=r"multiplier must be >= 1.0"):
+            apply_spread_stress((), multiplier=0.5)
+
+    def test_multiplier_negative_raises(self) -> None:
+        with pytest.raises(ValueError, match=r"multiplier must be >= 1.0"):
+            apply_spread_stress((), multiplier=-1.0)
+
+    def test_multiplier_nan_raises(self) -> None:
+        with pytest.raises(ValueError, match="multiplier must be finite"):
+            apply_spread_stress((), multiplier=float("nan"))
+
+    def test_multiplier_inf_raises(self) -> None:
+        with pytest.raises(ValueError, match="multiplier must be finite"):
+            apply_spread_stress((), multiplier=float("inf"))
+
+    def test_multiple_trades_each_independently_stressed(self) -> None:
+        t1 = TradeRecord(
+            entry_time_utc=datetime(2024, 1, 1, 9, 0, tzinfo=UTC),
+            exit_time_utc=datetime(2024, 1, 1, 10, 0, tzinfo=UTC),
+            pnl_net=100.0,
+            session_bucket="tokyo",
+            business_day_index=0,
+            is_session_close_drop=False,
+            is_negative_equity_drop_open=False,
+            spread_cost=2.0,
+        )
+        t2 = TradeRecord(
+            entry_time_utc=datetime(2024, 1, 1, 11, 0, tzinfo=UTC),
+            exit_time_utc=datetime(2024, 1, 1, 12, 0, tzinfo=UTC),
+            pnl_net=50.0,
+            session_bucket="london",
+            business_day_index=0,
+            is_session_close_drop=False,
+            is_negative_equity_drop_open=False,
+            spread_cost=1.0,
+        )
+        result = apply_spread_stress((t1, t2), multiplier=2.0)
+        assert len(result) == 2
+        # t1: pnl = 100 - 2*1 = 98; spread_cost = 4
+        assert result[0].pnl_net == pytest.approx(98.0)
+        assert result[0].spread_cost == pytest.approx(4.0)
+        # t2: pnl = 50 - 1*1 = 49; spread_cost = 2
+        assert result[1].pnl_net == pytest.approx(49.0)
+        assert result[1].spread_cost == pytest.approx(2.0)
+
+    def test_returns_tuple_not_list(self) -> None:
+        result = apply_spread_stress((), multiplier=1.0)
+        assert isinstance(result, tuple)
+
+    def test_algebraic_equivalence_with_broker_decimal_path(self) -> None:
+        """T078 Round 1 [Suggestion] 2: broker 経路 (Decimal) との代数的等価性.
+
+        ``src/backtest/session_block.apply_spread_stress`` (Decimal) と本関数 (float)
+        が同じ入力 (= 同じ pnl / spread / multiplier の数値) で同じ出力
+        (= 相対誤差 1e-9 以内、 pytest.approx rel) を返すことを検証.
+        Decimal を float 化して比較. 用途分離維持 (= 統合せず代数等価のみ確認、
+        Round 2 [Suggestion] 1 反映で表現精度修正).
+        """
+        from decimal import Decimal
+
+        from src.backtest.session_block import (
+            apply_spread_stress as broker_apply_spread_stress,
+        )
+        from src.broker.orders import Trade
+
+        # 同じ数値で TradeRecord (float) と Trade (Decimal) を構築
+        pnl_value = 100.0
+        spread_value = 2.5
+        multiplier_value = 1.5
+
+        tr = TradeRecord(
+            entry_time_utc=datetime(2024, 1, 1, 9, 0, tzinfo=UTC),
+            exit_time_utc=datetime(2024, 1, 1, 10, 0, tzinfo=UTC),
+            pnl_net=pnl_value,
+            session_bucket="tokyo",
+            business_day_index=0,
+            is_session_close_drop=False,
+            is_negative_equity_drop_open=False,
+            spread_cost=spread_value,
+        )
+        # broker Trade は別 type だが、 同じ数値で構築 (= alpha_factory TradeRecord
+        # と field 名は異なるが、 stress 適用対象の pnl / spread_cost / multiplier は
+        # 同じ数値で 1:1 対応).
+        broker_trade = Trade(
+            position_id=1,
+            instrument="AUD_JPY",
+            side="long",
+            units=1,
+            entry_price=Decimal("1.0"),
+            entry_time=datetime(2024, 1, 1, 9, 0, tzinfo=UTC),
+            exit_price=Decimal("1.0"),
+            exit_time=datetime(2024, 1, 1, 10, 0, tzinfo=UTC),
+            pnl=Decimal(repr(pnl_value)),
+            exit_reason="signal",
+            spread_cost=Decimal(repr(spread_value)),
+            holding_cost=Decimal("0"),
+        )
+
+        # 両方に stress を適用
+        tr_result = apply_spread_stress((tr,), multiplier=multiplier_value)
+        broker_result = broker_apply_spread_stress(
+            [broker_trade], multiplier=Decimal(repr(multiplier_value))
+        )
+
+        # 代数的等価: 出力 pnl と spread_cost が一致 (= ulp 誤差以内)
+        assert tr_result[0].pnl_net == pytest.approx(
+            float(broker_result[0].pnl), rel=1e-9
+        )
+        assert tr_result[0].spread_cost == pytest.approx(
+            float(broker_result[0].spread_cost), rel=1e-9
+        )
+
+    def test_overflow_raises_invalid_error(self) -> None:
+        """T078 Round 1 [Suggestion] 3: overflow 境界 (= inf 発生時の挙動)."""
+        from src.alpha_factory.canonical_metrics import TradeRecordInvalidError
+
+        # 巨大な spread_cost と巨大 multiplier で overflow を誘発
+        t = TradeRecord(
+            entry_time_utc=datetime(2024, 1, 1, 9, 0, tzinfo=UTC),
+            exit_time_utc=datetime(2024, 1, 1, 10, 0, tzinfo=UTC),
+            pnl_net=0.0,
+            session_bucket="tokyo",
+            business_day_index=0,
+            is_session_close_drop=False,
+            is_negative_equity_drop_open=False,
+            spread_cost=1e308,  # 最大近傍
+        )
+        # multiplier=1e10 で spread_cost * multiplier > float max → inf
+        with pytest.raises(TradeRecordInvalidError, match="finite"):
+            apply_spread_stress((t,), multiplier=1e10)
 
 
 # ---------------------------------------------------------------------------
