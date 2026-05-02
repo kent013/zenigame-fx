@@ -37,7 +37,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from typing import Final
@@ -1030,22 +1030,60 @@ def apply_spread_stress(
     trades: tuple[TradeRecord, ...],
     multiplier: float,
 ) -> tuple[TradeRecord, ...]:
-    """spread stress を trades に適用 (Phase 1 では未実装).
+    """spread stress を trades に適用 (T078 で skeleton から正式実装に置換).
 
-    Phase 1 では :class:`TradeRecord` に ``spread_cost`` field 未追加 (T070 申し送り)
-    のため、 本関数は :class:`NotImplementedError` raise. Phase 2 で T070 後に
-    正式実装する. 詳細 Round 1 [C1] 反映.
+    T070 で TradeRecord に ``spread_cost`` field 追加 + T078 で本関数の
+    NotImplementedError raise を正式実装に置換. concept 改訂 1 / 詳細設計 § 4.2
+    option 2 (= TradeRecord に直接適用するロジック展開、 broker 経路の
+    ``src/backtest/session_block.apply_spread_stress`` とは型が異なるため統合せず
+    用途分離).
+
+    Stress 適用式 (= 元 broker は spread を pnl に控除済前提、 stress 倍率の
+    余計分のみを pnl_net から控除する):
+
+        delta_factor = multiplier - 1.0
+        new_pnl_net = pnl_net - spread_cost * delta_factor
+        new_spread_cost = spread_cost * multiplier
+
+    本式は broker 経路の ``session_block.apply_spread_stress`` (Decimal 型) と
+    **代数的に等価** (= 同じ入力で同じ出力、 ただし type 差で丸め誤差は発生し得る、
+    test 経路で ulp 誤差検証).
+
+    **Caller 配線注意 (Round 1 [Warning] 1 反映)**:
+        spread_cost が全 trade で 0.0 (= default、 trade 生成経路で伝搬未配線)
+        の状態では multiplier > 1.0 でも stress 効果ゼロ (silent no-op).
+        caller (= run_ga.py / Stage C 評価) 側で trade 生成経路の spread_cost
+        伝搬を確立する責任あり (= 後続別 TODO で配線、 T078 のスコープ外).
 
     Args:
-        trades: original trades
-        multiplier: spread cost multiplier (例 1.5)
+        trades: original trades (TradeRecord tuple).
+        multiplier: spread cost multiplier (= 1.0 で no-op, 1.5 で 50% 増加).
+
+    Returns:
+        stress 適用後の TradeRecord tuple (= 入力と同じ長さ、 同じ順序).
 
     Raises:
-        NotImplementedError: Phase 1 では未実装.
+        ValueError: multiplier < 1.0 OR finite でない.
+        TradeRecordInvalidError: 結果の new_pnl_net / new_spread_cost が
+            non-finite (= overflow) または new_spread_cost < 0 (= 数値誤差で発生).
     """
-    raise NotImplementedError(
-        "apply_spread_stress requires TradeRecord.spread_cost field "
-        "(T070 Phase 2 申し送り)"
+    if not math.isfinite(multiplier):
+        raise ValueError(
+            f"apply_spread_stress: multiplier must be finite, got {multiplier}"
+        )
+    if multiplier < 1.0:
+        raise ValueError(
+            f"apply_spread_stress: multiplier must be >= 1.0, got {multiplier}"
+        )
+
+    delta_factor = multiplier - 1.0
+    return tuple(
+        replace(
+            t,
+            pnl_net=t.pnl_net - t.spread_cost * delta_factor,
+            spread_cost=t.spread_cost * multiplier,
+        )
+        for t in trades
     )
 
 

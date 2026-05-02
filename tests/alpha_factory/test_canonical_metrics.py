@@ -215,6 +215,85 @@ class TestTradeRecord:
         assert t.pnl_net == 100.0
         assert t.session_bucket == SessionBucket.TOKYO
 
+    # T078: spread_cost / holding_cost field
+    def test_trade_record_spread_cost_default_zero(self) -> None:
+        """T078: spread_cost field default 0.0 (= backward compat、 既存 caller 互換)."""
+        t = _make_trade()
+        assert t.spread_cost == 0.0
+        assert t.holding_cost == 0.0
+
+    def test_trade_record_spread_cost_explicit_value(self) -> None:
+        """T078: spread_cost / holding_cost 明示指定."""
+        t = TradeRecord(
+            entry_time_utc=_utc(2026, 1, 1, 0, 0),
+            exit_time_utc=_utc(2026, 1, 1, 0, 30),
+            pnl_net=100.0,
+            session_bucket=SessionBucket.TOKYO,
+            business_day_index=0,
+            is_session_close_drop=False,
+            is_negative_equity_drop_open=False,
+            spread_cost=2.5,
+            holding_cost=1.5,
+        )
+        assert t.spread_cost == 2.5
+        assert t.holding_cost == 1.5
+
+    def test_trade_record_rejects_negative_spread_cost(self) -> None:
+        """T078 invariant: spread_cost >= 0 必須."""
+        with pytest.raises(TradeRecordInvalidError, match=r"spread_cost.*>= 0"):
+            TradeRecord(
+                entry_time_utc=_utc(2026, 1, 1, 0, 0),
+                exit_time_utc=_utc(2026, 1, 1, 0, 30),
+                pnl_net=100.0,
+                session_bucket=SessionBucket.TOKYO,
+                business_day_index=0,
+                is_session_close_drop=False,
+                is_negative_equity_drop_open=False,
+                spread_cost=-1.0,
+            )
+
+    def test_trade_record_rejects_negative_holding_cost(self) -> None:
+        """T078 invariant: holding_cost >= 0 必須."""
+        with pytest.raises(TradeRecordInvalidError, match=r"holding_cost.*>= 0"):
+            TradeRecord(
+                entry_time_utc=_utc(2026, 1, 1, 0, 0),
+                exit_time_utc=_utc(2026, 1, 1, 0, 30),
+                pnl_net=100.0,
+                session_bucket=SessionBucket.TOKYO,
+                business_day_index=0,
+                is_session_close_drop=False,
+                is_negative_equity_drop_open=False,
+                holding_cost=-0.5,
+            )
+
+    def test_trade_record_rejects_non_finite_spread_cost(self) -> None:
+        """T078 invariant: spread_cost finite 必須."""
+        with pytest.raises(TradeRecordInvalidError, match="spread_cost must be finite"):
+            TradeRecord(
+                entry_time_utc=_utc(2026, 1, 1, 0, 0),
+                exit_time_utc=_utc(2026, 1, 1, 0, 30),
+                pnl_net=100.0,
+                session_bucket=SessionBucket.TOKYO,
+                business_day_index=0,
+                is_session_close_drop=False,
+                is_negative_equity_drop_open=False,
+                spread_cost=float("nan"),
+            )
+
+    def test_trade_record_rejects_non_finite_holding_cost(self) -> None:
+        """T078 invariant: holding_cost finite 必須."""
+        with pytest.raises(TradeRecordInvalidError, match="holding_cost must be finite"):
+            TradeRecord(
+                entry_time_utc=_utc(2026, 1, 1, 0, 0),
+                exit_time_utc=_utc(2026, 1, 1, 0, 30),
+                pnl_net=100.0,
+                session_bucket=SessionBucket.TOKYO,
+                business_day_index=0,
+                is_session_close_drop=False,
+                is_negative_equity_drop_open=False,
+                holding_cost=float("inf"),
+            )
+
 
 # ---------------------------------------------------------------------------
 # BarEquitySeries

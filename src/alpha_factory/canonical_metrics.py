@@ -233,10 +233,17 @@ class TradeRecord:
     - ``pnl_net`` は finite (NaN/Inf なら raise → caller 側で
       ``input_non_finite_pnl`` reason に変換)
     - ``business_day_index >= 0``
+    - ``spread_cost`` / ``holding_cost`` は finite + ``>= 0`` (T078 追加、
+      stage_bc_evaluator.apply_spread_stress 利用、 既存 caller は default 0.0
+      で backward compatible)
 
     ``session_bucket`` / ``business_day_index`` の T070 整合性は
     ``_validate_trade_attribution(provider)`` で別経路 double-check
     (concept Round 1 [W1] 反映).
+
+    ``spread_cost`` / ``holding_cost`` の伝搬経路 (= backtest engine →
+    TradeRecord 構築時の値伝搬) は本 dataclass のスコープ外、 後続別 TODO で
+    配線 (= T078 では schema 拡張 + apply_spread_stress 正式実装まで).
     """
 
     entry_time_utc: datetime
@@ -246,6 +253,10 @@ class TradeRecord:
     business_day_index: int
     is_session_close_drop: bool
     is_negative_equity_drop_open: bool
+    # T078 追加 (default 0.0 で backward compatible、 概念設計 § 改訂 1):
+    # apply_spread_stress 利用、 caller (backtest engine) が値を伝搬する
+    spread_cost: float = 0.0
+    holding_cost: float = 0.0
 
     def __post_init__(self) -> None:
         _validate_utc_aware(
@@ -270,6 +281,23 @@ class TradeRecord:
         if not math.isfinite(self.pnl_net):
             raise TradeRecordInvalidError(
                 f"TradeRecord.pnl_net must be finite: {self.pnl_net}"
+            )
+        # T078 invariant: spread_cost / holding_cost は finite + >= 0
+        if not math.isfinite(self.spread_cost):
+            raise TradeRecordInvalidError(
+                f"TradeRecord.spread_cost must be finite: {self.spread_cost}"
+            )
+        if self.spread_cost < 0:
+            raise TradeRecordInvalidError(
+                f"TradeRecord.spread_cost must be >= 0: {self.spread_cost}"
+            )
+        if not math.isfinite(self.holding_cost):
+            raise TradeRecordInvalidError(
+                f"TradeRecord.holding_cost must be finite: {self.holding_cost}"
+            )
+        if self.holding_cost < 0:
+            raise TradeRecordInvalidError(
+                f"TradeRecord.holding_cost must be >= 0: {self.holding_cost}"
             )
 
 

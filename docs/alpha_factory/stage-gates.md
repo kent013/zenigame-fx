@@ -500,10 +500,14 @@ UTC date set × 3 bucket. `trade_count == 0` の empty block も生成する
 trade の 帰属 bucket は **`trade.exit_time` 一括帰属** (= entry/exit が異なる
 bucket でも exit bucket に全 cost を寄せる、 詳細設計 §3.4.1 SSOT).
 
-### apply_spread_stress (T064 申し送り解消)
+### apply_spread_stress (T064 申し送り解消、 T078 で alpha_factory 経路も完成)
 
 T064 で `NotImplementedError` で skeleton 化されていた `apply_spread_stress` を
-T070 で正式実装 (`src/backtest/session_block.py`):
+T070 で broker 経路 (Decimal、 `src/backtest/session_block.py`)、 T078 で
+alpha_factory 経路 (float、 `src/alpha_factory/stage_bc_evaluator.py`) として
+両方正式実装. 用途分離 (= 型差を維持しつつ代数的に等価):
+
+#### broker 経路 (Decimal、 session_block.py)
 
 ```
 delta_spread     = trade.spread_cost * (multiplier - Decimal(1))
@@ -512,7 +516,23 @@ new_spread_cost  = trade.spread_cost * multiplier
 new_holding_cost = trade.holding_cost   # 不変 (stress は spread 専用)
 ```
 
-multiplier=1 で no-op、 multiplier < 1.0 / NaN / Infinite で `ValueError` raise.
+#### alpha_factory 経路 (float、 stage_bc_evaluator.py、 T078 で skeleton 削除)
+
+```
+delta_factor     = multiplier - 1.0
+new_pnl_net      = pnl_net - spread_cost * delta_factor
+new_spread_cost  = spread_cost * multiplier
+# holding_cost   不変 (stress は spread 専用)
+```
+
+両経路とも multiplier=1 で no-op、 multiplier < 1.0 / NaN / Infinite で `ValueError`.
+overflow 時は TradeRecord invariant (= finite + >= 0) で `TradeRecordInvalidError` raise.
+test 経路で代数的等価性を相対誤差 1e-9 以内で検証 (T078 [Suggestion] 2 反映).
+
+**Caller 配線注意 (T078 [Warning] 1 反映)**: spread_cost が全 trade で 0.0
+(= default、 trade 生成経路で伝搬未配線) の状態では multiplier > 1.0 でも stress
+効果ゼロ (silent no-op). caller (= run_ga.py / Stage C 評価) 側で trade 生成経路
+の spread_cost 伝搬を確立する責任あり (= 後続別 TODO).
 
 **契約境界** (詳細設計 §4.3): stress 出力 `Trade(stressed)` は `Trade.pnl +
 Trade.holding_cost = raw_pnl - delta_spread` の擬似 pnl となり、 通常会計の F13
