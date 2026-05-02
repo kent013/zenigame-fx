@@ -39,6 +39,7 @@ from src.alpha_factory.observability.run_metrics import (
     SessionEntropyMetric,
     SessionEntropyStatus,
     build_run_observability_report,
+    build_stub_run_observability_report,
     compute_ab_divergence_on_b_evaluated,
     compute_archive_churn,
     compute_bypass_ratio,
@@ -47,6 +48,7 @@ from src.alpha_factory.observability.run_metrics import (
     extract_inflow_consistency,
     extract_selection_metrics,
     recommend_q_force_adjust,
+    serialize_run_observability_report,
 )
 
 __all__ = [
@@ -77,6 +79,7 @@ __all__ = [
     "SessionEntropyMetric",
     "SessionEntropyStatus",
     "build_run_observability_report",
+    "build_stub_run_observability_report",
     "compute_ab_divergence_on_b_evaluated",
     "compute_archive_churn",
     "compute_bypass_ratio",
@@ -85,4 +88,5 @@ __all__ = [
     "extract_inflow_consistency",
     "extract_selection_metrics",
     "recommend_q_force_adjust",
+    "serialize_run_observability_report",
 ]

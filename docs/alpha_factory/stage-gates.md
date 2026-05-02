@@ -596,6 +596,8 @@ backward-compat: `default_factory=tuple` のため既存 caller (= session_block
 | `extract_inflow_consistency` | T067 share + T066 admission + caller 注入 (target share) |
 | `extract_failure_metrics` | T068 summary + caller 注入 (fingerprint top-N) |
 | `build_run_observability_report` | 集約 pure function |
+| `build_stub_run_observability_report` (T080a) | Phase 2 配線 first step、 9 metric を valid status / default 値で構築 (= 経路確立、 実値配線は T080b-g) |
+| `serialize_run_observability_report` (T080a) | RunObservabilityReport → JSON 文字列 (Decimal str 化、 Mapping/tuple/frozenset 変換) |
 
 ### 主要定数
 
@@ -656,10 +658,20 @@ backward-compat: `default_factory=tuple` のため既存 caller (= session_block
 
 - `scripts/alpha_factory/run_ga.py`: `build_run_observability_report` 呼び出し
   + 連続乖離 Run state file 保持 + log / report 出力
+  - **T080a (本 PR) 完了**: stub builder 経由で run 終了時に
+    `reports/run-reports/{run_id}/observability.json` 出力経路を確立。
+    9 metric は全て stub 値 (= valid status / default、 経路確認専用)。
+  - **T080b-g (後続別 TODO)**: 各 metric の実値配線:
+    - T080b: ABDivergenceMetric (cross-run history、 caller 計算)
+    - T080c: ArchiveChurnMetric / BypassRatioMetric (AdmissionReport 経路)
+    - T080d: SessionEntropyMetric / FeasibleRatioMetric (archive + StageAControllerState)
+    - T080e: SelectionMetric (GenerationSelectionResult 経路)
+    - T080f: InflowConsistencyMetric / FailureMetric (WarmstartReport / RunFailureSummary)
+    - T080g: QForceRecommendation (recommend_q_force_adjust + state file)
 - `src/alpha_factory/stage_a_evaluator.py` (T063): `q_force_recommendation` を
-  `StageAControllerState` 更新に配線
+  `StageAControllerState` 更新に配線 (= T080g スコープ)
 - `docs/alpha_factory/observability.md` 新設: RunObservabilityReport の
-  Markdown 表現 + 監視運用ガイド
+  Markdown 表現 + 監視運用ガイド (= 後続別 TODO)
 - run report Markdown 化: `RunObservabilityReport` を report.md に整形
 - T073 audit layer: DSR/PBO/SPA + `ab_divergence` を audit input
 - pop promotion (192→256) trigger: `front1_cardinality < 20` 連続 2 Run 検出 →

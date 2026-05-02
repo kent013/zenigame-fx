@@ -75,6 +75,10 @@ from src.alpha_factory.diagnostics_sidecar import (
     write_stage_a_provenance,
 )
 from src.alpha_factory.epoch_manager import EpochWindow, make_epoch_id
+from src.alpha_factory.observability import (
+    build_stub_run_observability_report,
+    serialize_run_observability_report,
+)
 from src.alpha_factory.parallel_eval import (
     GenomeEvaluator,
     LaneEvalContext,
@@ -1562,6 +1566,29 @@ def main(argv: list[str] | None = None) -> int:
             run_id=run_id,
             reason="--no-report",
             note="reports/run-reports/ was not touched (archive + cache only)",
+        )
+
+    # T080a Phase 2 配線 first step: RunObservabilityReport (stub) を JSON 出力
+    # 後続別 TODO (T080b-g) で各 metric を実値配線に置換予定. stub builder は
+    # caller 配線経路を確立するための first step として機能 (= 経路があることを
+    # 先に保証し、 実値は段階的に差し替える).
+    # --no-report 時は reports/ ディレクトリを触らない契約と整合 (skip).
+    if not args.no_report:
+        observability_report = build_stub_run_observability_report(
+            run_id=run_id,
+            dataset_epoch_id=run_context.dataset_epoch_id,
+            generation_count=cfg.ga.generations,
+        )
+        observability_path = run_dir / "observability.json"
+        observability_path.write_text(
+            serialize_run_observability_report(observability_report),
+            encoding="utf-8",
+        )
+        logger.info(
+            "ga.observability.stub_written",
+            run_id=run_id,
+            path=str(observability_path),
+            note="T080a stub (実値配線は T080b-g 後続別 TODO)",
         )
 
     # T058 PR 5: run cache JSON に dataset_epoch_id を伝搬 (詳細設計 行 1379-1381)

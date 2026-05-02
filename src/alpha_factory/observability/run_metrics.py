@@ -58,12 +58,13 @@ Phase 2 申し送り:
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from decimal import Decimal
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 from src.alpha_factory.cpps_archive import AdmissionReport
 from src.alpha_factory.failure_handling import (
@@ -1124,4 +1125,185 @@ def build_run_observability_report(
         selection=selection,
         inflow_consistency=inflow_consistency,
         failure=failure,
+    )
+
+
+# ============================================================================
+# T080a: Stub builder for Phase 2 配線 first step
+# ============================================================================
+
+
+def build_stub_run_observability_report(
+    *,
+    run_id: str,
+    dataset_epoch_id: str,
+    generation_count: int,
+) -> RunObservabilityReport:
+    """T080a Phase 2 配線 first step: 9 metric を stub 値で構築する.
+
+    後続別 TODO (T080b-g) で各 metric を実値配線に置換予定. 本 stub builder は
+    run_ga.py から ``build_run_observability_report`` を呼び出して
+    ``RunObservabilityReport`` を JSON 出力する経路を確立するための first step
+    として機能する (= 経路があることを先に保証し、 実値は段階的に差し替える).
+
+    各 stub 値は status enum / Literal type の **valid な** "insufficient_data" /
+    "insufficient_runs" / "insufficient_window" / "empty_archive" / 0 default を
+    使用 (= dataclass __post_init__ invariant 全 PASS).
+
+    後続別 TODO 担当範囲 (= handoff 申し送り):
+        - T080b: ABDivergenceMetric 実値配線 (cross-run history、 caller 計算)
+        - T080c: ArchiveChurnMetric / BypassRatioMetric 実値配線 (AdmissionReport)
+        - T080d: SessionEntropyMetric / FeasibleRatioMetric 実値配線
+        - T080e: SelectionMetric 実値配線 (GenerationSelectionResult)
+        - T080f: InflowConsistencyMetric / FailureMetric 実値配線
+        - T080g: QForceRecommendation 実値配線 (recommend_q_force_adjust)
+
+    Args:
+        run_id: 1 Run identifier (non-empty str).
+        dataset_epoch_id: epoch identifier (non-empty str).
+        generation_count: GA 世代数 (>=0).
+
+    Returns:
+        :class:`RunObservabilityReport` (全 metric stub 値).
+    """
+    return build_run_observability_report(
+        run_id=run_id,
+        dataset_epoch_id=dataset_epoch_id,
+        generation_count=generation_count,
+        ab_divergence=ABDivergenceMetric(
+            status="insufficient_data",
+            corr=Decimal(0),
+            n_pairs=0,
+        ),
+        q_force_recommendation=QForceRecommendation(
+            new_q_force=Q_FORCE_MIN,
+            delta=Decimal(0),
+            reason="insufficient_data",
+            clamped_at_max=False,
+            clamped_at_min=False,
+            consecutive_divergent_runs=0,
+        ),
+        archive_churn=ArchiveChurnMetric(
+            status="insufficient_runs",
+            churn_rate=Decimal(0),
+            n_total_admissions=0,
+            n_total_evictions=0,
+            n_runs_used=1,
+        ),
+        bypass_ratio=BypassRatioMetric(
+            bypass_ratio=Decimal(0),
+            n_admitted_by_role={
+                ARCHIVE_ROLE_MISSION_PASS: 0,
+                ARCHIVE_ROLE_PROGRESS_PASS: 0,
+                ARCHIVE_ROLE_SCORE_BYPASS: 0,
+            },
+            n_total_admissions=0,
+        ),
+        session_entropy=SessionEntropyMetric(
+            status="empty_archive",
+            shannon_entropy=Decimal(0),
+            relative_entropy=Decimal(0),
+            n_unique_patterns=0,
+            n_archive_members=0,
+            n_runs_aggregated=0,
+        ),
+        feasible_ratio=FeasibleRatioMetric(
+            feasible_ratio_ema=Decimal(0),
+            fsm_state="push",
+            n_feasible_individuals=0,
+            n_total_individuals=0,
+        ),
+        selection=SelectionMetric(
+            front1_cardinality=0,
+            feasible_ratio=Decimal(0),
+            mean_constraint_violation=Decimal(0),
+            generation=0,
+        ),
+        inflow_consistency=InflowConsistencyMetric(
+            warmstart_share_target=Decimal(0),
+            warmstart_share_actual=Decimal(0),
+            share_drift=Decimal(0),
+            within_tolerance=True,
+            relaxation_steps_count=0,
+            per_source_run_violations=0,
+            ca_inflow_actual=0,
+            da_inflow_actual=0,
+            bypass_inflow_actual=0,
+            inflow_summary_by_role={},
+        ),
+        failure=FailureMetric(
+            run_id=run_id,
+            run_aborted=False,
+            per_stage=(),
+        ),
+    )
+
+
+# ============================================================================
+# T080a: JSON serialization for RunObservabilityReport
+# ============================================================================
+
+
+def _convert_for_json_key(key: Any) -> str:
+    """JSON object key 用の str 化 (Round 1 [Warning] 1 反映).
+
+    JSON object key は str 必須のため、 Decimal / int / Enum 系は str() 化.
+    """
+    if isinstance(key, str):
+        return key
+    if isinstance(key, (int, float, bool, Decimal)):
+        return str(key)
+    return repr(key)
+
+
+def _convert_for_json(obj: Any) -> Any:
+    """Decimal / Mapping / tuple / frozenset を JSON-friendly に再帰変換.
+
+    asdict() は dataclass を dict に / tuple を list に / Mapping を dict に
+    変換するが、 Decimal はそのまま残るため本 helper で str 化.
+
+    Round 1 [Warning] 反映:
+        - dict キーも再帰変換 (= Decimal/int/Enum キー対応、 JSON object key
+          str 必須制約準拠)
+        - frozenset 混在型は str() 比較で sort fallback (= TypeError 回避)
+    """
+    if isinstance(obj, Decimal):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {
+            _convert_for_json_key(k): _convert_for_json(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_convert_for_json(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [_convert_for_json(v) for v in obj]
+    if isinstance(obj, frozenset):
+        converted = [_convert_for_json(v) for v in obj]
+        try:
+            return sorted(converted)
+        except TypeError:
+            # 比較不能な混在型 → str 化して sort fallback (Round 1 [Warning] 2)
+            return sorted(converted, key=str)
+    return obj
+
+
+def serialize_run_observability_report(
+    report: RunObservabilityReport,
+) -> str:
+    """T080a: ``RunObservabilityReport`` を JSON 文字列に serialize する.
+
+    asdict() で再帰 dict 化 → ``_convert_for_json`` で Decimal を str 化 →
+    ``json.dumps`` で encode (ensure_ascii=False / indent=2).
+
+    Args:
+        report: 1 Run の集約 :class:`RunObservabilityReport`.
+
+    Returns:
+        JSON 文字列 (UTF-8、 indent=2).
+    """
+    return json.dumps(
+        _convert_for_json(asdict(report)),
+        ensure_ascii=False,
+        indent=2,
     )

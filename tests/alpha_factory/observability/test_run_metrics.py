@@ -45,6 +45,7 @@ from src.alpha_factory.observability.run_metrics import (
     SelectionMetric,
     SessionEntropyMetric,
     build_run_observability_report,
+    build_stub_run_observability_report,
     compute_ab_divergence_on_b_evaluated,
     compute_archive_churn,
     compute_bypass_ratio,
@@ -53,6 +54,7 @@ from src.alpha_factory.observability.run_metrics import (
     extract_inflow_consistency,
     extract_selection_metrics,
     recommend_q_force_adjust,
+    serialize_run_observability_report,
 )
 
 # ============================================================================
@@ -976,3 +978,342 @@ class TestModuleConstants:
 
     def test_warmstart_tolerance(self) -> None:
         assert Decimal("0.01") == WARMSTART_SHARE_TOLERANCE
+
+
+# ============================================================================
+# T080a: Stub builder + JSON serialization tests
+# ============================================================================
+
+
+class TestStubRunObservabilityReportBuilder:
+    """T080a build_stub_run_observability_report unit tests.
+
+    stub builder は run_ga.py から build_run_observability_report 呼出経路を
+    確立するための first step. 後続別 TODO (T080b-g) で各 metric を実値配線に
+    置換予定. 本 test は stub 値の妥当性 (= dataclass invariant 全 PASS) と
+    field 値の期待を検証する.
+    """
+
+    def test_stub_report_constructs_with_valid_inputs(self) -> None:
+        report = build_stub_run_observability_report(
+            run_id="test-run-001",
+            dataset_epoch_id="AUDJPY-2024-Q1-Q2",
+            generation_count=64,
+        )
+        assert report.run_id == "test-run-001"
+        assert report.dataset_epoch_id == "AUDJPY-2024-Q1-Q2"
+        assert report.generation_count == 64
+
+    def test_stub_ab_divergence_status_is_insufficient_data(self) -> None:
+        report = build_stub_run_observability_report(
+            run_id="r", dataset_epoch_id="e", generation_count=0
+        )
+        assert report.ab_divergence.status == "insufficient_data"
+        assert report.ab_divergence.corr == Decimal(0)
+        assert report.ab_divergence.n_pairs == 0
+
+    def test_stub_q_force_recommendation_at_min(self) -> None:
+        report = build_stub_run_observability_report(
+            run_id="r", dataset_epoch_id="e", generation_count=0
+        )
+        assert report.q_force_recommendation.new_q_force == Q_FORCE_MIN
+        assert report.q_force_recommendation.delta == Decimal(0)
+        assert report.q_force_recommendation.reason == "insufficient_data"
+
+    def test_stub_archive_churn_status_is_insufficient_runs(self) -> None:
+        report = build_stub_run_observability_report(
+            run_id="r", dataset_epoch_id="e", generation_count=0
+        )
+        assert report.archive_churn.status == "insufficient_runs"
+        assert report.archive_churn.n_runs_used == 1
+        assert report.archive_churn.n_total_admissions == 0
+        assert report.archive_churn.n_total_evictions == 0
+
+    def test_stub_bypass_ratio_zero(self) -> None:
+        report = build_stub_run_observability_report(
+            run_id="r", dataset_epoch_id="e", generation_count=0
+        )
+        assert report.bypass_ratio.bypass_ratio == Decimal(0)
+        assert report.bypass_ratio.n_total_admissions == 0
+        assert report.bypass_ratio.n_admitted_by_role == {
+            "mission_pass": 0,
+            "progress_pass": 0,
+            "score_bypass": 0,
+        }
+
+    def test_stub_session_entropy_status_is_empty_archive(self) -> None:
+        report = build_stub_run_observability_report(
+            run_id="r", dataset_epoch_id="e", generation_count=0
+        )
+        assert report.session_entropy.status == "empty_archive"
+        assert report.session_entropy.shannon_entropy == Decimal(0)
+        assert report.session_entropy.n_archive_members == 0
+
+    def test_stub_feasible_ratio_default_push(self) -> None:
+        report = build_stub_run_observability_report(
+            run_id="r", dataset_epoch_id="e", generation_count=0
+        )
+        assert report.feasible_ratio.fsm_state == "push"
+        assert report.feasible_ratio.feasible_ratio_ema == Decimal(0)
+        assert report.feasible_ratio.n_feasible_individuals == 0
+        assert report.feasible_ratio.n_total_individuals == 0
+
+    def test_stub_selection_zero_front1(self) -> None:
+        report = build_stub_run_observability_report(
+            run_id="r", dataset_epoch_id="e", generation_count=0
+        )
+        assert report.selection.front1_cardinality == 0
+        assert report.selection.feasible_ratio == Decimal(0)
+        assert report.selection.mean_constraint_violation == Decimal(0)
+        assert report.selection.generation == 0
+
+    def test_stub_inflow_consistency_within_tolerance(self) -> None:
+        report = build_stub_run_observability_report(
+            run_id="r", dataset_epoch_id="e", generation_count=0
+        )
+        assert report.inflow_consistency.warmstart_share_target == Decimal(0)
+        assert report.inflow_consistency.warmstart_share_actual == Decimal(0)
+        assert report.inflow_consistency.share_drift == Decimal(0)
+        assert report.inflow_consistency.within_tolerance is True
+        assert report.inflow_consistency.relaxation_steps_count == 0
+        assert report.inflow_consistency.ca_inflow_actual == 0
+        assert report.inflow_consistency.da_inflow_actual == 0
+        assert report.inflow_consistency.bypass_inflow_actual == 0
+
+    def test_stub_failure_run_not_aborted(self) -> None:
+        report = build_stub_run_observability_report(
+            run_id="r", dataset_epoch_id="e", generation_count=0
+        )
+        assert report.failure.run_id == "r"
+        assert report.failure.run_aborted is False
+        assert report.failure.per_stage == ()
+
+    def test_stub_run_id_propagates_to_failure_metric(self) -> None:
+        report = build_stub_run_observability_report(
+            run_id="propagated-id", dataset_epoch_id="e", generation_count=0
+        )
+        assert report.failure.run_id == "propagated-id"
+
+    def test_stub_rejects_empty_run_id(self) -> None:
+        with pytest.raises(ValueError, match="run_id"):
+            build_stub_run_observability_report(
+                run_id="", dataset_epoch_id="e", generation_count=0
+            )
+
+    def test_stub_rejects_empty_dataset_epoch_id(self) -> None:
+        with pytest.raises(ValueError, match="dataset_epoch_id"):
+            build_stub_run_observability_report(
+                run_id="r", dataset_epoch_id="", generation_count=0
+            )
+
+    def test_stub_rejects_negative_generation_count(self) -> None:
+        with pytest.raises(ValueError, match="generation_count"):
+            build_stub_run_observability_report(
+                run_id="r", dataset_epoch_id="e", generation_count=-1
+            )
+
+
+class TestSerializeRunObservabilityReport:
+    """T080a serialize_run_observability_report unit tests."""
+
+    def test_serialize_outputs_valid_json(self) -> None:
+        import json
+
+        report = build_stub_run_observability_report(
+            run_id="r1", dataset_epoch_id="ep1", generation_count=10
+        )
+        js = serialize_run_observability_report(report)
+        parsed = json.loads(js)
+        assert parsed["run_id"] == "r1"
+        assert parsed["dataset_epoch_id"] == "ep1"
+        assert parsed["generation_count"] == 10
+
+    def test_serialize_decimal_to_str(self) -> None:
+        import json
+
+        report = build_stub_run_observability_report(
+            run_id="r", dataset_epoch_id="e", generation_count=0
+        )
+        js = serialize_run_observability_report(report)
+        parsed = json.loads(js)
+        # Decimal field は str 化されている
+        assert isinstance(parsed["ab_divergence"]["corr"], str)
+        assert isinstance(parsed["q_force_recommendation"]["new_q_force"], str)
+        assert parsed["q_force_recommendation"]["new_q_force"] == "0.15"
+        # int / bool は そのまま
+        assert isinstance(parsed["generation_count"], int)
+        assert isinstance(
+            parsed["q_force_recommendation"]["clamped_at_max"], bool
+        )
+
+    def test_serialize_tuple_to_list(self) -> None:
+        import json
+
+        report = build_stub_run_observability_report(
+            run_id="r", dataset_epoch_id="e", generation_count=0
+        )
+        js = serialize_run_observability_report(report)
+        parsed = json.loads(js)
+        # FailureMetric.per_stage は tuple → list 化される
+        assert isinstance(parsed["failure"]["per_stage"], list)
+        assert parsed["failure"]["per_stage"] == []
+
+    def test_serialize_mapping_to_dict(self) -> None:
+        import json
+
+        report = build_stub_run_observability_report(
+            run_id="r", dataset_epoch_id="e", generation_count=0
+        )
+        js = serialize_run_observability_report(report)
+        parsed = json.loads(js)
+        # BypassRatioMetric.n_admitted_by_role は Mapping → dict 化
+        assert isinstance(parsed["bypass_ratio"]["n_admitted_by_role"], dict)
+        assert parsed["bypass_ratio"]["n_admitted_by_role"]["mission_pass"] == 0
+
+    def test_serialize_indent_2(self) -> None:
+        report = build_stub_run_observability_report(
+            run_id="r", dataset_epoch_id="e", generation_count=0
+        )
+        js = serialize_run_observability_report(report)
+        # indent=2 の確認 (= 行頭スペース)
+        assert "  " in js  # 2-space indent
+        assert "\n" in js  # 改行あり
+
+    def test_serialize_dict_with_decimal_keys(self) -> None:
+        """Round 1 [Warning] 1 反映: dict キーが Decimal でも str 化される."""
+        import json
+
+        from src.alpha_factory.observability.run_metrics import (
+            _convert_for_json,
+        )
+
+        # Decimal key を含む dict (= 直接 _convert_for_json)
+        result = _convert_for_json({Decimal("0.30"): "low", Decimal("0.50"): "high"})
+        assert isinstance(result, dict)
+        # キーが str 化されている
+        assert "0.30" in result
+        assert "0.50" in result
+        # JSON 化可能
+        json.dumps(result)
+
+    def test_serialize_dict_with_int_keys(self) -> None:
+        """Round 1 [Warning] 1 反映: int キーも str 化."""
+        import json
+
+        from src.alpha_factory.observability.run_metrics import (
+            _convert_for_json,
+        )
+
+        result = _convert_for_json({1: "a", 2: "b"})
+        assert "1" in result
+        assert "2" in result
+        json.dumps(result)
+
+    def test_serialize_frozenset_mixed_types_no_typeerror(self) -> None:
+        """Round 1 [Warning] 2 反映: frozenset 比較不能混在型でも sort fallback."""
+        import json
+
+        from src.alpha_factory.observability.run_metrics import (
+            _convert_for_json,
+        )
+
+        # str と int の混在 frozenset (= sorted で TypeError 出る境界)
+        result = _convert_for_json(frozenset({1, "a", 2, "b"}))
+        assert isinstance(result, list)
+        assert len(result) == 4
+        # str fallback で順序保証 (= 全要素が str() で比較可能)
+        json.dumps(result)
+
+    def test_serialize_frozenset_homogeneous_int_sorted(self) -> None:
+        """frozenset 同型は sort される."""
+        from src.alpha_factory.observability.run_metrics import (
+            _convert_for_json,
+        )
+
+        result = _convert_for_json(frozenset({3, 1, 2}))
+        assert result == [1, 2, 3]
+
+    def test_serialize_full_real_metrics_roundtrip(self) -> None:
+        """実値 metric (= stub ではない正式構築) でも serialize 可能."""
+        import json
+
+        # 実値 metric を直接構築 (= stub ではなく test 経路)
+        report = build_run_observability_report(
+            run_id="real-run",
+            dataset_epoch_id="real-ep",
+            generation_count=32,
+            ab_divergence=ABDivergenceMetric(
+                status="ok",
+                corr=Decimal("0.45"),
+                n_pairs=15,
+            ),
+            q_force_recommendation=QForceRecommendation(
+                new_q_force=Decimal("0.20"),
+                delta=Decimal("0.05"),
+                reason="raise",
+                clamped_at_max=False,
+                clamped_at_min=False,
+                consecutive_divergent_runs=2,
+            ),
+            archive_churn=ArchiveChurnMetric(
+                status="ok",
+                churn_rate=Decimal("0.30"),
+                n_total_admissions=100,
+                n_total_evictions=30,
+                n_runs_used=3,
+            ),
+            bypass_ratio=BypassRatioMetric(
+                bypass_ratio=Decimal("0.20"),
+                n_admitted_by_role={
+                    "mission_pass": 5,
+                    "progress_pass": 3,
+                    "score_bypass": 2,
+                },
+                n_total_admissions=10,
+            ),
+            session_entropy=SessionEntropyMetric(
+                status="ok",
+                shannon_entropy=Decimal("2.5"),
+                relative_entropy=Decimal("0.83"),
+                n_unique_patterns=6,
+                n_archive_members=120,
+                n_runs_aggregated=7,
+            ),
+            feasible_ratio=FeasibleRatioMetric(
+                feasible_ratio_ema=Decimal("0.45"),
+                fsm_state="pull",
+                n_feasible_individuals=86,
+                n_total_individuals=192,
+            ),
+            selection=SelectionMetric(
+                front1_cardinality=12,
+                feasible_ratio=Decimal("0.45"),
+                mean_constraint_violation=Decimal("0.10"),
+                generation=64,
+            ),
+            inflow_consistency=InflowConsistencyMetric(
+                warmstart_share_target=Decimal("0.20"),
+                warmstart_share_actual=Decimal("0.21"),
+                share_drift=Decimal("0.01"),
+                within_tolerance=True,
+                relaxation_steps_count=2,
+                per_source_run_violations=0,
+                ca_inflow_actual=10,
+                da_inflow_actual=0,
+                bypass_inflow_actual=2,
+                inflow_summary_by_role={"mission_pass": 5, "progress_pass": 3},
+            ),
+            failure=FailureMetric(
+                run_id="real-run",
+                run_aborted=False,
+                per_stage=(),
+            ),
+        )
+        js = serialize_run_observability_report(report)
+        parsed = json.loads(js)
+        assert parsed["run_id"] == "real-run"
+        assert parsed["ab_divergence"]["status"] == "ok"
+        assert parsed["ab_divergence"]["corr"] == "0.45"
+        assert parsed["q_force_recommendation"]["reason"] == "raise"
+        assert parsed["bypass_ratio"]["bypass_ratio"] == "0.20"
+        assert parsed["selection"]["front1_cardinality"] == 12
