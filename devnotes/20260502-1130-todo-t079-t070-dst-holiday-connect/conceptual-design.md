@@ -51,6 +51,30 @@ DST 期間で tokyo/london/ny の UTC bucket を ±1h シフト。 利点: イ�
 
 ---
 
+## 2026-05-02 22:50 JST 追記: 現状調査結果 → option A (既実装) 採用 → T079 close
+
+T079 の現状調査 (`grep -nE "compute_observability_flags|observability_flags|BLOCK_BUCKET_RANGES_UTC"`) で以下が判明:
+
+1. `src/backtest/calendar.py` L510 `compute_observability_flags(business_date, calendars)` で **DST 検出 (= `is_dst_transition`) + holiday 検出 (= `is_market_holiday`) を統合計算** + ObservabilityFlags 返却
+2. `src/backtest/calendar.py` L531 `compute_bucket_open_minutes(business_date, bucket, broker_schedule)` で **broker_schedule × BLOCK_BUCKET_RANGES_UTC overlap で open_minutes 計算** (= 部分開市場日の bar 数調整)
+3. `src/backtest/session_block.py` L142 SessionBlock dataclass で **observability_flags field を保持** + `aggregate_session_blocks` で集計時に格納
+4. tests/backtest/test_calendar.py で **observability_flags 関連 14 件カバー済**
+
+= **option A (= BLOCK_BUCKET_RANGES_UTC 固定 + DST/holiday は observability_flags + open_minutes 別レイヤー) は既に実装完了済**。
+
+### option B/C 不採用判断
+
+- **option B (BLOCK_BUCKET_RANGES_UTC dynamic shift)**: partition contract (= 24h covering / bucket non-overlap) が崩れる + caller 全件確認必要、 大規模改造。 効果は「DST 期間で tokyo/london/ny の bucket boundary が UTC 上で ±1h ずれる」 表現だけで、 これは observability_flags でも flag 化済 → 実害なし
+- **option C (別 adjustment table)**: 抽象度上昇のみで効果薄、 既存 observability_flags 経路で十分
+
+### 結論
+
+**T079 は実装変更不要として close**。 「BLOCK_BUCKET_RANGES_UTC への DST 例外連携」 = 既に observability_flags + open_minutes で別レイヤー実装済 (= T072 で完了)、 handoff の申し送り解釈が「BLOCK_BUCKET_RANGES_UTC 自体の改造」 と過剰だった。 cascade port v2 follow-up としては option A 採用 + 既実装で完結。
+
+将来的に DST 期間の精度問題が定量観測されたら、 別 TODO として再検討 (= Conditional 候補、 ただし優先度低)。
+
+---
+
 ## 期待効果 (option 確定後)
 
 - **イントラデイ評価の DST 期間精度向上** (= 該当する場合)

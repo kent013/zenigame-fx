@@ -82,6 +82,7 @@
 | T080 | T071 caller 注入式 Phase 2 配線 | infrastructure | High | 2026-05-02 22:06 | - |
 | T078 | T064 apply_spread_stress 重複解消 + TradeRecord schema 拡張 | ga-architecture | High | 2026-05-02 22:40 | - |
 | T077 | T058 docstring 改訂 + applied_from_run_id v2 必須化 | infrastructure | Medium | 2026-05-02 23:17 | - |
+| T079 | T070 DST/holiday → BLOCK_BUCKET_RANGES_UTC 連携完成 | infrastructure | Medium | 2026-05-02 23:21 | - |
 
 ## Obsoleted
 
