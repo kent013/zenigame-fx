@@ -1,9 +1,9 @@
-# Selection Cascade Port — Session Handoff (T076 完了 ✨🎉、 残 Phase 2 切替コミット のみ)
+# Selection Cascade Port — Session Handoff (T076 完了 ✨🎉 + cascade port v2 follow-up 4 件 TODO 化)
 
-**作成日時**: 2026-05-02 11:26 JST
-**Session**: T076 (synthesis Round 22 改訂) を 1 PR で完了 → cascade port v2 設計 + Phase 2 配線 + synthesis Round 22 SSOT 同期 **全完了**
+**作成日時**: 2026-05-02 11:26 JST、 **更新**: 2026-05-02 13:35 JST (= follow-up 4 件 TODO 登録追記)
+**Session**: T076 (synthesis Round 22 改訂) 完了 + cascade port v2 follow-up 4 件 (T077-T080) を skeleton design + TODO 登録
 **前セッション**: cascade port v2 Phase 2 配線 18/18 完了 (`devnotes/20260502-0710-cascade-port-v2-phase2-complete-handoff/handoff.md`)
-**次セッション**: **Phase 2 切替コミット 着手** (= 旧実装削除 + LOG_ONLY → FAIL_CLOSED + dual-path 並走解消、 別 PR 別 commit、 cascade port v2 完全完了の最終段)
+**次セッション**: **follow-up 4 件 (T077-T080) を順次実装 → Phase 2 切替コミット → smoke 5 Run / 実 GA 動作確認**
 
 ---
 
@@ -109,7 +109,35 @@ cascade port v2 で既に確立済の 15 設計規範 + 13 実装フロー規範
 
 ---
 
-## 4. 次セッション着手フロー (= Phase 2 切替コミット、 cascade port v2 完全完了の最終段)
+## 3.5 cascade port v2 follow-up 4 件 (= 2026-05-02 13:35 追記、 TODO 登録済)
+
+T076 完了後、 「実際に GA を fail-closed で動かすため」 の follow-up を再精査した結果、 handoff § 6 残作業のうち以下 4 件は **TODO 登録 + 個別実装** が必要 (= 当初「軽量」 と判断したが、 schema 変更や caller 影響範囲が広いため):
+
+| TODO | タイトル | 設計 | 優先度 | 規模 |
+|---|---|---|---|---|
+| **T077** | T058 docstring 改訂 + applied_from_run_id v2 必須化 | `devnotes/20260502-1130-todo-t077-t058-history-record-required/` | Medium | 中 (= type 変更 + caller 整合確認) |
+| **T078** | T064 apply_spread_stress 重複解消 + TradeRecord schema 拡張 | `devnotes/20260502-1130-todo-t078-t064-spread-stress-import/` | **High** | 重 (= TradeRecord に spread_cost field 追加 + adapter) |
+| **T079** | T070 DST/holiday → BLOCK_BUCKET_RANGES_UTC 連携完成 | `devnotes/20260502-1130-todo-t079-t070-dst-holiday-connect/` | Medium | 中 (= option A/B/C 議論先行) |
+| **T080** | T071 caller 注入式 Phase 2 配線 (= run_ga.py から build_run_observability_report 呼出追加) | `devnotes/20260502-1130-todo-t080-t071-caller-injection/` | **High** | 中 (= run_ga.py 改造 + caller-supplied 値収集) |
+
+設計 doc は **skeleton 状態** (= 後続セッションで `zenigame-fx-alpha-design` skill で Codex review し本格化 → `zenigame-fx-implement` で実装)。
+
+**SessionBlock mode 必須化** (= handoff § 6 残作業 7) は実は既に実装済 (= `aggregate_session_blocks_production` wrapper 新設済)。 残るは `engine.py:205` で `mode="test"` を production wrapper 置換、 これは **Phase 2 切替コミット (B) 内で実施**。
+
+### 推奨実装順 (= 高優先 → smoke 通過に必要 → Phase 2 切替に必要)
+
+1. **T080** (= run_ga.py 配線、 smoke の DoD 観測 SSOT 取得経路確立)
+2. **T078** (= TradeRecord schema 拡張、 Stage C spread stress 評価可能化)
+3. **T077** (= HistoryRecord v2 必須化、 fail-closed 強化)
+4. **T079** (= DST/holiday 連携、 Phase 2 切替前は option A 現状維持で OK)
+5. **B Phase 2 切替コミット** (= 旧実装削除 + LOG_ONLY → FAIL_CLOSED + dual-path 並走解消、 SessionBlock production wrapper 置換含む)
+6. **smoke 5 Run / 実 GA 動作確認**
+
+T077-T080 の各 TODO は **独立した 1 worktree / 1 PR** で実装するのが推奨 (= cascade port v2 同型運用)。 ただし軽い T077 + 中規模 T080 を 1 セッションで併用可能性あり。
+
+---
+
+## 4. 次セッション着手フロー (= follow-up 実装 → Phase 2 切替コミット)
 
 ### 4.1 Phase 2 切替コミットの内容 (= 単発 cleanup commit、 別 TODO 不要)
 
@@ -137,9 +165,17 @@ T076 完了で synthesis Round 22 SSOT 確定 → 切替条件が設計側で参
 
 ### 4.2 次セッションの最初の指示テンプレート
 
-#### Phase 2 切替コミット 着手 (推奨次着手)
+#### follow-up T080 着手 (= 推奨次着手、 smoke の DoD 観測 SSOT 取得経路確立)
 
-> 引き継ぎは `devnotes/20260502-1126-cascade-port-v2-T076-complete-handoff/handoff.md` 読んで。 cascade port v2 完全完了の最終段、 Phase 2 切替コミットを着手。 § 4.1 の F-1 dual-path 解消 / F-2 LOG_ONLY → FAIL_CLOSED 切替 / F-3 旧実装削除 を 1 commit で実施。 synthesis § 12.1 / § 12.2 の削除対象 31 件の存在確認 + T075 `DUAL_PATH_ENFORCE_TARGETS` test を fail_closed で実行 + smoke 5 Run 連続検証 通過確認。 PR タイトル `chore: cascade port v2 Phase 2 切替コミット (旧実装削除 + LOG_ONLY → FAIL_CLOSED + dual-path 並走解消)`。
+> 引き継ぎは `devnotes/20260502-1126-cascade-port-v2-T076-complete-handoff/handoff.md` 読んで。 cascade port v2 follow-up T080 (T071 caller 注入式 Phase 2 配線) を skeleton 設計 (`devnotes/20260502-1130-todo-t080-t071-caller-injection/`) から本格化して実装。 zenigame-fx-alpha-design skill で Codex review → APPROVED → zenigame-fx-implement で worktree todo/T080 → main merge。 完了後、 T078 / T077 / T079 を順次同様に実装。 全 follow-up 完了後、 Phase 2 切替コミットへ。
+
+#### follow-up T078 着手 (= Stage C spread stress 評価可能化)
+
+> 引き継ぎは `devnotes/20260502-1126-cascade-port-v2-T076-complete-handoff/handoff.md` 読んで。 follow-up T078 (T064 apply_spread_stress 重複解消 + TradeRecord schema 拡張) を skeleton 設計 (`devnotes/20260502-1130-todo-t078-t064-spread-stress-import/`) から本格化して実装。 TradeRecord に spread_cost / holding_cost field 追加 + stage_bc_evaluator.py の skeleton 削除 + trade 生成経路で伝搬配線 + 既存 caller 整合確認。
+
+#### Phase 2 切替コミット 着手 (= follow-up 全完了後)
+
+> 引き継ぎは `devnotes/20260502-1126-cascade-port-v2-T076-complete-handoff/handoff.md` 読んで。 follow-up T077-T080 全完了後、 cascade port v2 完全完了の最終段、 Phase 2 切替コミットを着手。 § 4.1 の F-1 dual-path 解消 / F-2 LOG_ONLY → FAIL_CLOSED 切替 / F-3 旧実装削除 を 1 commit で実施。 PR タイトル `chore: cascade port v2 Phase 2 切替コミット (旧実装削除 + LOG_ONLY → FAIL_CLOSED + dual-path 並走解消)`。
 
 #### 数値 threshold 確定 別 TODO 着手 (= 切替コミット後)
 
