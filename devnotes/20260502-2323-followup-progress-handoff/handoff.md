@@ -1,6 +1,6 @@
 # Cascade Port v2 Follow-up — Session Handoff (T077-T080 完了 ✨ + 残 T081 / T082 + B + GA)
 
-**作成日時**: 2026-05-02 23:23 JST
+**作成日時**: 2026-05-02 23:23 JST、 **更新**: 2026-05-02 23:35 JST (= impl-review devnotes 追補 + commit 一覧更新)
 **Session**: cascade port v2 follow-up 4 件 (T077-T080) のうち T080 / T078 / T077 / T079 完了 + T081 / T082 を skeleton design + Open 登録
 **前セッション**: T076 synthesis Round 22 改訂 完了 (`devnotes/20260502-1126-cascade-port-v2-T076-complete-handoff/handoff.md`)
 **次セッション**: **T081 → T082 → Phase 2 切替コミット → smoke 5 Run / 実 GA 動作確認**
@@ -140,9 +140,11 @@ Codex review: Round 1 CHANGES_REQUESTED ([Warning] 1 = defense-in-depth) → Rou
 
 ---
 
-## 5. 累積 commit 一覧 (本セッション、 直近 7 件)
+## 5. 累積 commit 一覧 (本セッション、 直近 13 件 = 2026-05-02 23:35 更新)
 
 ```
+b5e9abf docs(devnotes): T077 / T078 / T080 Codex impl-review log を補足追加 (handoff 27b8056 補完)
+27b8056 docs(handoff): T077-T080 完了 + T081 / T082 残実装の引き継ぎ handoff (本 handoff 自身)
 b347c68 docs(T079): close (Open→Closed) — option A 採用 (= 既実装)
 4c13b02 Merge branch 'todo/T077'
 eee05cb docs(TODO): T077 close (Open→Closed)
@@ -156,7 +158,14 @@ de9b7d7 feat(T080a PR1): T071 caller stub builder + JSON 出力経路確立
 fe997de docs(handoff): T076 完了 handoff
 ```
 
-本セッション commit 計 11 個 (= T080 3 + T078 3 + T077 3 + T079 1 + handoff 1)。 cascade port v2 全体 commit 累計 50+ 個。
+本セッション commit 計 13 個 (= T080 3 + T078 3 + T077 3 + T079 1 + handoff 2 + devnotes 補完 1)。 cascade port v2 全体 commit 累計 50+ 個。
+
+### 5.1 補足資料: Codex impl-review log
+
+- T080 (commit `de9b7d7`): `devnotes/20260502-2105-todo-T080/impl-review-round-1.md` (= APPROVED + Warning 3 件のうち 2 件取込)
+- T078 (commit `857eb82`): `devnotes/20260502-2213-todo-T078/impl-review-round-{1,2}.md` (= INCONCLUSIVE → APPROVED)
+- T077 (commit `c137e09`): `devnotes/20260502-2246-todo-T077/impl-review-round-{1,2}.md` (= CHANGES_REQUESTED → APPROVED + Suggestion 取込)
+- T079 (commit `b347c68`): worktree なし (= 現状調査だけで close、 review log なし)
 
 ---
 
