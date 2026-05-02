@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -21,6 +22,10 @@ from src.alpha_factory.schema_contract import (
     SchemaEnforcementMode,
 )
 
+# T077: helper の applied_from_run_id 引数の sentinel (= 省略時 vs 明示 None / ""
+# を区別).
+_UNSET: Any = object()
+
 
 def _record(
     *,
@@ -35,7 +40,12 @@ def _record(
     clamped_floor_or_ceiling: bool = False,
     var_fitness_pen: float | None = 0.01,
     dataset_epoch_id: str = "epoch_legacy",
+    applied_from_run_id: str | None | object = _UNSET,
 ) -> HistoryRecord:
+    # T077: applied_from_run_id v2 必須化対応. sentinel _UNSET で「省略時は
+    # run_id を使用、 明示的に None / "" を渡された場合はそのまま」 を実現
+    # (= invariant 検証 test で None / "" を直接渡せる).
+    afri: Any = run_id if applied_from_run_id is _UNSET else applied_from_run_id
     return HistoryRecord(
         run_id=run_id,
         applied_at="2026-04-26T00:00:00+09:00",
@@ -57,6 +67,7 @@ def _record(
         stage_c_pass_count=0,
         live_criteria_gap={"sharpe": 0.3, "total_pnl": 0.0},
         dataset_epoch_id=dataset_epoch_id,
+        applied_from_run_id=afri,
     )
 
 
@@ -281,7 +292,47 @@ class TestHistoryRecordV2Contract:
                 live_criteria_gap={},
                 calibrate_history_schema_version=1,  # 不正
                 dataset_epoch_id="epoch_legacy",
+                applied_from_run_id="run_test",  # T077: v2 必須
             )
+
+    # T077: applied_from_run_id v2 必須化テスト
+    def test_history_record_rejects_empty_applied_from_run_id(self) -> None:
+        """T077 必須化: applied_from_run_id 空文字 reject."""
+        with pytest.raises(ValueError, match="applied_from_run_id"):
+            _record(applied_from_run_id="")
+
+    def test_history_record_rejects_none_applied_from_run_id(self) -> None:
+        """T077 必須化: applied_from_run_id None reject (= mypy も検出するが
+        runtime invariant でも防御)."""
+        with pytest.raises(ValueError, match="applied_from_run_id"):
+            HistoryRecord(
+                run_id="run_test",
+                applied_at="2026-04-26T00:00:00+09:00",
+                n_rows_total=10,
+                n_rows_used=10,
+                aggregation_mode="last_k_generations",
+                aggregation_window=5,
+                actual_pass_rate=0.15,
+                target_pass_rate=0.15,
+                tol=0.05,
+                prev_threshold=0.0,
+                new_threshold=0.0,
+                delta=0.0,
+                decision="in_band",
+                var_fitness_pen=None,
+                clamped_by_delta=False,
+                clamped_by_floor_or_ceiling=False,
+                stage_b_pass_count=0,
+                stage_c_pass_count=0,
+                live_criteria_gap={},
+                dataset_epoch_id="epoch_legacy",
+                applied_from_run_id=None,  # type: ignore[arg-type]
+            )
+
+    def test_history_record_accepts_valid_applied_from_run_id(self) -> None:
+        """T077 必須化: 非空文字 str は OK."""
+        r = _record(applied_from_run_id="run_42")
+        assert r.applied_from_run_id == "run_42"
 
     def test_append_record_writes_v2_fields_to_jsonl(
         self, tmp_path: Path

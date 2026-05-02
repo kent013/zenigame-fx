@@ -39,8 +39,13 @@ def _make_record(
     PR 条件: T058 PR が先行 merge されていることが前提
     (schema_version=2 + calibrate_history_schema_version=2 を固定で使用)。
     """
+    # T077: applied_from_run_id 必須化対応. run_id None / "" でも HistoryRecord
+    # の applied_from_run_id は非空文字 str に default で埋める (= helper の
+    # 既存 caller を壊さない). null / empty を test したい時は kwargs で
+    # 明示的に applied_from_run_id=None / "" を override する.
+    run_id_resolved = run_id or "run_unspecified"
     defaults: dict[str, Any] = dict(
-        run_id=run_id or "run_unspecified",
+        run_id=run_id_resolved,
         applied_at="2026-04-30T10:00:00+00:00",
         n_rows_total=100,
         n_rows_used=80,
@@ -66,7 +71,8 @@ def _make_record(
         dataset_span=["2024-01-01", "2026-04-21"],
         instrument="eur_usd",
         stage_gate_version="v0.1.0",
-        applied_from_run_id=run_id,
+        # T077: 必須化、 run_id 同等 (helper 簡素化、 test override は kwargs)
+        applied_from_run_id=run_id_resolved,
         # T058 で v2 必須化される field 群
         dataset_epoch_id=epoch_id,
         # calibrate_history_schema_version は HistoryRecord default で v2 固定
@@ -234,50 +240,71 @@ class TestEvaluateFreezeStatusCounting:
         assert result.epoch_distinct_run_count == 2
         assert result.is_frozen is True
 
-    def test_F15a_null_run_id_record_excluded_with_warning(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # F15a: applied_from_run_id None は count 除外、 warning 出力
-        # structlog の出力は stdout (PrintLogger / ConsoleRenderer) に行くため
-        # capsys で確認する (= 既存 codebase の structlog 設定に合わせる)。
-        records = [
-            _make_record(epoch_id="ep1", run_id="run_001"),
-            _make_record(epoch_id="ep1", run_id=None),  # None
-        ]
-        result = evaluate_freeze_status(
-            records=records, dataset_epoch_id="ep1"
-        )
-        assert result.epoch_distinct_run_count == 1
-        # warning log の存在確認 (structlog 経由 stdout / stderr)
-        captured = capsys.readouterr()
-        combined = captured.out + captured.err
-        assert "calibrate_freeze.invalid_run_id" in combined
-        assert "n_records_with_null_run_id=1" in combined
-        assert "n_records_with_empty_run_id=0" in combined
+    # T077: F15a / F15b は applied_from_run_id 必須化により不要 (= type level
+    # で防がれる、 HistoryRecord 構築時に ValueError raise). hot-fix 経路削除に
+    # 対応する新仕様 test に置換.
+    def test_T077_null_applied_from_run_id_rejected_at_construction(self) -> None:
+        """T077 必須化: HistoryRecord 構築時に applied_from_run_id None reject."""
+        with pytest.raises(ValueError, match="applied_from_run_id"):
+            _make_record(
+                epoch_id="ep1",
+                run_id="run_002",
+                applied_from_run_id=None,  # type: ignore[arg-type]
+            )
 
-    def test_F15b_empty_run_id_record_excluded_with_warning(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # F15b: 空文字 run_id も除外 + warning (Round 1 [W2] 反映)
-        records = [
-            _make_record(epoch_id="ep1", run_id="run_001"),
-            # 空文字: applied_from_run_id を直接 "" に書き換える
-            # (run_id 自体は埋める = HistoryRecord 構築時の defaults を経由)
+    def test_T077_empty_applied_from_run_id_rejected_at_construction(self) -> None:
+        """T077 必須化: HistoryRecord 構築時に applied_from_run_id 空文字 reject."""
+        with pytest.raises(ValueError, match="applied_from_run_id"):
             _make_record(
                 epoch_id="ep1",
                 run_id="run_002",
                 applied_from_run_id="",
-            ),
-        ]
-        result = evaluate_freeze_status(
-            records=records, dataset_epoch_id="ep1"
+            )
+
+    def test_T077_defense_in_depth_evaluate_freeze_rejects_bypass_object(
+        self,
+    ) -> None:
+        """T077 Round 2 [Suggestion]: HistoryRecord.__post_init__ を bypass した
+        不正オブジェクト (= dataclasses.replace + object.__setattr__ 等で
+        applied_from_run_id を None / "" に書き換え) が evaluate_freeze_status
+        に入った場合、 defense-in-depth で ValueError raise されることを検証.
+
+        簡易再現: 通常 HistoryRecord 1 件 + 「applied_from_run_id が None」 を
+        持つ模擬 record を namespace で構築 (= 不正混入 simulate). Round 1
+        [Warning] hot-fix 削除後の silent miscount 防止経路を保証.
+        """
+        from types import SimpleNamespace
+
+        valid_record = _make_record(epoch_id="ep1", run_id="run_001")
+        # 不正混入 simulate (= HistoryRecord 構築を bypass、 applied_from_run_id が None)
+        invalid_record = SimpleNamespace(
+            applied_from_run_id=None,
+            dataset_epoch_id="ep1",
         )
-        assert result.epoch_distinct_run_count == 1
-        captured = capsys.readouterr()
-        combined = captured.out + captured.err
-        assert "calibrate_freeze.invalid_run_id" in combined
-        assert "n_records_with_empty_run_id=1" in combined
-        assert "n_records_with_null_run_id=0" in combined
+        with pytest.raises(ValueError, match="invalid applied_from_run_id"):
+            evaluate_freeze_status(
+                records=[valid_record, invalid_record],  # type: ignore[list-item]
+                dataset_epoch_id="ep1",
+            )
+
+    def test_T077_defense_in_depth_evaluate_freeze_rejects_empty_string(
+        self,
+    ) -> None:
+        """T077 Round 2 [Suggestion]: 空文字 applied_from_run_id も defense-in-depth
+        で reject されることを検証 (= None と空文字の両方を fail-fast).
+        """
+        from types import SimpleNamespace
+
+        valid_record = _make_record(epoch_id="ep1", run_id="run_001")
+        invalid_empty = SimpleNamespace(
+            applied_from_run_id="",
+            dataset_epoch_id="ep1",
+        )
+        with pytest.raises(ValueError, match="invalid applied_from_run_id"):
+            evaluate_freeze_status(
+                records=[valid_record, invalid_empty],  # type: ignore[list-item]
+                dataset_epoch_id="ep1",
+            )
 
     def test_custom_freeze_window(self) -> None:
         # custom freeze_window=5

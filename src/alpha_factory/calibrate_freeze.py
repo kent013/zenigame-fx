@@ -62,7 +62,8 @@ class FreezeStatus:
     Attributes:
         is_frozen: epoch 内 distinct run count が freeze_window 未満なら True.
         epoch_distinct_run_count: 現 dataset_epoch_id にマッチした
-            distinct ``applied_from_run_id`` 数 (None / 空文字 record は除外).
+            distinct ``applied_from_run_id`` 数 (T077 で必須化により None /
+            空文字 record は HistoryRecord.__post_init__ で type level reject).
         freeze_window: 凍結窓サイズ (synthesis § 8.6 で 3 確定).
         next_run_index_in_epoch: 現 Run が epoch 内で何 Run 目になるか
             (1-indexed, = ``epoch_distinct_run_count + 1``).
@@ -150,31 +151,22 @@ def evaluate_freeze_status(
         r for r in records if r.dataset_epoch_id == dataset_epoch_id
     ]
 
-    # distinct Run count (Round 1 [C2] 反映、 detailed Round 1 [W2] で空文字も除外)
-    # Round 2 [W1] 反映: null と empty を別カウンタに分離して運用時の異常分類を明確化
-    null_run_id_count = 0
-    empty_run_id_count = 0
+    # distinct Run count (T077 で applied_from_run_id 必須化、 None / 空文字
+    # の hot-fix 経路を削除. HistoryRecord.__post_init__ で type level fail-fast
+    # するため、 ここに到達する record は applied_from_run_id が必ず非空文字 str.
+    # ただし defense-in-depth で再検証 (= Codex Round 1 [Warning] 反映、 不正生成
+    # オブジェクト混入時の silent miscount 防止).
     distinct_run_ids: set[str] = set()
     for r in matching_records:
-        if r.applied_from_run_id is None:
-            null_run_id_count += 1
-            continue
-        if not r.applied_from_run_id:  # 空文字 (anomalous)
-            empty_run_id_count += 1
-            continue
+        if not isinstance(r.applied_from_run_id, str) or not r.applied_from_run_id:
+            raise ValueError(
+                "calibrate_freeze.evaluate_freeze_status: HistoryRecord with "
+                "invalid applied_from_run_id encountered (T077 invariant "
+                f"violation, defense-in-depth reject): {r.applied_from_run_id!r}"
+            )
         distinct_run_ids.add(r.applied_from_run_id)
 
     epoch_distinct_run_count = len(distinct_run_ids)
-
-    # Round 2 [W1] 反映: v2 record で applied_from_run_id=None / 空文字は異常
-    # (T058 v2 schema で必須化を申し送り済、 ただし defense-in-depth で log)
-    if null_run_id_count > 0 or empty_run_id_count > 0:
-        logger.warning(
-            "calibrate_freeze.invalid_run_id",
-            dataset_epoch_id=dataset_epoch_id,
-            n_records_with_null_run_id=null_run_id_count,
-            n_records_with_empty_run_id=empty_run_id_count,
-        )
 
     is_frozen = epoch_distinct_run_count < freeze_window
 

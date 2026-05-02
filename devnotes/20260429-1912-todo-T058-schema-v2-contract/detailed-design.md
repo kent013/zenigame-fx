@@ -927,7 +927,12 @@ class HistoryRecord:
     dataset_span: list[str] | None = None
     instrument: str | None = None
     stage_gate_version: str | None = None
-    applied_from_run_id: str | None = None
+    # T077 (cascade port v2 follow-up): v2 必須化 (None / 空文字 reject).
+    # 旧 Round 21 までは Optional (= str | None = None) で hot-fix 経路 (calibrate_freeze.py
+    # L155-177) で None / 空文字 record を skip + WARN 出力していたが、 T077 で type
+    # 制約を厳密化 + __post_init__ invariant で fail-fast に統一. cross-run contamination
+    # guard 用メタデータの確実性を type level で保証.
+    applied_from_run_id: str = ""  # T077 v2 必須 (空文字は __post_init__ で reject)
 
     def __post_init__(self) -> None:
         # T058: v2 必須検証
