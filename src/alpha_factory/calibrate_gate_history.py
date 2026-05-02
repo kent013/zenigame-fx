@@ -94,10 +94,18 @@ class HistoryRecord:
     dataset_span: list[str] | None = None  # [start, end] の string 2-tuple
     instrument: str | None = None
     stage_gate_version: str | None = None
-    applied_from_run_id: str | None = None
+    # T077 (cascade port v2 follow-up): v2 必須 (None 不可、 空文字 不可).
+    # Round 21 までは Optional だったが Round 22 → 実装で必須化に統一.
+    # 既存 v1 record (= dataset_epoch_id 不在) は from_dict_or_none で早期 None
+    # return されるため本 type 制約は v2 record のみに適用.
+    applied_from_run_id: str = ""
 
     def __post_init__(self) -> None:
-        """T058 v2 必須検証: schema_version 一致 + dataset_epoch_id grammar."""
+        """T058 v2 必須検証: schema_version 一致 + dataset_epoch_id grammar.
+
+        T077 追加: applied_from_run_id 必須化 (= 空文字 / None 不可、 v2 record で
+        cross-run contamination guard が機能するための前提条件).
+        """
         if (
             self.calibrate_history_schema_version
             != CALIBRATE_HISTORY_SCHEMA_VERSION
@@ -109,6 +117,18 @@ class HistoryRecord:
             )
         # validate_epoch_id は SchemaContractError (= ValueError 派生) を raise
         validate_epoch_id(self.dataset_epoch_id)
+        # T077: applied_from_run_id 必須化 (= None / 空文字 reject、
+        # cross-run contamination guard 用メタデータ確実性確保).
+        if not isinstance(self.applied_from_run_id, str):
+            raise ValueError(
+                "HistoryRecord.applied_from_run_id must be non-empty str "
+                f"(T077 v2 必須化), got type {type(self.applied_from_run_id).__name__}"
+            )
+        if not self.applied_from_run_id:
+            raise ValueError(
+                "HistoryRecord.applied_from_run_id must be non-empty str "
+                "(T077 v2 必須化、 空文字 / None reject)"
+            )
 
     @classmethod
     def from_dict_or_none(cls, obj: Mapping[str, Any]) -> HistoryRecord | None:

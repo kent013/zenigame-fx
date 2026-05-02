@@ -331,6 +331,7 @@ def test_end_to_end_writes_v2_calibrate_history_with_dataset_epoch_id(
         stage_c_pass_count=1,
         live_criteria_gap={"sharpe": 0.0, "total_pnl": 0.0},
         dataset_epoch_id="epoch_2026_q1",
+        applied_from_run_id="run_t058_pr7_calibrate",  # T077: v2 必須
     )
 
     append_record(record, history_path)
