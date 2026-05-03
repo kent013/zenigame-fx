@@ -1527,3 +1527,372 @@ def test_stage_b_per_fold_canonical_skipped_path_includes_fold_kwarg(
         assert re.search(r"fold=\d+", line) is not None, (
             f"B_fold canonical_skipped line must include fold=: {line}"
         )
+
+
+# ============================================================================
+# B Phase 2 切替コミット step 1.7: Stage C stress dual-path
+# (= 詳細設計 § 6、 8 ケース追加。 設計参照:
+#  devnotes/20260503-2319-B-phase2-step1.7-stage-c-stress-dual-path/detailed-design.md)
+# ============================================================================
+
+
+# --- 8 ケース ---
+
+
+def test_stage_c_stress_canonical_dual_path_log_only_preserves_legacy_payload() -> None:
+    """LOG_ONLY mode と disabled mode で Stage C の StageResult 全体が完全一致
+    (= regression 0、 acceptance A1。 stress dual-path 配線追加で
+    stress_payload / reasons / cross_pair / live_criteria_pass 全件不変)."""
+    from src.alpha_factory.stage_gate import evaluate_stage_c
+    from tests._helpers import usd_jpy_meta
+    from tests.alpha_factory.test_stage_gate import (
+        _backtest_config,
+        _make_continuous_bars,
+        _one_clause_genome,
+    )
+    from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+    bars = _make_continuous_bars(2, bars_per_day=4)
+    ev = ConstantPrimitiveEvaluator(value=0.0)
+    cfg = _backtest_config()
+    log_only_cfg = StageGateConfig(phase2_canonical_metrics_mode="log_only")
+    disabled_cfg = StageGateConfig(phase2_canonical_metrics_mode="disabled")
+    res_log = evaluate_stage_c(
+        _one_clause_genome("g_c_stress_legacy_unchanged"), bars, usd_jpy_meta(),
+        cfg, ev, log_only_cfg,
+    )
+    res_dis = evaluate_stage_c(
+        _one_clause_genome("g_c_stress_legacy_unchanged"), bars, usd_jpy_meta(),
+        cfg, ev, disabled_cfg,
+    )
+    assert res_log.passed == res_dis.passed
+    assert res_log.reason_codes == res_dis.reason_codes
+    assert res_log.stage == res_dis.stage
+    payload_log = dict(res_log.metrics["payload"])  # type: ignore[arg-type]
+    payload_dis = dict(res_dis.metrics["payload"])  # type: ignore[arg-type]
+    assert set(payload_log.keys()) == set(payload_dis.keys())
+    for key in payload_log:
+        assert payload_log[key] == payload_dis[key], (
+            f"Stage C stress payload[{key}] differs"
+        )
+
+
+def test_stage_c_stress_canonical_log_isolation_when_canonical_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`_try_evaluate_canonical_five_safe` が `stage_label='C_stress'` のときだけ
+    raise しても stress_payload / reasons は完全不変、 かつ `stage_c.stress_failure`
+    が **非出力** (= D2 反証、 Codex impl-review Round 1 [Critical] 反映)。
+    """
+    from src.alpha_factory import stage_gate as sg
+    from src.alpha_factory.stage_gate import evaluate_stage_c
+    from tests._helpers import usd_jpy_meta
+    from tests.alpha_factory.test_stage_gate import (
+        _backtest_config,
+        _make_continuous_bars,
+        _one_clause_genome,
+    )
+    from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+    original_helper = sg._try_evaluate_canonical_five_safe
+
+    def _conditional_raise(**kwargs):  # type: ignore[no-untyped-def]
+        if kwargs.get("stage_label") == "C_stress":
+            raise RuntimeError("simulated C_stress canonical failure")
+        return original_helper(**kwargs)
+
+    monkeypatch.setattr(sg, "_try_evaluate_canonical_five_safe", _conditional_raise)
+    bars = _make_continuous_bars(2, bars_per_day=4)
+    ev = ConstantPrimitiveEvaluator(value=0.0)
+    res_with_raise = evaluate_stage_c(
+        _one_clause_genome("g_c_stress_canonical_fail"), bars, usd_jpy_meta(),
+        _backtest_config(), ev, StageGateConfig(),
+    )
+    captured_with_raise = capsys.readouterr()
+    monkeypatch.setattr(sg, "_try_evaluate_canonical_five_safe", original_helper)
+    res_disabled = evaluate_stage_c(
+        _one_clause_genome("g_c_stress_canonical_fail"), bars, usd_jpy_meta(),
+        _backtest_config(), ev,
+        StageGateConfig(phase2_canonical_metrics_mode="disabled"),
+    )
+    # passed / reason_codes / payload / n_bars 完全一致 (= wall_time_seconds 除外、 D1/D3)
+    assert res_with_raise.passed == res_disabled.passed
+    assert res_with_raise.reason_codes == res_disabled.reason_codes
+    assert res_with_raise.metrics["n_bars"] == res_disabled.metrics["n_bars"]
+    payload_raise = dict(res_with_raise.metrics["payload"])  # type: ignore[arg-type]
+    payload_dis = dict(res_disabled.metrics["payload"])  # type: ignore[arg-type]
+    assert set(payload_raise.keys()) == set(payload_dis.keys())
+    for key in payload_raise:
+        assert payload_raise[key] == payload_dis[key], (
+            f"C_stress canonical raise: payload[{key}] differs"
+        )
+    # D2 反証: dual-path 例外で stage_c.stress_failure が誤って emit されないこと
+    combined = captured_with_raise.out + captured_with_raise.err
+    assert "stage_c.stress_failure" not in combined, (
+        "D2 violation: dual-path canonical raise must not trigger stage_c.stress_failure"
+    )
+    # canonical 経路は unexpected_failure or log_failed の WARN のみ
+    assert (
+        "stage_gate.canonical_five.unexpected_failure" in combined
+        or "stage_gate.canonical_five.log_failed" in combined
+    )
+
+
+def test_stage_c_stress_canonical_log_helper_isolation_when_log_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`_log_canonical_dual_path` が `stage_label='C_stress'` のときだけ raise しても
+    stress_payload / reasons は完全不変、 かつ `stage_c.stress_failure` が
+    **非出力** (= D2 反証、 Codex impl-review Round 1 [Critical] 反映)。
+    """
+    from src.alpha_factory import stage_gate as sg
+    from src.alpha_factory.stage_gate import evaluate_stage_c
+    from tests._helpers import usd_jpy_meta
+    from tests.alpha_factory.test_stage_gate import (
+        _backtest_config,
+        _make_continuous_bars,
+        _one_clause_genome,
+    )
+    from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+    original_log = sg._log_canonical_dual_path
+
+    def _conditional_log_raise(**kwargs):  # type: ignore[no-untyped-def]
+        if kwargs.get("stage_label") == "C_stress":
+            raise RuntimeError("simulated C_stress logger failure")
+        return original_log(**kwargs)
+
+    monkeypatch.setattr(sg, "_log_canonical_dual_path", _conditional_log_raise)
+    bars = _make_continuous_bars(2, bars_per_day=4)
+    ev = ConstantPrimitiveEvaluator(value=0.0)
+    res_with_raise = evaluate_stage_c(
+        _one_clause_genome("g_c_stress_log_fail"), bars, usd_jpy_meta(),
+        _backtest_config(), ev, StageGateConfig(),
+    )
+    captured_with_raise = capsys.readouterr()
+    monkeypatch.setattr(sg, "_log_canonical_dual_path", original_log)
+    res_disabled = evaluate_stage_c(
+        _one_clause_genome("g_c_stress_log_fail"), bars, usd_jpy_meta(),
+        _backtest_config(), ev,
+        StageGateConfig(phase2_canonical_metrics_mode="disabled"),
+    )
+    # legacy 不変 (= D1)
+    assert res_with_raise.passed == res_disabled.passed
+    assert res_with_raise.reason_codes == res_disabled.reason_codes
+    assert res_with_raise.metrics["n_bars"] == res_disabled.metrics["n_bars"]
+    payload_raise = dict(res_with_raise.metrics["payload"])  # type: ignore[arg-type]
+    payload_dis = dict(res_disabled.metrics["payload"])  # type: ignore[arg-type]
+    assert set(payload_raise.keys()) == set(payload_dis.keys())
+    for key in payload_raise:
+        assert payload_raise[key] == payload_dis[key], (
+            f"C_stress log helper raise: payload[{key}] differs"
+        )
+    # D2 反証
+    combined = captured_with_raise.out + captured_with_raise.err
+    assert "stage_c.stress_failure" not in combined, (
+        "D2 violation: log helper raise must not trigger stage_c.stress_failure"
+    )
+    assert "stage_gate.canonical_five.log_failed" in combined
+
+
+def test_stage_c_stress_canonical_disabled_mode_emits_skipped_log(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """phase2_canonical_metrics_mode='disabled' で stress 成功時に
+    `stage='C_stress'` + `canonical_skipped=True` の dual_path log entry が
+    1 entry / genome emit され、 `fold=` kwarg は含まれない
+    (= C5 disabled path、 step 1.6 B_fold と同型)."""
+    from src.alpha_factory.stage_gate import evaluate_stage_c
+    from tests._helpers import usd_jpy_meta
+    from tests.alpha_factory.test_stage_gate import (
+        _backtest_config,
+        _make_continuous_bars,
+        _one_clause_genome,
+    )
+    from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+    bars = _make_continuous_bars(2, bars_per_day=4)
+    ev = ConstantPrimitiveEvaluator(value=0.0)
+    res = evaluate_stage_c(
+        _one_clause_genome("g_c_stress_disabled"), bars, usd_jpy_meta(),
+        _backtest_config(), ev,
+        StageGateConfig(phase2_canonical_metrics_mode="disabled"),
+    )
+    assert res.stage == "C"
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    c_stress_lines = [
+        line for line in combined.splitlines()
+        if "stage_gate.canonical_five.dual_path" in line and "stage=C_stress" in line
+    ]
+    # disabled mode でも stress 成功なら 1 entry / genome
+    assert len(c_stress_lines) == 1
+    # canonical_skipped=True を含む
+    assert "canonical_skipped=True" in c_stress_lines[0]
+    # fold= kwarg は含まれない (= 識別子契約 C4)
+    assert "fold=" not in c_stress_lines[0]
+
+
+def test_stage_c_stress_canonical_succeeds_for_60d_holdout(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stage C stress dual-path log entry が `stage='C_stress'` で 1 entry / genome 出力、
+    必須 kwargs (= genome / interpretation_note / canonical_* / legacy_*、 fold 不在)
+    含有 (= acceptance B1, C1-C4)."""
+    from src.alpha_factory.stage_gate import evaluate_stage_c
+    from tests._helpers import usd_jpy_meta
+    from tests.alpha_factory.test_stage_gate import (
+        _backtest_config,
+        _make_continuous_bars,
+        _one_clause_genome,
+    )
+    from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+    bars = _make_continuous_bars(2, bars_per_day=4)
+    ev = ConstantPrimitiveEvaluator(value=0.0)
+    res = evaluate_stage_c(
+        _one_clause_genome("g_c_stress_log_check"), bars, usd_jpy_meta(),
+        _backtest_config(), ev, StageGateConfig(),
+    )
+    assert res.stage == "C"
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    c_stress_lines = [
+        line for line in combined.splitlines()
+        if "stage_gate.canonical_five.dual_path" in line and "stage=C_stress" in line
+    ]
+    assert len(c_stress_lines) == 1
+    line = c_stress_lines[0]
+    assert "genome=g_c_stress_log_check" in line
+    assert "interpretation_note=direction_monitoring_only" in line
+    assert "canonical_trade_count=" in line
+    assert "legacy_trade_count=" in line
+    # C4: C_stress 識別子契約 (= fold key 不在)
+    assert "fold=" not in line
+
+
+def test_stage_c_stress_canonical_skipped_when_max_spread_bps_is_none(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """backtest_config.max_spread_bps is None のとき、
+    `stage='C_stress'` の dual_path event と canonical_five.skipped event が
+    両者 0 件 (= acceptance C5)."""
+    from dataclasses import replace as dc_replace
+
+    from src.alpha_factory.stage_gate import evaluate_stage_c
+    from tests._helpers import usd_jpy_meta
+    from tests.alpha_factory.test_stage_gate import (
+        _backtest_config,
+        _make_continuous_bars,
+        _one_clause_genome,
+    )
+    from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+    bars = _make_continuous_bars(2, bars_per_day=4)
+    ev = ConstantPrimitiveEvaluator(value=0.0)
+    cfg = dc_replace(_backtest_config(), max_spread_bps=None)
+    res = evaluate_stage_c(
+        _one_clause_genome("g_c_stress_no_spread"), bars, usd_jpy_meta(),
+        cfg, ev, StageGateConfig(),
+    )
+    assert res.stage == "C"
+    # spread_stress_skipped reason は legacy 経路で出る
+    assert "spread_stress_skipped" in res.reason_codes
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    c_stress_lines = [
+        line for line in combined.splitlines()
+        if "stage=C_stress" in line
+    ]
+    # dual_path / canonical_five.skipped event 両者 0 件
+    assert len(c_stress_lines) == 0
+
+
+def test_stage_c_stress_canonical_skipped_when_stress_backtest_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """stress backtest が例外発生 → `stage_c.stress_failure` WARN 後、
+    `stage='C_stress'` の event は 0 件 (= acceptance C5)。
+
+    Codex Round 1 [Warning] 反映: call count 依存を廃止し、
+    `max_spread_bps` 値で stress 経路を同定 (= 将来の呼出追加に対する堅牢性)。"""
+    from decimal import Decimal as _Decimal
+
+    from src.alpha_factory import stage_gate as sg
+    from src.alpha_factory.stage_gate import evaluate_stage_c
+    from tests._helpers import usd_jpy_meta
+    from tests.alpha_factory.test_stage_gate import (
+        _backtest_config,
+        _make_continuous_bars,
+        _one_clause_genome,
+    )
+    from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+    original_run = sg.run_backtest
+    base_max_spread = _backtest_config().max_spread_bps
+    assert base_max_spread is not None, "fixture must have max_spread_bps set"
+    base_max_dec = _Decimal(str(base_max_spread))
+    multiplier = _Decimal(str(StageGateConfig().spread_stress_multiplier))
+    stress_max_dec = base_max_dec * multiplier  # stress 経路のみ一致する値
+
+    def _conditional_run(bars_in, strategy, broker, config):  # type: ignore[no-untyped-def]
+        # max_spread_bps が stress 値と一致するときだけ raise (= stress 経路同定)
+        if config.max_spread_bps is not None:
+            cur_dec = _Decimal(str(config.max_spread_bps))
+            if cur_dec == stress_max_dec:
+                raise RuntimeError("simulated stress backtest failure")
+        return original_run(bars_in, strategy, broker, config)
+
+    monkeypatch.setattr(sg, "run_backtest", _conditional_run)
+    bars = _make_continuous_bars(2, bars_per_day=4)
+    ev = ConstantPrimitiveEvaluator(value=0.0)
+    res = evaluate_stage_c(
+        _one_clause_genome("g_c_stress_raise"), bars, usd_jpy_meta(),
+        _backtest_config(), ev, StageGateConfig(),
+    )
+    assert res.stage == "C"
+    assert "spread_stress_skipped" in res.reason_codes
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    # stage_c.stress_failure WARN は出る (legacy)
+    assert "stage_c.stress_failure" in combined
+    # ただし C_stress dual-path event は 0 件
+    c_stress_lines = [
+        line for line in combined.splitlines()
+        if "stage=C_stress" in line and "stage_gate.canonical_five" in line
+    ]
+    assert len(c_stress_lines) == 0
+
+
+def test_stage_c_stress_canonical_golden_first_evaluation_succeeds() -> None:
+    """fixed seed × fixed fixture で C_stress canonical sidecar の主要 field が
+    deterministic な期待値と一致 (= acceptance A5、 Codex Round 1 [Suggestion] 反映)。
+
+    現 fixture (= 50 trades + bars_60d + flat equity = 1M JPY) で C_stress label
+    で base 同等 fixture を渡して deterministic 性のみ確認。
+    """
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    trades = []
+    for i in range(50):
+        entry = base + timedelta(days=i // 10, hours=11, minutes=30)
+        exit = base + timedelta(days=i // 10, hours=12, minutes=i % 10)
+        trades.append(_bt(pid=i, entry_time=entry, exit_time=exit))
+    bars = _make_bars_60d()
+    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    result = _try_evaluate_canonical_five_safe(
+        trades=trades, equity_curve=equity_curve, bars=bars,
+        live_criteria=_make_default_live_criteria(),
+        window_days=60,  # stage_c_holdout_days
+        stage_label="C_stress", genome_name="g_c_stress_golden",
+        enabled=True,
+    )
+    assert result is not None
+    assert result.trade_count == 50
+    assert result.net_pnl_after_cost == pytest.approx(5000.0, abs=1e-9)
+    assert result.max_dd == pytest.approx(0.0, abs=1e-9)
+    assert result.session_block_win_rate_worst == pytest.approx(0.5, abs=1e-9)
+    assert result.gate_pass is False  # sharpe_min=1.0 を満たさない
+    assert result.invariants.is_feasible is True
