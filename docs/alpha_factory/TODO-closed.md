@@ -85,6 +85,7 @@
 | T079 | T070 DST/holiday → BLOCK_BUCKET_RANGES_UTC 連携完成 | infrastructure | Medium | 2026-05-02 23:21 | - |
 | T081 | RunObservabilityReport 9 metric 実値配線 (T080 follow-up、 6 step 内包) | infrastructure | High | 2026-05-03 09:13 | - |
 | T083 | B-phase2-step1.5-stage-bc-dual-path | stage-gate | High | 2026-05-03 16:51 | - |
+| T084 | B-phase2-step1.6-stage-b-per-fold-dual-path | stage-gate | Medium | 2026-05-03 21:54 | - |
 
 ## Obsoleted
 
