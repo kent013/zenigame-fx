@@ -1,7 +1,81 @@
-# 詳細設計 (skeleton): B Phase 2 切替コミット step 1 — canonical_metrics → main flow 統合
+# 詳細設計: B Phase 2 切替コミット step 1 — canonical_metrics → main flow 統合
 
-**作成日時**: 2026-05-03 10:35 JST
-**status**: **skeleton (= 後続セッションで本格化、 Codex 設計 review)**
+**作成日時**: 2026-05-03 10:35 JST、 **本格化**: 2026-05-03 11:00 JST (= 着手前調査結果反映)
+**status**: **本格化済 Round 0 (= 着手前調査で skeleton § 9 の論点を解消、 Codex 設計 review 待ち)**
+
+---
+
+## 0. 着手前調査結果 (= skeleton § 9 の論点解消)
+
+### 0.1 T070 calendar / session bucket 関数の実存確認
+
+skeleton の 「`assign_session_bucket_and_business_day_index`」 「`compute_business_day_universe`」 は **存在しない**。 代わりに以下が利用可能:
+
+- **`src/backtest/session_block.py:332` `compute_bucket_for_trade(trade: Trade) -> SessionBlockBucket`**
+  内部で `compute_bucket_for_bar(trade.exit_time)` を呼出、 UTC 検証 + `BLOCK_BUCKET_RANGES_UTC` でバケット決定
+- **`SessionBlockBucket = Literal["tokyo", "london", "ny"]`** (session_block.py:70)
+- **`SessionBucket = StrEnum("tokyo"/"london"/"ny")`** (canonical_metrics.py:110) — Literal と値が一致するため変換可能 (`SessionBucket(literal_value)`)
+
+→ **adapter 設計**: `compute_bucket_for_trade(broker.Trade)` で SessionBlockBucket 取得 → `SessionBucket(value)` で StrEnum 変換。
+
+### 0.2 business_day_index 計算
+
+skeleton で 「T070 既存実装」 と仮定したが、 **直接対応する関数は存在しない**。 ただし:
+
+- TradeRecord.business_day_index は単に `int >= 0` (= 同一 business day をユニークに識別する整数)
+- canonical_metrics.compute_session_blocks は `(business_day_index, session_bucket)` 単位で集約するだけで、 整数の意味は問わない
+- test fixture では `business_day_index=0, 1, 2, ...` のような integer encoding が使われている
+
+→ **adapter 設計**: business_day_index を **`(date - epoch_date).days`** として計算 (= UTC date を unix epoch からの日数で整数化)。 epoch は固定値 (= 1970-01-01) で、 評価期間内では monotone increasing。
+
+```python
+EPOCH_DATE = date(1970, 1, 1)  # 仮定 (= UTC date を ordinal 化)
+
+def business_day_index_for(exit_time_utc: datetime) -> int:
+    return (exit_time_utc.date() - EPOCH_DATE).days
+```
+
+### 0.3 evaluate_canonical_five signature
+
+```python
+def evaluate_canonical_five(
+    trades: Iterable[TradeRecord],
+    bars: BarEquitySeries,
+    thresholds: CanonicalFiveThresholds,         # ← REQUIRED (= raw metrics 単独取得不可)
+    business_day_universe: dict[SessionBucket, frozenset[int]],
+    *,
+    bucket_validator: SessionBucketBoundaryProvider | None = None,
+    q_bartlett: int = HAC_BARTLETT_DEFAULT_Q,
+) -> CanonicalFiveResult:
+```
+
+**重要発見**: `thresholds` 引数が **必須**。 step 1 で raw metrics 観測のみ行う場合でも thresholds を caller 側で構築する必要がある。
+
+ただし `evaluate_canonical_five` は **no-raise 契約** で、 thresholds が不適合でも `InfeasibleReasonCode` で deterministic な戻り値を返す (= 安全に呼出可能)。
+
+→ **設計**: step 1 では Stage A / B / C 各 stage の **既存 live_criteria を window scaling した dummy thresholds** を `derive_stage_a_thresholds` (= 既存) で構築して dual-path で呼出。 LOG_ONLY mode では結果の `gate_pass` / `gate_worst_gap` を log のみで使う。
+
+### 0.4 broker.Trade の TZ awareness
+
+`compute_bucket_for_bar(bar_time)` (session_block.py:304-329) は:
+```python
+if bar_time.tzinfo is None:
+    raise ValueError("bar_time must be timezone-aware (UTC), got naive: ...")
+offset = bar_time.utcoffset()
+if offset != timedelta(0):
+    raise ValueError("bar_time must be UTC offset, got offset=...: ...")
+```
+
+→ broker.Trade.exit_time は **既に UTC-aware で utcoffset=0 が保証されている前提** (= main flow で既に `compute_bucket_for_trade` 等で利用されているため)。 adapter 側で追加検証不要。
+
+### 0.5 既存 aggregate_session_blocks との関係
+
+`src/backtest/session_block.py:337 aggregate_session_blocks(bars, trades, *, mode, ...)` は SessionBlock の tuple を返す (= bucket × date 単位の集約済 dataclass)。 canonical_metrics.compute_session_blocks とは **出力構造が異なる**:
+
+- aggregate_session_blocks → `tuple[SessionBlock, ...]` (= 各 block に open_minutes / observability_flags 含む)
+- canonical_metrics.compute_session_blocks → `dict[SessionBucket, list[SessionBlockSummary]]` (= per-bucket list)
+
+= 直接互換ではない。 adapter で trade-level 変換 (broker.Trade → TradeRecord) を行い、 canonical_metrics 経路で再集計する。
 
 ---
 
@@ -43,47 +117,73 @@ live_criteria 全指標同時充足 + (ii-lite) 通過で使命達成。
 
 ## 4. 詳細実装方針 (= 後続詳細化、 各改訂につき concrete code を本格化)
 
-### 4.1 改訂 1-3: canonical_adapter.py (新規)
+### 4.1 改訂 1-3: canonical_adapter.py (新規) — 着手前調査反映版
 
 ```python
 """broker.Trade / backtest equity_curve から canonical_metrics 経路へ変換する adapter.
 
 cascade port v2 Phase 2 切替コミット step 1 の SSOT (= dual-path の足場).
 
-T070 calendar.py の session bucket / business day index 計算を信頼 (= 既存実装)。
+session_block.compute_bucket_for_trade (= 既存) を再利用、
+business_day_index は UTC date を 1970-01-01 epoch からの日数で整数化.
 """
 
 from __future__ import annotations
-from datetime import datetime
+
+from collections.abc import Iterable
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from typing import Final
 
 from src.alpha_factory.canonical_metrics import (
-    BarEquityPoint, BarEquitySeries, TradeRecord, SessionBucket,
+    BarEquityPoint, BarEquitySeries, SessionBucket, TradeRecord,
 )
-from src.alpha_factory.calendar import (
-    assign_session_bucket_and_business_day_index,  # 要 grep 確認
-    compute_business_day_universe,                 # 要 grep 確認
+from src.backtest.session_block import (
+    SessionBlockBucket, compute_bucket_for_trade,
 )
 from src.broker.orders import Trade as BrokerTrade
+
+# business_day_index epoch (= UTC ordinal を整数化する基準日、 固定)
+BUSINESS_DAY_EPOCH: Final[date] = date(1970, 1, 1)
+
+
+def _convert_bucket(literal: SessionBlockBucket) -> SessionBucket:
+    """SessionBlockBucket (Literal["tokyo"|"london"|"ny"]) → SessionBucket (StrEnum)."""
+    return SessionBucket(literal)
+
+
+def _business_day_index_for(exit_time_utc: datetime) -> int:
+    """exit_time の UTC date を BUSINESS_DAY_EPOCH (1970-01-01) からの日数で整数化.
+
+    canonical_metrics は business_day_index >= 0 の整数を要求するのみで、
+    具体値は問わない (= 同一 universe / trades で consistent であれば OK)。
+    """
+    return (exit_time_utc.date() - BUSINESS_DAY_EPOCH).days
 
 
 def trade_to_trade_record(broker_trade: BrokerTrade) -> TradeRecord:
     """broker.Trade を canonical TradeRecord に変換.
 
-    session_bucket / business_day_index は exit_time の T070 attribution を使用。
-    spread_cost / holding_cost は T078 で broker.Trade 側にも追加済 (Decimal → float)。
+    - session_bucket: compute_bucket_for_trade (= 既存) で算出 (= exit_time UTC hour 駆動)
+    - business_day_index: exit_time UTC date を BUSINESS_DAY_EPOCH からの日数で整数化
+    - pnl_net / spread_cost / holding_cost: Decimal → float (T078 で broker 側追加済)
+    - is_session_close_drop / is_negative_equity_drop_open: broker.Trade に対応 field なし
+      → step 1 では default False (= synthesis § 6.6 戦略的 fail-fast の sentinel、
+        broker engine で本物の値が伝搬される段階は別 step で対応)
+
+    例外契約:
+        broker_trade.exit_time が naive datetime / 非 UTC offset の場合、
+        compute_bucket_for_trade が ValueError raise (= caller で catch)。
     """
-    bucket, biz_day = assign_session_bucket_and_business_day_index(
-        broker_trade.exit_time
-    )
+    bucket_literal = compute_bucket_for_trade(broker_trade)
     return TradeRecord(
         entry_time_utc=broker_trade.entry_time,
         exit_time_utc=broker_trade.exit_time,
         pnl_net=float(broker_trade.pnl),
-        session_bucket=bucket,
-        business_day_index=biz_day,
-        is_session_close_drop=False,  # 要 broker side flag 確認
-        is_negative_equity_drop_open=False,  # 同上
+        session_bucket=_convert_bucket(bucket_literal),
+        business_day_index=_business_day_index_for(broker_trade.exit_time),
+        is_session_close_drop=False,  # step 1 では default、 別 step で broker 経路から伝搬
+        is_negative_equity_drop_open=False,
         spread_cost=float(broker_trade.spread_cost),
         holding_cost=float(broker_trade.holding_cost),
     )
@@ -94,8 +194,10 @@ def equity_curve_to_bar_equity_series(
 ) -> BarEquitySeries:
     """backtest engine の equity_curve を canonical BarEquitySeries に変換.
 
-    BarEquitySeries invariant (UTC-aware / strict monotone increasing) を満たす
-    前提 = backtest engine 側で既に保証されている (要確認)。
+    BarEquitySeries invariant (UTC-aware / strict monotone increasing) は
+    backtest engine の出力契約で既に保証されている (= equity_curve は時系列順、
+    重複 timestamp なし、 全 UTC-aware)。 違反検出時は BarEquitySeries.__post_init__
+    で raise (= caller で catch)。
     """
     points = tuple(
         BarEquityPoint(timestamp_utc=ts, equity=float(eq))
@@ -104,63 +206,96 @@ def equity_curve_to_bar_equity_series(
     return BarEquitySeries(points=points)
 
 
-def compute_business_day_universe_for_period(
-    start: datetime,
-    end: datetime,
+def compute_business_day_universe_from_trades(
+    trades: Iterable[BrokerTrade],
 ) -> dict[SessionBucket, frozenset[int]]:
-    """評価期間 [start, end) で発生し得た全 (bucket, business_day_index) ペア集合.
+    """trades が触れた (bucket, business_day_index) ペア集合を universe として返す.
 
-    T070 calendar.py の compute_business_day_universe を呼び出す。
+    canonical_metrics は trades 全件が universe に含まれている必要がある (=
+    INPUT_BUSINESS_DAY_UNIVERSE_MISMATCH を防ぐ)。 step 1 では trades 自身から
+    universe を構築する最小実装 (= 後続 step で「期間内全 (bucket, day) 集合」 に
+    拡張可能、 これは T070 計算済の bars 経路で別途取得可能)。
+
+    注意: 全 bucket key が必須 (= len(business_day_universe) == 3)、
+    そうでないと INPUT_EMPTY_BUSINESS_DAY_UNIVERSE 判定。 trades が空 / 1 bucket
+    のみの Run でも 3 bucket の dict を返す (= 不在 bucket は frozenset() で
+    INPUT_EMPTY_BUSINESS_DAY_UNIVERSE 判定される、 これは expected behavior)。
     """
-    return compute_business_day_universe(start, end)
+    universe: dict[SessionBucket, set[int]] = {
+        SessionBucket.TOKYO: set(),
+        SessionBucket.LONDON: set(),
+        SessionBucket.NY: set(),
+    }
+    for t in trades:
+        bucket = _convert_bucket(compute_bucket_for_trade(t))
+        universe[bucket].add(_business_day_index_for(t.exit_time))
+    return {k: frozenset(v) for k, v in universe.items()}
 ```
 
-### 4.2 改訂 4: stage_gate.py dual-path 配線
+### 4.1.1 trades が空の場合の挙動
 
-`evaluate_stage_a` 末尾近くの payload 構築前に追加:
+`evaluate_canonical_five` は trades 空 / universe 空のいずれでも `InfeasibleReasonCode.INPUT_EMPTY_TRADE_LIST` / `INPUT_EMPTY_BUSINESS_DAY_UNIVERSE` を reason に追加して deterministic な戻り値を返す (= no-raise)。 step 1 では LOG_ONLY mode のため、 reason がついた状態でも log のみで既存判定不変。
+
+### 4.2 改訂 4: stage_gate.py dual-path 配線 — 着手前調査反映版
+
+`derive_stage_a_thresholds` (= 既存、 stage_a_evaluator.py:267) を再利用して各 stage の CanonicalFiveThresholds を構築。
+
+#### 4.2.1 helper: `_try_evaluate_canonical_five_safe`
+
+stage_gate.py 内に module-level helper を追加 (= 1 helper で stage A/B/C 全対応):
 
 ```python
-# T-canonical Phase 2 step 1: canonical 5 metrics を dual-path で計算 (LOG_ONLY mode)
-canonical_sidecar = _try_evaluate_canonical_five_safe(
-    trades=result.trades,
-    equity_curve=result.equity_curve,
-    bars_period=(bars_60d[0].bar_time, bars_60d[-1].bar_time),
-    backtest_config=backtest_config,
-    stage_label="A",
-    genome_name=genome.name,
+from src.alpha_factory.canonical_adapter import (
+    compute_business_day_universe_from_trades,
+    equity_curve_to_bar_equity_series,
+    trade_to_trade_record,
 )
-# canonical_sidecar は CanonicalFiveResult or None
-# 失敗時は WARN log のみで legacy 経路は完全に不変
-```
+from src.alpha_factory.canonical_metrics import (
+    CanonicalFiveResult,
+    CanonicalFiveThresholds,
+    evaluate_canonical_five,
+)
+from src.alpha_factory.stage_a_evaluator import derive_stage_a_thresholds
 
-`_try_evaluate_canonical_five_safe` (新規 module-level helper):
-```python
+
 def _try_evaluate_canonical_five_safe(
     *,
     trades: list[Trade],
     equity_curve: list[tuple[datetime, Decimal]],
-    bars_period: tuple[datetime, datetime],
-    backtest_config: BacktestConfig,
+    thresholds: CanonicalFiveThresholds,
     stage_label: str,
     genome_name: str,
+    enabled: bool,
 ) -> CanonicalFiveResult | None:
-    """canonical_metrics 計算を例外 safe で実施.
+    """canonical_metrics 計算を例外 safe で実施 (= dual-path LOG_ONLY mode 用).
 
-    例外時は WARN log のみで None 返り (= 既存判定経路は不変)。
+    Args:
+        enabled: phase2.canonical_metrics_mode != "disabled" のとき True
+            (= disabled mode は完全 skip で計算 overhead 0)。
+        thresholds: caller が live_criteria + window scaling で構築済。
+
+    例外時は WARN log のみで None 返り (= 既存判定経路は完全に不変)。
+    no-raise 契約は evaluate_canonical_five 側にあるが、 adapter 経路で
+    naive datetime / non-UTC が混入した場合は ValueError raise されるため、
+    本 helper で catch する。
+
+    Returns:
+        CanonicalFiveResult (gate_pass / gate_worst_gap / 各 slack を含む)、
+        または None (= disabled / 例外時)。
     """
+    if not enabled:
+        return None
     try:
-        canonical_trades = tuple(
-            trade_to_trade_record(t) for t in trades
-        )
+        canonical_trades = tuple(trade_to_trade_record(t) for t in trades)
         canonical_bars = equity_curve_to_bar_equity_series(equity_curve)
-        canonical_universe = compute_business_day_universe_for_period(
-            bars_period[0], bars_period[1]
+        canonical_universe = compute_business_day_universe_from_trades(trades)
+        result = evaluate_canonical_five(
+            canonical_trades,
+            canonical_bars,
+            thresholds,
+            canonical_universe,
         )
-        # CanonicalFiveThresholds は live_criteria + window scale から構築
-        # (= step 2 で stage_bc_evaluator から流用予定、 step 1 では default = step 1 では不要?
-        # 実は evaluate_canonical_five は thresholds なしで raw metrics 計算可能か要確認)
-        # → 要設計詳細化
-        ...
+        return result
     except Exception as exc:
         logger.warning(
             "stage_gate.canonical_five.skipped",
@@ -170,9 +305,98 @@ def _try_evaluate_canonical_five_safe(
             error_type=type(exc).__name__,
         )
         return None
+
+
+def _log_canonical_dual_path(
+    *,
+    stage_label: str,
+    genome_name: str,
+    legacy: BacktestMetrics,
+    canonical: CanonicalFiveResult | None,
+) -> None:
+    """dual-path 結果 (legacy + canonical) を構造化 log に出力."""
+    if canonical is None:
+        logger.info(
+            "stage_gate.canonical_five.dual_path",
+            stage=stage_label,
+            genome=genome_name,
+            canonical_skipped=True,
+        )
+        return
+    logger.info(
+        "stage_gate.canonical_five.dual_path",
+        stage=stage_label,
+        genome=genome_name,
+        # legacy
+        legacy_total_pnl=str(legacy.total_pnl),
+        legacy_trade_count=legacy.trade_count,
+        legacy_max_dd_pct=str(legacy.max_drawdown_pct),
+        legacy_sharpe=str(legacy.sharpe) if legacy.sharpe is not None else None,
+        # canonical
+        canonical_net_pnl=canonical.net_pnl_after_cost,
+        canonical_trade_count=canonical.trade_count,
+        canonical_max_dd=canonical.max_dd,
+        canonical_sr_worst_block=canonical.sr_session_worst_block_scale,
+        canonical_sr_worst_annual=canonical.sr_session_worst_annual_estimate,
+        canonical_wr_worst=canonical.session_block_win_rate_worst,
+        canonical_gate_pass=canonical.gate_pass,
+        canonical_gate_worst_gap=canonical.gate_worst_gap,
+        canonical_invariants_feasible=canonical.invariants.is_feasible,
+        # diff
+        pnl_diff=float(legacy.total_pnl) - canonical.net_pnl_after_cost,
+        trade_count_diff=legacy.trade_count - canonical.trade_count,
+    )
 ```
 
-**未確定論点**: `evaluate_canonical_five` は thresholds 引数を必須としている可能性。 step 1 で raw metrics のみ取得する場合の API contract を要確認。 必要なら raw metrics 計算と slack 計算を分離する関数追加 (= 別 helper) または step 1 で thresholds を caller 側で構築。
+#### 4.2.2 evaluate_stage_a への配線 (例)
+
+`stage_gate.py:431` 付近の `bt = compute_metrics(...)` の直後に追加:
+
+```python
+bt = compute_metrics(
+    result.trades,
+    result.equity_curve,
+    trade_count_min_for_sharpe=stage_config.trade_count_min_for_sharpe,
+)
+
+# T-canonical step 1: dual-path canonical 5 metrics (LOG_ONLY)
+# stage_config.phase2_canonical_metrics_mode は config.py の Phase2Config で設定
+canonical_thresholds = derive_stage_a_thresholds(
+    live_criteria=stage_config.live_criteria_dict,  # dict 化が必要、 既存実装と整合確認
+    window_days=STAGE_A_WINDOW_DAYS,
+    baseline_dataset_days=BASELINE_DATASET_DAYS,
+)
+canonical_sidecar = _try_evaluate_canonical_five_safe(
+    trades=result.trades,
+    equity_curve=result.equity_curve,
+    thresholds=canonical_thresholds,
+    stage_label="A",
+    genome_name=genome.name,
+    enabled=(stage_config.phase2_canonical_metrics_mode != "disabled"),
+)
+_log_canonical_dual_path(
+    stage_label="A",
+    genome_name=genome.name,
+    legacy=bt,
+    canonical=canonical_sidecar,
+)
+# canonical_sidecar は payload には添付しない (= step 1 では log のみ、
+# archive Parquet schema に影響させない)
+```
+
+stage B / C も同型で `derive_stage_b_thresholds` / `derive_stage_c_thresholds` (= 既存 or 新規) で thresholds 構築 → 同じ helper で dual-path 評価。
+
+#### 4.2.3 stage B / C の thresholds 構築
+
+- Stage A: `derive_stage_a_thresholds(live_criteria, window_days=60, baseline_dataset_days=...)` (= 既存)
+- Stage B / C: 同型関数 (= grep で既存 / 新規判断、 step 1 では Stage A と同じ window logic で構築可)
+
+→ **要詳細化**: Stage B (= 18m WF folds) は per-fold thresholds、 Stage C (= holdout 全期間) は holdout window thresholds。 step 1 では Stage A だけ dual-path 配線して、 step B/C は次 step (= step 1.5 or step 2) で対応 という選択肢もある (= scope 縮小)。
+
+**推奨 scope 限定**: step 1 では **Stage A のみ dual-path 配線**、 stage B/C は別 step に分割。 理由:
+- Stage A は per-trade per-genome 単純評価で thresholds 構築も simple
+- Stage B (5-fold WF rolling) は per-fold thresholds が必要で複雑度増
+- 1 step 1 commit の原則を守るため (= 過度な複雑化禁止)
 
 ### 4.3 改訂 5: config 追加
 
