@@ -230,3 +230,13 @@ factor_shadow:
 # 詳細: devnotes/20260429-1912-todo-T058-schema-v2-contract/conceptual-design.md
 schema_contract:
   enforcement_mode: log_only
+
+# B Phase 2 切替コミット step 1: canonical_metrics → main flow 統合
+# canonical_metrics_mode:
+#   log_only - dual-path で canonical 5 metrics を計算 + log のみ (default)、
+#              legacy 判定は完全に不変 (= regression 0、 観測経路の確立)
+#   disabled - canonical 計算を完全 skip (= 計算 overhead 0、 緊急時 fallback)
+#   fail_closed - 後続別 TODO で導入予定 (= step 1 では不許容)
+# 詳細: devnotes/20260503-1024-B-phase2-step1-canonical-metrics/
+phase2:
+  canonical_metrics_mode: log_only

@@ -34,16 +34,195 @@ from typing import ClassVar, Final, Literal, Protocol, TypedDict, cast
 
 import structlog
 
+from src.alpha_factory.canonical_adapter import (
+    compute_business_day_universe_from_bars,
+    equity_curve_to_bar_equity_series,
+    trade_to_trade_record,
+)
+from src.alpha_factory.canonical_metrics import (
+    CanonicalFiveResult,
+    CanonicalFiveThresholds,
+    evaluate_canonical_five,
+)
 from src.alpha_factory.walk_forward import make_wf_folds
 from src.backtest.engine import BacktestConfig, run_backtest
-from src.backtest.metrics import compute_metrics
+from src.backtest.metrics import BacktestMetrics, compute_metrics
 from src.broker.mock import InstrumentMeta, MockBroker
+from src.broker.orders import Trade as BrokerTrade
 from src.domain.price import PriceBar
 from src.dsl.genome import Genome
 from src.dsl.strategy import DslStrategy, PrimitiveEvaluator
 from src.ga.complexity import genome_size_norm
 
 logger = structlog.get_logger(__name__)
+
+
+# B Phase 2 切替コミット step 1: dual-path canonical 5 metrics 計算用 default
+# (= live_criteria に win_rate_min が含まれない既存運用との互換性、
+#   詳細設計 § 4.2.3 + Codex Round 2 [Suggestion] 取込)。
+# 0.45 は synthesis § 6.4 で参照される標準値。 後続 step で live_criteria に
+# win_rate_min を追加する際に削除予定。
+_CANONICAL_DUAL_PATH_DEFAULT_WIN_RATE_MIN: Final[float] = 0.45
+
+
+def _build_stage_a_canonical_thresholds(
+    *,
+    live_criteria: Mapping[str, float | int],
+    window_days: int,
+    baseline_dataset_days: int = 730,
+) -> CanonicalFiveThresholds:
+    """Stage A 評価窓用 CanonicalFiveThresholds を構築.
+
+    derive_stage_a_thresholds (= stage_a_evaluator) と異なり、
+    live_criteria に win_rate_min が無くても _CANONICAL_DUAL_PATH_DEFAULT_WIN_RATE_MIN
+    を default として使用 (= 既存 live_criteria 互換性維持、 step 1 範囲)。
+
+    Args:
+        live_criteria: stage_gate.live_criteria (= MappingProxyType[str, float|int])。
+        window_days: 評価窓日数 (= Stage A は 60d)。
+        baseline_dataset_days: live_criteria の baseline 期間 (= 730d default)。
+
+    Returns:
+        CanonicalFiveThresholds: window scaling 後の thresholds。
+    """
+    ratio = window_days / baseline_dataset_days
+    trade_min_window = max(
+        1, math.ceil(live_criteria["trade_count_min"] * ratio)
+    )
+    trade_max_window = max(
+        trade_min_window,
+        math.floor(live_criteria["trade_count_max"] * ratio),
+    )
+    return CanonicalFiveThresholds(
+        sharpe_min=float(live_criteria["sharpe_min"]),
+        net_pnl_min=float(live_criteria["total_pnl_min"]) * ratio,
+        max_dd_max=float(live_criteria["max_drawdown_max"]),
+        trade_count_min=trade_min_window,
+        trade_count_max=trade_max_window,
+        win_rate_min=float(
+            live_criteria.get(
+                "win_rate_min",
+                _CANONICAL_DUAL_PATH_DEFAULT_WIN_RATE_MIN,
+            )
+        ),
+    )
+
+
+def _try_evaluate_canonical_five_safe(
+    *,
+    trades: list[BrokerTrade],
+    equity_curve: list[tuple[datetime, Decimal]],
+    bars: list[PriceBar],
+    live_criteria: Mapping[str, float | int],
+    window_days: int,
+    stage_label: str,
+    genome_name: str,
+    enabled: bool,
+) -> CanonicalFiveResult | None:
+    """canonical_metrics 計算を例外 safe で実施 (= dual-path LOG_ONLY mode 用).
+
+    Args:
+        enabled: phase2_canonical_metrics_mode != "disabled" のとき True
+            (= disabled mode は完全 skip で計算 overhead 0)。
+        bars: 評価窓の全 price bars (= business_day_universe 構築用、
+            Codex Round 2 [Suggestion] 入力契約)。
+        live_criteria: stage_config.live_criteria (= window scaling 入力)。
+        window_days: 評価窓日数 (= Stage A は stage_a_window_days)。
+
+    例外時は WARN log のみで None 返り (= 既存判定経路は完全に不変)。
+    no-raise 契約は evaluate_canonical_five 側にあるが、 adapter 経路 / thresholds
+    構築で naive datetime / non-UTC / 不正 live_criteria が混入した場合は
+    ValueError / ThresholdsInvalidError raise されるため、 本 helper で catch する。
+    thresholds 構築も try 内で行う (= test fixture の live_criteria が不正でも
+    legacy 経路を巻き込まない)。
+
+    Returns:
+        CanonicalFiveResult、 または None (= disabled / 例外時)。
+    """
+    if not enabled:
+        return None
+    try:
+        thresholds = _build_stage_a_canonical_thresholds(
+            live_criteria=live_criteria,
+            window_days=window_days,
+        )
+        canonical_trades = tuple(trade_to_trade_record(t) for t in trades)
+        canonical_bars = equity_curve_to_bar_equity_series(equity_curve)
+        canonical_universe = compute_business_day_universe_from_bars(bars)
+        return evaluate_canonical_five(
+            canonical_trades,
+            canonical_bars,
+            thresholds,
+            canonical_universe,
+        )
+    except Exception as exc:
+        logger.warning(
+            "stage_gate.canonical_five.skipped",
+            stage=stage_label,
+            genome=genome_name,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return None
+
+
+def _log_canonical_dual_path(
+    *,
+    stage_label: str,
+    genome_name: str,
+    legacy: BacktestMetrics,
+    canonical: CanonicalFiveResult | None,
+) -> None:
+    """dual-path 結果 (legacy + canonical) を構造化 log に出力.
+
+    解釈規約 (Codex Round 1 [Warning] 3 取込):
+    - dual-path log は **方向性監視** を目的とする (= 値一致や良し悪し判定ではない)。
+    - 解釈軸は (1) reason_code、 (2) gate_pass / canonical_invariants_feasible、
+      (3) 主要指標の数値 diff (= 規模感の確認のみ)。
+    - 値の一致 / 不一致を理由に collider bias で 「canonical が間違っている」 と
+      判断しない (= synthesis 評価哲学の差を尊重)。
+
+    fail-fast flag 情報 (Codex Round 1 [Warning] 2 + Round 2 [Suggestion] 取込):
+    - flags_source="default_false" + fail_fast_flags_comparable=False で
+      step 1 では broker engine から伝搬していないことを明示。
+    """
+    if canonical is None:
+        logger.info(
+            "stage_gate.canonical_five.dual_path",
+            stage=stage_label,
+            genome=genome_name,
+            canonical_skipped=True,
+        )
+        return
+    logger.info(
+        "stage_gate.canonical_five.dual_path",
+        stage=stage_label,
+        genome=genome_name,
+        # canonical の fail-fast flag 出所 (= step 1 では default False 固定、
+        # Codex Round 2 [Suggestion] 取込で boolean field も併記)
+        flags_source="default_false",
+        fail_fast_flags_comparable=False,
+        # legacy
+        legacy_total_pnl=str(legacy.total_pnl),
+        legacy_trade_count=legacy.trade_count,
+        legacy_max_dd_pct=str(legacy.max_drawdown_pct),
+        legacy_sharpe=str(legacy.sharpe) if legacy.sharpe is not None else None,
+        # canonical
+        canonical_net_pnl=canonical.net_pnl_after_cost,
+        canonical_trade_count=canonical.trade_count,
+        canonical_max_dd=canonical.max_dd,
+        canonical_sr_worst_block=canonical.sr_session_worst_block_scale,
+        canonical_sr_worst_annual=canonical.sr_session_worst_annual_estimate,
+        canonical_wr_worst=canonical.session_block_win_rate_worst,
+        canonical_gate_pass=canonical.gate_pass,
+        canonical_gate_worst_gap=canonical.gate_worst_gap,
+        canonical_invariants_feasible=canonical.invariants.is_feasible,
+        # diff (= 規模感確認のみ、 値一致を要求しない)
+        pnl_diff=float(legacy.total_pnl) - canonical.net_pnl_after_cost,
+        trade_count_diff=legacy.trade_count - canonical.trade_count,
+        # 解釈規約 (運用者向け sentinel)
+        interpretation_note="direction_monitoring_only",
+    )
 
 # T034: Stage A fitness_pen sentinel 序列。
 # archive `_required_float` は None → 0.0 fallback するため、Stage A の 3 失敗
@@ -195,6 +374,13 @@ class StageGateConfig:
             "trade_count_max": 5000,
         }
     )
+
+    # B Phase 2 切替コミット step 1: canonical_metrics dual-path 配線用 mode flag
+    # (= AlphaFactoryConfig.phase2.canonical_metrics_mode から伝搬)。
+    # log_only = dual-path 計算 + log のみ (default、 既存判定不変)
+    # disabled = canonical 計算 skip (= 計算 overhead 0)
+    # 詳細: devnotes/20260503-1024-B-phase2-step1-canonical-metrics/
+    phase2_canonical_metrics_mode: Literal["log_only", "disabled"] = "log_only"
 
     _LIVE_CRITERIA_REQUIRED: ClassVar[frozenset[str]] = frozenset(
         {
@@ -449,6 +635,38 @@ def evaluate_stage_a(
         # backtest 経路で必ず prepare()→on_bar が呼ばれているはずだが、
         # defensive に len() 経由で取り出す。
         active_clause_count = len(strategy.active_clause_indices)
+        # B Phase 2 切替コミット step 1: dual-path canonical 5 metrics (LOG_ONLY mode)
+        # 既存 fitness 判定経路には影響させない (= regression 0、 sidecar 計算 + log のみ)。
+        # 例外 safe wrapper で legacy 経路を保護 (= adapter / thresholds 例外で巻き込まない)。
+        canonical_sidecar = _try_evaluate_canonical_five_safe(
+            trades=result.trades,
+            equity_curve=result.equity_curve,
+            bars=bars_60d,
+            live_criteria=stage_config.live_criteria,
+            window_days=stage_config.stage_a_window_days,
+            stage_label="A",
+            genome_name=genome.name,
+            enabled=(stage_config.phase2_canonical_metrics_mode != "disabled"),
+        )
+        # Codex impl-review Round 1 [Warning] 取込: log 呼出も例外保護 (= logger
+        # processor 異常時に legacy 経路を巻き込まない、 完全隔離)
+        try:
+            _log_canonical_dual_path(
+                stage_label="A",
+                genome_name=genome.name,
+                legacy=bt,
+                canonical=canonical_sidecar,
+            )
+        except Exception as exc:
+            # logger 自身の例外は WARN log のみで legacy 経路は不変
+            logger.warning(
+                "stage_gate.canonical_five.log_failed",
+                stage="A",
+                genome=genome.name,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        # canonical_sidecar は payload 非添付 (= archive Parquet schema 不変、 step 1 範囲)
     except Exception as exc:
         logger.warning(
             "stage_a.system_failure",
