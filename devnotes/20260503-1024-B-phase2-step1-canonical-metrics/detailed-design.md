@@ -1,7 +1,7 @@
 # 詳細設計: B Phase 2 切替コミット step 1 — canonical_metrics → main flow 統合
 
-**作成日時**: 2026-05-03 10:35 JST、 **本格化**: 2026-05-03 11:00 JST (= 着手前調査結果反映)
-**status**: **本格化済 Round 0 (= 着手前調査で skeleton § 9 の論点を解消、 Codex 設計 review 待ち)**
+**作成日時**: 2026-05-03 10:35 JST、 **本格化**: 2026-05-03 11:00 JST (= 着手前調査結果反映)、 **Round 2 改訂**: 2026-05-03 11:30 JST (Codex Round 1 [Critical] 1 + [Warning] 5 + [Suggestion] 2 全件取込)
+**status**: **Round 2 改訂済 (= Codex Round 1 全指摘解消)**
 
 ---
 
@@ -168,8 +168,10 @@ def trade_to_trade_record(broker_trade: BrokerTrade) -> TradeRecord:
     - business_day_index: exit_time UTC date を BUSINESS_DAY_EPOCH からの日数で整数化
     - pnl_net / spread_cost / holding_cost: Decimal → float (T078 で broker 側追加済)
     - is_session_close_drop / is_negative_equity_drop_open: broker.Trade に対応 field なし
-      → step 1 では default False (= synthesis § 6.6 戦略的 fail-fast の sentinel、
-        broker engine で本物の値が伝搬される段階は別 step で対応)
+      → step 1 では **default False + flags_source="default_false" を log 明示**
+        (= Codex Round 1 [Warning] 2 取込: synthesis § 6.6 戦略的 fail-fast の観測欠落を
+        運用 log で可視化、 dual-path diff の原因分解時に「fail-fast 指標は parity 比較対象外」
+        を明確化、 broker engine 側で本物の値が伝搬される経路は別 step で対応)
 
     例外契約:
         broker_trade.exit_time が naive datetime / 非 UTC offset の場合、
@@ -206,31 +208,41 @@ def equity_curve_to_bar_equity_series(
     return BarEquitySeries(points=points)
 
 
-def compute_business_day_universe_from_trades(
-    trades: Iterable[BrokerTrade],
+def compute_business_day_universe_from_bars(
+    bars: Iterable[PriceBar],
 ) -> dict[SessionBucket, frozenset[int]]:
-    """trades が触れた (bucket, business_day_index) ペア集合を universe として返す.
+    """評価窓の全バーから (bucket, business_day_index) ペア集合を universe として返す.
 
-    canonical_metrics は trades 全件が universe に含まれている必要がある (=
-    INPUT_BUSINESS_DAY_UNIVERSE_MISMATCH を防ぐ)。 step 1 では trades 自身から
-    universe を構築する最小実装 (= 後続 step で「期間内全 (bucket, day) 集合」 に
-    拡張可能、 これは T070 計算済の bars 経路で別途取得可能)。
+    Codex Round 1 [Critical] 1 取込: trades のみから universe を構築する設計は
+    synthesis § 6.3 (= 空ブロック 0.5 中立) 違反。 universe は **「評価窓に存在し得た
+    全 (bucket, day) ペア」** = bars が触れた全 (bucket, day) ペアで構築する。
 
-    注意: 全 bucket key が必須 (= len(business_day_universe) == 3)、
-    そうでないと INPUT_EMPTY_BUSINESS_DAY_UNIVERSE 判定。 trades が空 / 1 bucket
-    のみの Run でも 3 bucket の dict を返す (= 不在 bucket は frozenset() で
-    INPUT_EMPTY_BUSINESS_DAY_UNIVERSE 判定される、 これは expected behavior)。
+    SSOT 規範:
+    - bars の bar_time UTC date × bucket (= compute_bucket_for_bar(bar_time)) で
+      universe を生成。
+    - これにより約定がない bucket / day も universe に含まれ、 evaluate_canonical_five
+      の WR 計算で trade_count_block=0 → WR neutral 0.5 が適切に発動する。
+
+    Args:
+        bars: 評価窓の全 bar (時系列順、 UTC tz-aware)。
+
+    Returns:
+        dict[SessionBucket, frozenset[int]] (= 必ず 3 bucket key 全件、
+        bar が触れた day のみ含む)。
     """
     universe: dict[SessionBucket, set[int]] = {
         SessionBucket.TOKYO: set(),
         SessionBucket.LONDON: set(),
         SessionBucket.NY: set(),
     }
-    for t in trades:
-        bucket = _convert_bucket(compute_bucket_for_trade(t))
-        universe[bucket].add(_business_day_index_for(t.exit_time))
+    for bar in bars:
+        bucket = _convert_bucket(compute_bucket_for_bar(bar.bar_time))
+        universe[bucket].add((bar.bar_time.date() - BUSINESS_DAY_EPOCH).days)
     return {k: frozenset(v) for k, v in universe.items()}
 ```
+
+**設計根拠 (Codex Round 1 [Suggestion] 8 取込、 C1/C2 順守の明文化)**:
+着手前調査で skeleton 段階の前提関数 (= `assign_session_bucket_and_business_day_index` / `compute_business_day_universe`) が既存コードに存在しないことを grep で確認した (= C2「X が無い = バグ」 禁止に整合: 別経路を広く探した)。 既存の `compute_bucket_for_bar` (= `src/backtest/session_block.py:304`) は bar_time から SessionBlockBucket を返す純関数で、 同等の責務を担う SSOT。 BUSINESS_DAY_EPOCH (= 1970-01-01) からの UTC date 日数による business_day_index は canonical_metrics の契約 (= 「同一 universe / trades で consistent な int」) を満たす最小実装。
 
 ### 4.1.1 trades が空の場合の挙動
 
@@ -314,7 +326,20 @@ def _log_canonical_dual_path(
     legacy: BacktestMetrics,
     canonical: CanonicalFiveResult | None,
 ) -> None:
-    """dual-path 結果 (legacy + canonical) を構造化 log に出力."""
+    """dual-path 結果 (legacy + canonical) を構造化 log に出力.
+
+    解釈規約 (Codex Round 1 [Warning] 3 取込):
+    - dual-path log は **方向性監視** を目的とする (= 値一致や良し悪し判定ではない)。
+    - 解釈軸は (1) reason_code (= canonical の InfeasibleReasonCode 集合)、
+      (2) gate_pass / canonical_invariants_feasible (= bool 判定)、
+      (3) 主要指標の数値 diff (= 規模感の確認のみ)。
+    - 値の一致 / 不一致を理由に collider bias で 「canonical が間違っている」 と
+      判断しない (= synthesis 評価哲学の差を尊重)。
+
+    fail-fast flag 情報 (Codex Round 1 [Warning] 2 取込):
+    - flags_source="default_false" を log に明示 (= step 1 では broker engine から
+      伝搬していないことを running record に残す)。
+    """
     if canonical is None:
         logger.info(
             "stage_gate.canonical_five.dual_path",
@@ -327,6 +352,8 @@ def _log_canonical_dual_path(
         "stage_gate.canonical_five.dual_path",
         stage=stage_label,
         genome=genome_name,
+        # canonical の fail-fast flag 出所 (= step 1 では default False 固定)
+        flags_source="default_false",
         # legacy
         legacy_total_pnl=str(legacy.total_pnl),
         legacy_trade_count=legacy.trade_count,
@@ -342,9 +369,11 @@ def _log_canonical_dual_path(
         canonical_gate_pass=canonical.gate_pass,
         canonical_gate_worst_gap=canonical.gate_worst_gap,
         canonical_invariants_feasible=canonical.invariants.is_feasible,
-        # diff
+        # diff (= 規模感確認のみ、 値一致を要求しない)
         pnl_diff=float(legacy.total_pnl) - canonical.net_pnl_after_cost,
         trade_count_diff=legacy.trade_count - canonical.trade_count,
+        # 解釈規約 (運用者向け sentinel)
+        interpretation_note="direction_monitoring_only",
     )
 ```
 
@@ -398,22 +427,33 @@ stage B / C も同型で `derive_stage_b_thresholds` / `derive_stage_c_threshold
 - Stage B (5-fold WF rolling) は per-fold thresholds が必要で複雑度増
 - 1 step 1 commit の原則を守るため (= 過度な複雑化禁止)
 
-### 4.3 改訂 5: config 追加
+### 4.3 改訂 5: config 追加 (Codex Round 1 [Warning] 4 取込: fail_closed 契約固定)
 
 `config/alpha_factory/default.yaml`:
 ```yaml
 phase2:
-  canonical_metrics_mode: log_only  # log_only / fail_closed / disabled
+  canonical_metrics_mode: log_only  # log_only / disabled
   # @why: B Phase 2 切替コミット step 1 で canonical_metrics 経路を dual-path 配線。
-  # log_only = sidecar 計算 + log のみ (default)、 disabled = skip (regression 防止)、
-  # fail_closed = canonical 判定切替 (= 後続別 TODO で導入)
+  # step 1 では log_only / disabled の 2 値のみ許容。
+  # fail_closed (= canonical 判定切替) は後続別 TODO で導入時に値を追加。
 ```
 
 `src/alpha_factory/config.py` に Phase2Config dataclass 追加:
 ```python
 @dataclass(frozen=True)
 class Phase2Config:
-    canonical_metrics_mode: Literal["log_only", "fail_closed", "disabled"] = "log_only"
+    """B Phase 2 切替コミット 用 config (= cascade port v2 統合段階管理)."""
+    canonical_metrics_mode: Literal["log_only", "disabled"] = "log_only"
+
+    def __post_init__(self) -> None:
+        # Codex Round 1 [Warning] 4 取込: step 1 では fail_closed を許容しない契約固定
+        # (= 後続別 TODO で許容値を Literal["log_only", "fail_closed", "disabled"] に拡張)
+        valid = {"log_only", "disabled"}
+        if self.canonical_metrics_mode not in valid:
+            raise ValueError(
+                f"Phase2Config.canonical_metrics_mode must be one of {sorted(valid)}, "
+                f"got {self.canonical_metrics_mode!r}. fail_closed は step 1 範囲外."
+            )
 
 @dataclass(frozen=True)
 class AlphaFactoryConfig:
@@ -421,27 +461,39 @@ class AlphaFactoryConfig:
     phase2: Phase2Config = field(default_factory=Phase2Config)
 ```
 
-stage_gate.py の `_try_evaluate_canonical_five_safe` で mode 確認:
+StageGateConfig に **`phase2_canonical_metrics_mode`** field 追加 (= AlphaFactoryConfig.phase2.canonical_metrics_mode から伝搬):
 ```python
-if backtest_config.phase2_mode == "disabled":
-    return None  # skip canonical 計算
+phase2_canonical_metrics_mode: Literal["log_only", "disabled"] = "log_only"
 ```
 
-### 4.4 改訂 6: テスト計画
+stage_gate.py の `_try_evaluate_canonical_five_safe` で mode 確認:
+```python
+if stage_config.phase2_canonical_metrics_mode == "disabled":
+    return None  # skip canonical 計算 (= overhead 0)
+```
+
+### 4.4 改訂 6: テスト計画 (16 ケース、 Codex Round 1 [Warning] 5 取込で 4 ケース追加)
 
 新規 test ファイル:
-1. `tests/alpha_factory/test_canonical_adapter.py`:
-   - `test_trade_to_trade_record_basic`: broker Trade fixture → TradeRecord 変換、 session_bucket / business_day_index 正確
-   - `test_trade_to_trade_record_preserves_spread_cost`: T078 broker.spread_cost が float 変換で伝搬 (= 1e-9 以内)
-   - `test_equity_curve_to_bar_equity_series_basic`: timestamp / equity 変換、 strict monotone 維持
-   - `test_business_day_universe_for_period`: 1 day / 1 week / 1 month で expected universe size
+1. `tests/alpha_factory/test_canonical_adapter.py` (8 ケース):
+   - test 1: `test_trade_to_trade_record_basic`: broker Trade fixture → TradeRecord 変換、 session_bucket / business_day_index 正確
+   - test 2: `test_trade_to_trade_record_preserves_spread_cost`: T078 broker.spread_cost が float 変換で伝搬 (= 1e-9 以内)
+   - test 3: `test_trade_to_trade_record_business_day_index_monotone_within_period`: 同一期間内 trade で business_day_index が monotone increasing (= epoch 選択の妥当性)
+   - test 4: `test_equity_curve_to_bar_equity_series_basic`: timestamp / equity 変換、 strict monotone 維持
+   - test 5: `test_equity_curve_to_bar_equity_series_strict_monotone_violation_raises`: 重複 / 逆順 timestamp で BarEquityInvalidError raise
+   - test 6: `test_business_day_universe_from_bars_includes_all_buckets`: bars が触れた全 (bucket, day) ペアを含む、 必ず 3 bucket key 全件
+   - test 7: **(追加 Codex [W5]) `test_business_day_universe_includes_empty_blocks_when_no_trades`: trades が 1 bucket のみ集中していても、 bars が触れた他 bucket × day も universe に含まれる (= synthesis § 6.3 WR neutral 0.5 が発動可能な条件)
+   - test 8: **(追加 Codex [W5]) `test_default_false_flags_are_logged_as_unknown`: trade_to_trade_record が is_session_close_drop=False / is_negative_equity_drop_open=False を設定するが、 stage_gate caller 側で flags_source="default_false" を log に出すことを確認
 
-2. `tests/alpha_factory/test_stage_gate_canonical_dual_path.py`:
-   - `test_dual_path_log_only_legacy_unchanged`: LOG_ONLY mode で StageResult.metrics["payload"] が legacy と同一 (= regression 0)
-   - `test_dual_path_canonical_sidecar_logged`: log に canonical_five.dual_path event が出る、 net_pnl / trade_count / max_dd 含む
-   - `test_dual_path_canonical_skipped_on_exception`: T070 calendar 関数が例外を raise したら canonical 計算 skip、 既存判定不変
-   - `test_dual_path_disabled_mode_skips_canonical`: phase2.canonical_metrics_mode=disabled で canonical 計算 skip
-   - `test_dual_path_diff_logged_when_legacy_differs`: legacy total_pnl と canonical net_pnl の diff が log される
+2. `tests/alpha_factory/test_stage_gate_canonical_dual_path.py` (8 ケース):
+   - test 9: `test_dual_path_log_only_legacy_unchanged`: LOG_ONLY mode で StageResult.metrics["payload"] が legacy と同一 (= regression 0)
+   - test 10: `test_dual_path_canonical_sidecar_logged`: log に canonical_five.dual_path event が出る、 net_pnl / trade_count / max_dd / gate_pass 含む
+   - test 11: `test_dual_path_canonical_skipped_on_naive_datetime`: broker Trade.exit_time が naive datetime → canonical skip + WARN log、 既存判定不変
+   - test 12: `test_dual_path_disabled_mode_skips_canonical`: phase2.canonical_metrics_mode=disabled で canonical 計算 skip
+   - test 13: `test_dual_path_empty_trades_returns_canonical_with_reason_codes`: trades 空でも canonical evaluate_canonical_five が no-raise で reason 含む結果を返す
+   - test 14: `test_dual_path_interpretation_note_included_in_log`: log に interpretation_note="direction_monitoring_only" が含まれる (= 方向性監視規約)
+   - test 15: **(追加 Codex [W5]) `test_phase2_config_rejects_fail_closed`: Phase2Config(canonical_metrics_mode="fail_closed") は ValueError raise (= step 1 で fail_closed 不許容契約)
+   - test 16: **(追加 Codex [W5]) `test_dual_path_does_not_modify_payload_or_archive_schema`: canonical_sidecar が StageResult.metrics["payload"] にも archive Parquet にも添付されないことを assertion (= regression 0)
 
 ---
 
@@ -514,11 +566,35 @@ uv run mypy src/
 
 ---
 
-## 10. 7 step segmentation との関係
+## 10. 7 step segmentation との関係 (Codex Round 1 [Suggestion] 7 取込: step 1.5 / step 2 境界明文化)
 
 step 1 完了で確立されるもの:
 - canonical_adapter.py module (= broker → canonical 変換 SSOT)
 - TradeRecord 経路の存在 (= T082 obsolete 解除条件の 1 つ)
-- canonical 5 metrics の sidecar 計算経路
+- canonical 5 metrics の sidecar 計算経路 (= Stage A only、 LOG_ONLY mode)
 
-step 2 (= stage_bc_evaluator main flow 統合) はこの adapter を再利用。
+### 10.1 step 1.5 (= Stage B/C dual-path 拡張) の scope
+
+- **scope**: Stage B (= per-fold WF) / Stage C (= holdout) の dual-path 配線追加
+- **adapter 改変禁止**: canonical_adapter.py は step 1 で凍結、 step 1.5 では caller (stage_gate.py) のみ変更
+- **再利用 test**: 同じ adapter API で Stage B/C 経路が動くことを既存 test の延長で確認
+
+### 10.2 step 2 (= stage_bc_evaluator main flow 統合) の scope
+
+- **scope**: `evaluate_stage_b_pooled` / `evaluate_stage_c_lite` を main flow から呼出 (= LOG_ONLY mode で legacy と並走)
+- **adapter 改変禁止**: step 1 で凍結した adapter を再利用 (= step 1.5 の拡張があれば反映済)
+- **構造的変化**: stage_gate.py の Stage B / Stage C ハンドラを stage_bc_evaluator caller に置換 (= dual-path 維持)
+
+### 10.3 smoke 5 Run の解釈規約 (Codex Round 1 [Warning] 6 取込)
+
+n=5 では C7 (= n<10 で相関 claim 禁止) 規範により **因果的主張は不可**。 step 1 完了後の smoke 5 Run は以下の **記述統計のみ** を成功基準とする:
+
+| 観測指標 | 成功基準 |
+|---|---|
+| p50 / p95 dual-path runtime | legacy + canonical = total、 worst-case +50% 想定 |
+| OOM 発生件数 | 0 件 (= 24GB / 6 worker 制約遵守) |
+| legacy 判定変化件数 | 0 件 (= LOG_ONLY mode の regression 0 確認) |
+| canonical_skipped 件数 | 0 件 (= adapter 経路で例外なし) |
+| pnl_diff 中央値 | 任意 (= 規模感観察、 0 を要求しない) |
+
+n>=30 の段階で初めて統計的傾向を議論する (= 別 TODO)。
