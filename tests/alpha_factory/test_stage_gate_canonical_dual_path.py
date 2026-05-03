@@ -1076,3 +1076,454 @@ def test_stage_b_is_and_c_base_log_keys_are_distinguishable(
     assert "C_base" in combined
     # genome 値も記録 (= logger kwargs key `genome` は legacy / dual-path 共通)
     assert genome_name in combined
+
+
+# ============================================================================
+# B Phase 2 切替コミット step 1.6: Stage B per-fold dual-path
+# (= 詳細設計 § 7、 10 ケース追加 (= Codex impl-review Round 1 [Suggestion]
+# 反映で +1 ケース B_IS/C_base no-fold-kwarg 追加)。 設計参照:
+#  devnotes/20260503-2049-B-phase2-step1.6-stage-b-per-fold-dual-path/detailed-design.md)
+# ============================================================================
+
+
+def _stage_b_multi_fold_cfg(
+    *, phase2_canonical_metrics_mode: str = "log_only",
+) -> StageGateConfig:
+    """Stage B test 用 多 fold 生成可能な cfg (= n_fold ≥ 5、 step 1.5 fixture 流用)。
+
+    n_fold は make_wf_folds(_make_continuous_bars(20), wf_train=3, wf_test=2,
+    wf_step=2, wf_embargo=0) で動的決定 (= ~8 fold 想定だが test では値に依存しない、
+    Codex Round 1 [Critical] 反映で動的化)。
+    """
+    return StageGateConfig(
+        wf_train_days=3,
+        wf_test_days=2,
+        wf_step_days=2,
+        wf_embargo_days=0,
+        phase2_canonical_metrics_mode=phase2_canonical_metrics_mode,  # type: ignore[arg-type]
+    )
+
+
+def _dummy_legacy_metrics():  # type: ignore[no-untyped-def]
+    """test 用 dummy BacktestMetrics."""
+    from src.backtest.metrics import BacktestMetrics
+    return BacktestMetrics(
+        trade_count=10, win_count=5, loss_count=5,
+        win_rate=Decimal("0.5"), total_pnl=Decimal("100"),
+        avg_win=Decimal("10"), avg_loss=Decimal("-10"),
+        profit_factor=Decimal("1.0"),
+        max_drawdown=Decimal("10"), max_drawdown_pct=Decimal("0.01"),
+        final_equity=Decimal("1000100"),
+        sharpe=Decimal("0.1"), sortino=Decimal("0.1"), calmar=Decimal("0.1"),
+        avg_trade_duration=None, max_trade_duration=None,
+    )
+
+
+# --- 10 ケース (= Round 1 [Suggestion] +1 反映) ---
+
+
+def test_stage_b_per_fold_canonical_dual_path_log_only_preserves_legacy_payload() -> None:
+    """LOG_ONLY mode と disabled mode で Stage B の StageResult 全体が完全一致
+    (= regression 0、 acceptance A1。 per-fold dual-path 配線追加で oos_sharpes /
+    median_oos_sharpe / positive_fold_ratio / unavailable_reason_counts /
+    他全 payload 完全不変)。
+    """
+    from src.alpha_factory.stage_gate import evaluate_stage_b
+    from tests._helpers import usd_jpy_meta
+    from tests.alpha_factory.test_stage_gate import (
+        _backtest_config,
+        _make_continuous_bars,
+        _one_clause_genome,
+    )
+    from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+    bars = _make_continuous_bars(20, bars_per_day=4)
+    ev = ConstantPrimitiveEvaluator(value=0.0)
+    cfg = _backtest_config()
+    log_only_cfg = _stage_b_multi_fold_cfg(phase2_canonical_metrics_mode="log_only")
+    disabled_cfg = _stage_b_multi_fold_cfg(phase2_canonical_metrics_mode="disabled")
+    res_log = evaluate_stage_b(
+        _one_clause_genome("g_b_per_fold_legacy_unchanged"), bars, usd_jpy_meta(),
+        cfg, ev, log_only_cfg,
+    )
+    res_dis = evaluate_stage_b(
+        _one_clause_genome("g_b_per_fold_legacy_unchanged"), bars, usd_jpy_meta(),
+        cfg, ev, disabled_cfg,
+    )
+    # 判定 / reason_codes / stage 完全一致
+    assert res_log.passed == res_dis.passed
+    assert res_log.reason_codes == res_dis.reason_codes
+    assert res_log.stage == res_dis.stage
+    # payload 全体一致 (wall_time_seconds は除外)
+    payload_log = dict(res_log.metrics["payload"])  # type: ignore[arg-type]
+    payload_dis = dict(res_dis.metrics["payload"])  # type: ignore[arg-type]
+    assert set(payload_log.keys()) == set(payload_dis.keys())
+    for key in payload_log:
+        assert payload_log[key] == payload_dis[key], (
+            f"Stage B per-fold payload[{key}] differs"
+        )
+
+
+def test_stage_b_per_fold_canonical_log_isolation_when_canonical_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_try_evaluate_canonical_five_safe` が **stage_label='B_fold' のときだけ**
+    raise する wrapper で置換し、 per-fold legacy 判定が完全不変であることを確認。
+
+    Codex Round 1 [Critical] 反映: helper を無条件 raise させると同 helper が
+    B_IS でも呼ばれ、 is_full_* が変わって disabled 比較が崩れる。 monkeypatch を
+    stage_label 限定 raise の wrapper に変更 (= B_IS 呼出は元 helper に透過)。
+    """
+    from src.alpha_factory import stage_gate as sg
+    from src.alpha_factory.stage_gate import evaluate_stage_b
+    from tests._helpers import usd_jpy_meta
+    from tests.alpha_factory.test_stage_gate import (
+        _backtest_config,
+        _make_continuous_bars,
+        _one_clause_genome,
+    )
+    from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+    original_helper = sg._try_evaluate_canonical_five_safe
+
+    def _conditional_raise(**kwargs):  # type: ignore[no-untyped-def]
+        if kwargs.get("stage_label") == "B_fold":
+            raise RuntimeError("simulated B_fold canonical failure")
+        return original_helper(**kwargs)
+
+    monkeypatch.setattr(sg, "_try_evaluate_canonical_five_safe", _conditional_raise)
+
+    bars = _make_continuous_bars(20, bars_per_day=4)
+    ev = ConstantPrimitiveEvaluator(value=0.0)
+
+    # B_fold 限定 raise 版 vs disabled mode で StageResult deep equality (D3)
+    res_with_raise = evaluate_stage_b(
+        _one_clause_genome("g_b_per_fold_canonical_fail"), bars, usd_jpy_meta(),
+        _backtest_config(), ev, _stage_b_multi_fold_cfg(),
+    )
+    monkeypatch.setattr(sg, "_try_evaluate_canonical_five_safe", original_helper)
+    res_disabled = evaluate_stage_b(
+        _one_clause_genome("g_b_per_fold_canonical_fail"), bars, usd_jpy_meta(),
+        _backtest_config(), ev,
+        _stage_b_multi_fold_cfg(phase2_canonical_metrics_mode="disabled"),
+    )
+    # passed / reason_codes / payload / n_bars 完全一致 (= wall_time_seconds 除外、
+    # acceptance D3、 Codex Round 2 [Warning] 反映)
+    assert res_with_raise.passed == res_disabled.passed
+    assert res_with_raise.reason_codes == res_disabled.reason_codes
+    assert res_with_raise.metrics["n_bars"] == res_disabled.metrics["n_bars"]
+    payload_raise = dict(res_with_raise.metrics["payload"])  # type: ignore[arg-type]
+    payload_dis = dict(res_disabled.metrics["payload"])  # type: ignore[arg-type]
+    assert set(payload_raise.keys()) == set(payload_dis.keys())
+    for key in payload_raise:
+        assert payload_raise[key] == payload_dis[key], (
+            f"per-fold canonical raise: payload[{key}] differs"
+        )
+
+
+def test_stage_b_per_fold_canonical_log_helper_isolation_when_log_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_log_canonical_dual_path` が `stage_label='B_fold'` のときだけ raise しても
+    per-fold legacy 判定は完全不変 (= acceptance D1, D2、 disabled baseline と
+    deep equality、 Codex impl-review Round 1 [Warning] 反映で強化)。
+    """
+    from src.alpha_factory import stage_gate as sg
+    from src.alpha_factory.stage_gate import evaluate_stage_b
+    from tests._helpers import usd_jpy_meta
+    from tests.alpha_factory.test_stage_gate import (
+        _backtest_config,
+        _make_continuous_bars,
+        _one_clause_genome,
+    )
+    from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+    original_log = sg._log_canonical_dual_path
+
+    def _conditional_log_raise(**kwargs):  # type: ignore[no-untyped-def]
+        if kwargs.get("stage_label") == "B_fold":
+            raise RuntimeError("simulated B_fold logger processor failure")
+        return original_log(**kwargs)
+
+    monkeypatch.setattr(sg, "_log_canonical_dual_path", _conditional_log_raise)
+    bars = _make_continuous_bars(20, bars_per_day=4)
+    ev = ConstantPrimitiveEvaluator(value=0.0)
+    res_with_log_raise = evaluate_stage_b(
+        _one_clause_genome("g_b_per_fold_log_fail"), bars, usd_jpy_meta(),
+        _backtest_config(), ev, _stage_b_multi_fold_cfg(),
+    )
+    # disabled baseline と deep equality 比較 (= D1 厳密性、 fold_sharpe /
+    # fold_reason / reason_counts 全件不変を payload 全 key で確認)
+    monkeypatch.setattr(sg, "_log_canonical_dual_path", original_log)
+    res_disabled = evaluate_stage_b(
+        _one_clause_genome("g_b_per_fold_log_fail"), bars, usd_jpy_meta(),
+        _backtest_config(), ev,
+        _stage_b_multi_fold_cfg(phase2_canonical_metrics_mode="disabled"),
+    )
+    assert res_with_log_raise.passed == res_disabled.passed
+    assert res_with_log_raise.reason_codes == res_disabled.reason_codes
+    assert res_with_log_raise.metrics["n_bars"] == res_disabled.metrics["n_bars"]
+    payload_log_raise = dict(res_with_log_raise.metrics["payload"])  # type: ignore[arg-type]
+    payload_dis = dict(res_disabled.metrics["payload"])  # type: ignore[arg-type]
+    assert set(payload_log_raise.keys()) == set(payload_dis.keys())
+    for key in payload_log_raise:
+        assert payload_log_raise[key] == payload_dis[key], (
+            f"per-fold log helper raise: payload[{key}] differs"
+        )
+
+
+def test_stage_b_per_fold_canonical_disabled_mode_skips_calculation() -> None:
+    """phase2_canonical_metrics_mode='disabled' で per-fold canonical 計算 skip。
+
+    helper の enabled=False で adapter / thresholds / evaluate_canonical_five が
+    呼ばれないことを確認 (= Codex Round 2 [Warning] 反映で「skip」定義明確化)。
+    """
+    trades: list[BrokerTrade] = []
+    bars = _make_bars_60d()
+    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    result = _try_evaluate_canonical_five_safe(
+        trades=trades, equity_curve=equity_curve, bars=bars,
+        live_criteria=_make_default_live_criteria(),
+        window_days=20, stage_label="B_fold", genome_name="g_b_per_fold_disabled",
+        enabled=False,  # disabled
+    )
+    assert result is None  # threshold / adapter / canonical 計算は呼ばれない
+
+
+def test_stage_b_per_fold_dual_path_emits_one_entry_per_fold(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """各 fold で dual-path log entry が `stage='B_fold'` + `fold=<0..n_fold-1>` で出力。
+    (stage, genome, fold) で一意特定可能 (= 識別子契約 SSOT、 acceptance C1, C4)。
+
+    Codex Round 1 [Critical] 反映: n_fold は make_wf_folds で動的取得、
+    5 fold hard-code しない。
+    """
+    from src.alpha_factory.stage_gate import evaluate_stage_b
+    from src.alpha_factory.walk_forward import make_wf_folds
+    from tests._helpers import usd_jpy_meta
+    from tests.alpha_factory.test_stage_gate import (
+        _backtest_config,
+        _make_continuous_bars,
+        _one_clause_genome,
+    )
+    from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+    bars = _make_continuous_bars(20, bars_per_day=4)
+    ev = ConstantPrimitiveEvaluator(value=0.0)
+    cfg = _stage_b_multi_fold_cfg()
+    n_fold_expected = len(make_wf_folds(
+        bars,
+        train_days=cfg.wf_train_days,
+        test_days=cfg.wf_test_days,
+        step_days=cfg.wf_step_days,
+        embargo_days=cfg.wf_embargo_days,
+    ))
+    assert n_fold_expected >= 2, "fixture must produce at least 2 folds"
+    genome_name = "g_b_per_fold_log_check"
+    res = evaluate_stage_b(
+        _one_clause_genome(genome_name), bars, usd_jpy_meta(),
+        _backtest_config(), ev, cfg,
+    )
+    assert res.stage == "B"
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    # stage='B_fold' を含む dual-path 行を全件抽出
+    b_fold_lines = [
+        line for line in combined.splitlines()
+        if "stage_gate.canonical_five.dual_path" in line and "stage=B_fold" in line
+    ]
+    assert len(b_fold_lines) == n_fold_expected, (
+        f"expected {n_fold_expected} B_fold log entries, got {len(b_fold_lines)}"
+    )
+    # 各行に fold=0..n_fold-1 が含まれる (set 比較)
+    import re
+    fold_values: set[int] = set()
+    for line in b_fold_lines:
+        m = re.search(r"fold=(\d+)", line)
+        assert m is not None, f"B_fold line missing fold=: {line}"
+        fold_values.add(int(m.group(1)))
+    assert fold_values == set(range(n_fold_expected))
+
+
+def test_log_canonical_dual_path_rejects_b_fold_without_fold_index() -> None:
+    """`_log_canonical_dual_path(stage_label='B_fold', fold_index=None)` は
+    ValueError raise (= 識別子契約 fail-fast、 acceptance D5)。
+    """
+    from src.alpha_factory.stage_gate import _log_canonical_dual_path
+
+    with pytest.raises(ValueError, match="fold_index"):
+        _log_canonical_dual_path(
+            stage_label="B_fold",
+            genome_name="g_test",
+            legacy=_dummy_legacy_metrics(),
+            canonical=None,
+            fold_index=None,
+        )
+
+
+def test_stage_b_per_fold_canonical_golden_first_fold_succeeds() -> None:
+    """Stage B per-fold: 50 trades fixture で 1 fold 代表の canonical が
+    fixture-locked 期待値 (= 50 trades, net_pnl=5000, 他 step 1.5 と同じ deterministic
+    出力) と一致 (= acceptance A5)。
+
+    複数 fold での golden は overengineering (= 概念設計 scope)、
+    1 fold 代表で deterministic 性確認に十分。
+    """
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    trades = []
+    for i in range(50):
+        entry = base + timedelta(days=i // 10, hours=11, minutes=30)
+        exit = base + timedelta(days=i // 10, hours=12, minutes=i % 10)
+        trades.append(_bt(pid=i, entry_time=entry, exit_time=exit))
+    bars = _make_bars_60d()
+    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    result = _try_evaluate_canonical_five_safe(
+        trades=trades, equity_curve=equity_curve, bars=bars,
+        live_criteria=_make_default_live_criteria(),
+        window_days=20,  # wf_test_days
+        stage_label="B_fold", genome_name="g_b_per_fold_golden",
+        enabled=True,
+    )
+    # step 1.5 と同じ deterministic 出力を期待
+    assert result is not None
+    assert result.trade_count == 50
+    assert result.net_pnl_after_cost == pytest.approx(5000.0, abs=1e-9)
+    assert result.max_dd == pytest.approx(0.0, abs=1e-9)
+    assert result.session_block_win_rate_worst == pytest.approx(0.5, abs=1e-9)
+    assert result.gate_pass is False  # sharpe_min=1.0 を満たさない
+    assert result.invariants.is_feasible is True
+
+
+def test_existing_callers_log_does_not_include_fold_kwarg(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """既存 _log_canonical_dual_path caller (= Stage A / B_IS / C_base) の出力に
+    `fold=` kwargs key が含まれないことを確認 (= optional kwarg 追加の後方互換、
+    acceptance A4、 Codex Round 2 [Suggestion] 反映)。
+    """
+    from src.alpha_factory.stage_gate import evaluate_stage_a
+    from tests._helpers import usd_jpy_meta
+    from tests.alpha_factory.test_stage_gate import (
+        _backtest_config,
+        _make_continuous_bars,
+        _one_clause_genome,
+    )
+    from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+    bars = _make_continuous_bars(2, bars_per_day=4)
+    ev = ConstantPrimitiveEvaluator(value=0.0)
+    res = evaluate_stage_a(
+        _one_clause_genome("g_a_no_fold_kwarg"), bars, usd_jpy_meta(),
+        _backtest_config(), ev, StageGateConfig(),
+    )
+    assert res.stage == "A"
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    # Stage A の dual-path log 行を取得
+    a_lines = [
+        line for line in combined.splitlines()
+        if "stage_gate.canonical_five.dual_path" in line and "stage=A " in line
+    ]
+    # fold kwargs key は含まれない (= None default で出力されない)
+    for line in a_lines:
+        assert "fold=" not in line, (
+            f"Stage A dual-path log should not include fold kwarg: {line}"
+        )
+
+
+def test_stage_b_is_and_c_base_log_does_not_include_fold_kwarg(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stage B IS / Stage C base の dual-path log にも `fold=` kwargs key が
+    含まれないことを確認 (= optional kwarg 後方互換補強、 Codex impl-review
+    Round 1 [Suggestion] 反映で A4 強化)。
+    """
+    from src.alpha_factory.stage_gate import evaluate_stage_b, evaluate_stage_c
+    from tests._helpers import usd_jpy_meta
+    from tests.alpha_factory.test_stage_gate import (
+        _backtest_config,
+        _make_continuous_bars,
+        _one_clause_genome,
+    )
+    from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+    bars = _make_continuous_bars(20, bars_per_day=4)
+    ev = ConstantPrimitiveEvaluator(value=0.0)
+    cfg = _backtest_config()
+    # Stage B IS (= 既存 _stage_b_small_cfg fixture 流用)
+    res_b = evaluate_stage_b(
+        _one_clause_genome("g_b_is_no_fold_kwarg"), bars, usd_jpy_meta(),
+        cfg, ev, _stage_b_small_cfg(),
+    )
+    # Stage C base
+    res_c = evaluate_stage_c(
+        _one_clause_genome("g_c_base_no_fold_kwarg"),
+        _make_continuous_bars(2, bars_per_day=4),
+        usd_jpy_meta(), cfg, ev, StageGateConfig(),
+    )
+    assert res_b.stage == "B"
+    assert res_c.stage == "C"
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    # B_IS / C_base log 行に fold kwarg が含まれない
+    for stage_marker in ("stage=B_IS", "stage=C_base"):
+        lines = [
+            line for line in combined.splitlines()
+            if "stage_gate.canonical_five.dual_path" in line and stage_marker in line
+        ]
+        assert len(lines) >= 1, f"expected at least 1 line for {stage_marker}"
+        for line in lines:
+            assert "fold=" not in line, (
+                f"{stage_marker} dual-path log should not include fold kwarg: {line}"
+            )
+
+
+def test_stage_b_per_fold_canonical_skipped_path_includes_fold_kwarg(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """phase2_canonical_metrics_mode='disabled' で `stage='B_fold'` log entry が
+    出る場合、 すべての行に `fold=` kwargs key が含まれる (= acceptance C5)。
+
+    Codex Round 1 [Warning] 反映: canonical_skipped=True path でも
+    fold kwarg は識別子契約 SSOT で必須。
+    """
+    from src.alpha_factory.stage_gate import evaluate_stage_b
+    from src.alpha_factory.walk_forward import make_wf_folds
+    from tests._helpers import usd_jpy_meta
+    from tests.alpha_factory.test_stage_gate import (
+        _backtest_config,
+        _make_continuous_bars,
+        _one_clause_genome,
+    )
+    from tests.dsl.conftest import ConstantPrimitiveEvaluator
+
+    bars = _make_continuous_bars(20, bars_per_day=4)
+    ev = ConstantPrimitiveEvaluator(value=0.0)
+    cfg = _stage_b_multi_fold_cfg(phase2_canonical_metrics_mode="disabled")
+    n_fold_expected = len(make_wf_folds(
+        bars,
+        train_days=cfg.wf_train_days,
+        test_days=cfg.wf_test_days,
+        step_days=cfg.wf_step_days,
+        embargo_days=cfg.wf_embargo_days,
+    ))
+    res = evaluate_stage_b(
+        _one_clause_genome("g_b_per_fold_skipped_fold_key"), bars, usd_jpy_meta(),
+        _backtest_config(), ev, cfg,
+    )
+    assert res.stage == "B"
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    # disabled mode でも B_fold 行は出る (canonical_skipped=True path)
+    b_fold_lines = [
+        line for line in combined.splitlines()
+        if "stage_gate.canonical_five.dual_path" in line and "stage=B_fold" in line
+    ]
+    assert len(b_fold_lines) == n_fold_expected
+    # 全行に fold kwarg が含まれる
+    import re
+    for line in b_fold_lines:
+        assert re.search(r"fold=\d+", line) is not None, (
+            f"B_fold canonical_skipped line must include fold=: {line}"
+        )

@@ -173,8 +173,23 @@ def _log_canonical_dual_path(
     genome_name: str,
     legacy: BacktestMetrics,
     canonical: CanonicalFiveResult | None,
+    fold_index: int | None = None,
 ) -> None:
     """dual-path 結果 (legacy + canonical) を構造化 log に出力.
+
+    Args:
+        stage_label: § 4.7 ログ命名規約 SSOT (A / B_IS / B_fold / C_base / C_cross_pair)。
+        genome_name: genome 識別子 (= logger kwargs key `genome`)。
+        legacy: BacktestMetrics (= 既存判定経路)。
+        canonical: CanonicalFiveResult or None (= helper 例外時 / disabled mode)。
+        fold_index: per-fold 識別子 (= 0..n_fold-1)。 stage_label="B_fold" のとき必須、
+            他 stage は None。 step 1.6 detailed-design § 4.7 / acceptance C4 / D5
+            で SSOT 化 (= B_fold log entry は (stage, genome, fold) で一意特定可能)。
+
+    Raises:
+        ValueError: stage_label="B_fold" かつ fold_index is None
+            (= acceptance D5、 識別子契約違反は fail-fast、 step 1.6 Codex Round 2
+            [Warning] 反映)。
 
     解釈規約 (Codex Round 1 [Warning] 3 取込):
     - dual-path log は **方向性監視** を目的とする (= 値一致や良し悪し判定ではない)。
@@ -187,43 +202,56 @@ def _log_canonical_dual_path(
     - flags_source="default_false" + fail_fast_flags_comparable=False で
       step 1 では broker engine から伝搬していないことを明示。
     """
-    if canonical is None:
-        logger.info(
-            "stage_gate.canonical_five.dual_path",
-            stage=stage_label,
-            genome=genome_name,
-            canonical_skipped=True,
+    # 識別子契約 SSOT (= step 1.6 acceptance D5)
+    if stage_label == "B_fold" and fold_index is None:
+        raise ValueError(
+            "_log_canonical_dual_path(stage_label='B_fold') requires fold_index "
+            "(= step 1.6 acceptance D5 / 識別子契約 SSOT、 "
+            "B_fold log entry は (stage, genome, fold) で一意特定可能でなければならない)"
         )
+
+    if canonical is None:
+        log_kwargs: dict[str, object] = {
+            "stage": stage_label,
+            "genome": genome_name,
+            "canonical_skipped": True,
+        }
+        if fold_index is not None:
+            log_kwargs["fold"] = fold_index
+        logger.info("stage_gate.canonical_five.dual_path", **log_kwargs)
         return
-    logger.info(
-        "stage_gate.canonical_five.dual_path",
-        stage=stage_label,
-        genome=genome_name,
+
+    log_kwargs = {
+        "stage": stage_label,
+        "genome": genome_name,
         # canonical の fail-fast flag 出所 (= step 1 では default False 固定、
         # Codex Round 2 [Suggestion] 取込で boolean field も併記)
-        flags_source="default_false",
-        fail_fast_flags_comparable=False,
+        "flags_source": "default_false",
+        "fail_fast_flags_comparable": False,
         # legacy
-        legacy_total_pnl=str(legacy.total_pnl),
-        legacy_trade_count=legacy.trade_count,
-        legacy_max_dd_pct=str(legacy.max_drawdown_pct),
-        legacy_sharpe=str(legacy.sharpe) if legacy.sharpe is not None else None,
+        "legacy_total_pnl": str(legacy.total_pnl),
+        "legacy_trade_count": legacy.trade_count,
+        "legacy_max_dd_pct": str(legacy.max_drawdown_pct),
+        "legacy_sharpe": str(legacy.sharpe) if legacy.sharpe is not None else None,
         # canonical
-        canonical_net_pnl=canonical.net_pnl_after_cost,
-        canonical_trade_count=canonical.trade_count,
-        canonical_max_dd=canonical.max_dd,
-        canonical_sr_worst_block=canonical.sr_session_worst_block_scale,
-        canonical_sr_worst_annual=canonical.sr_session_worst_annual_estimate,
-        canonical_wr_worst=canonical.session_block_win_rate_worst,
-        canonical_gate_pass=canonical.gate_pass,
-        canonical_gate_worst_gap=canonical.gate_worst_gap,
-        canonical_invariants_feasible=canonical.invariants.is_feasible,
+        "canonical_net_pnl": canonical.net_pnl_after_cost,
+        "canonical_trade_count": canonical.trade_count,
+        "canonical_max_dd": canonical.max_dd,
+        "canonical_sr_worst_block": canonical.sr_session_worst_block_scale,
+        "canonical_sr_worst_annual": canonical.sr_session_worst_annual_estimate,
+        "canonical_wr_worst": canonical.session_block_win_rate_worst,
+        "canonical_gate_pass": canonical.gate_pass,
+        "canonical_gate_worst_gap": canonical.gate_worst_gap,
+        "canonical_invariants_feasible": canonical.invariants.is_feasible,
         # diff (= 規模感確認のみ、 値一致を要求しない)
-        pnl_diff=float(legacy.total_pnl) - canonical.net_pnl_after_cost,
-        trade_count_diff=legacy.trade_count - canonical.trade_count,
+        "pnl_diff": float(legacy.total_pnl) - canonical.net_pnl_after_cost,
+        "trade_count_diff": legacy.trade_count - canonical.trade_count,
         # 解釈規約 (運用者向け sentinel)
-        interpretation_note="direction_monitoring_only",
-    )
+        "interpretation_note": "direction_monitoring_only",
+    }
+    if fold_index is not None:
+        log_kwargs["fold"] = fold_index
+    logger.info("stage_gate.canonical_five.dual_path", **log_kwargs)
 
 # T034: Stage A fitness_pen sentinel 序列。
 # archive `_required_float` は None → 0.0 fallback するため、Stage A の 3 失敗
@@ -892,6 +920,12 @@ def evaluate_stage_b(
     for i, (_train_bars, test_bars) in enumerate(folds):
         fold_sharpe: float | None = None
         fold_reason: FoldUnavailableReason | None = None
+        # B Phase 2 step 1.6: dual-path 経路用に legacy 結果を保持
+        # (= 別 try ブロックに渡す、 acceptance D4 物理隔離契約)
+        fold_bt: BacktestMetrics | None = None
+        fold_trades: list[BrokerTrade] | None = None
+        fold_equity: list[tuple[datetime, Decimal]] | None = None
+        # === 既存 legacy fold 計算 (= fold_sharpe / fold_reason 確定、 完全不変) ===
         try:
             if _aux_supports_with_aux:
                 aligned_for_fold = aux_bundle.align_to(test_bars)  # type: ignore[union-attr]
@@ -923,6 +957,10 @@ def evaluate_stage_b(
                     trade_count=bt.trade_count,
                     trade_count_min=fold_min_trade_count,
                 )
+            # B Phase 2 step 1.6: dual-path 用に legacy 結果を保持
+            fold_bt = bt
+            fold_trades = res.trades
+            fold_equity = res.equity_curve
         except Exception as exc:
             logger.warning(
                 "stage_b.fold_failure",
@@ -933,6 +971,61 @@ def evaluate_stage_b(
             )
             fold_sharpe = None
             fold_reason = FoldUnavailableReason.FOLD_EXCEPTION
+
+        # === B Phase 2 step 1.6: per-fold dual-path (= 別 try で物理隔離、
+        # acceptance D1-D5)。 legacy fold 計算成功時のみ実行、 失敗時は skip
+        # (= 既存 fold_failure WARN log で legacy 経路の状態は記録済)。
+        # この block 内では fold_sharpe / fold_reason / reason_counts を
+        # 絶対書き換えない (= D4 物理隔離契約) ===
+        if (
+            fold_bt is not None
+            and fold_trades is not None
+            and fold_equity is not None
+        ):
+            try:
+                canonical_sidecar_b_fold = _try_evaluate_canonical_five_safe(
+                    trades=fold_trades,
+                    equity_curve=fold_equity,
+                    bars=test_bars,
+                    live_criteria=stage_config.live_criteria,
+                    window_days=stage_config.wf_test_days,
+                    stage_label="B_fold",
+                    genome_name=genome.name,
+                    enabled=(
+                        stage_config.phase2_canonical_metrics_mode != "disabled"
+                    ),
+                )
+                # log 呼出も例外保護 (= step 1.5 と同型、 logger processor 異常時に
+                # legacy 経路を巻き込まない、 完全隔離)
+                try:
+                    _log_canonical_dual_path(
+                        stage_label="B_fold",
+                        genome_name=genome.name,
+                        legacy=fold_bt,
+                        canonical=canonical_sidecar_b_fold,
+                        fold_index=i,
+                    )
+                except Exception as log_exc:
+                    logger.warning(
+                        "stage_gate.canonical_five.log_failed",
+                        stage="B_fold",
+                        fold=i,
+                        genome=genome.name,
+                        error=str(log_exc),
+                        error_type=type(log_exc).__name__,
+                    )
+            except Exception as canonical_exc:
+                # 想定外例外でも fold_sharpe / fold_reason は絶対変えない (= D1)
+                logger.warning(
+                    "stage_gate.canonical_five.unexpected_failure",
+                    stage="B_fold",
+                    fold=i,
+                    genome=genome.name,
+                    error=str(canonical_exc),
+                    error_type=type(canonical_exc).__name__,
+                )
+
+        # === 既存 fold_sharpe / fold_reason ハンドリング (= 完全不変) ===
         if fold_sharpe is None:
             n_fold_unavailable += 1
             oos_sharpes_imputed.append(0.0)
