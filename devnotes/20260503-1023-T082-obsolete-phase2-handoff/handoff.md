@@ -1,9 +1,9 @@
-# T082 Obsoleted + B Phase 2 切替コミット を次主作業に再構成 Handoff
+# T082 Obsoleted + B Phase 2 切替コミット step 1 skeleton 着手 Handoff
 
-**作成日時**: 2026-05-03 10:23 JST
-**Session**: T081 Closed (step 1 only) → T082 着手調査 → T082 構造的 blocker 発見 → T082 Obsoleted + finding commit
+**作成日時**: 2026-05-03 10:23 JST、 **更新**: 2026-05-03 10:35 JST (= B step 1 skeleton 設計 commit)
+**Session**: T081 Closed (step 1 only) → T082 構造的 blocker 発見 → T082 Obsoleted → B Phase 2 切替コミット step 1 (canonical_metrics) skeleton 設計 commit
 **前 handoff**: `devnotes/20260503-0918-T081-closed-handoff/handoff.md`
-**次セッション**: **B Phase 2 切替コミット (= T063-T068 + canonical_metrics + stage_bc_evaluator を main flow に統合)** を次の主作業として再構成
+**次セッション**: **B Phase 2 切替コミット step 1 を本格化 → Codex review APPROVED → 実装 → main マージ → step 2 へ**
 
 ---
 
@@ -135,9 +135,11 @@ grep -n "def evaluate_canonical_five\|class BCEvaluationInput" src/alpha_factory
 
 ---
 
-## 4. 累積 commit 一覧 (本セッション、 main 4 個)
+## 4. 累積 commit 一覧 (本セッション、 main 10 個)
 
 ```
+ff31f71 docs(B-phase2-step1): canonical_metrics → main flow 統合 skeleton 設計           ← 次主作業 skeleton
+9881abe docs(handoff): T082 Obsoleted + B Phase 2 切替コミット を次主作業に再構成
 ac4ad5f docs(TODO): T082 obsolete — TradeRecord 経路が main flow に未統合
 f5586b0 docs(T082): blocker finding — TradeRecord 経路が main flow に未統合
 c54936f docs(handoff): T081 Closed (step 1 only) + step 2-6 deferred + 残作業引き継ぎ
@@ -148,26 +150,46 @@ c54936f docs(handoff): T081 Closed (step 1 only) + step 2-6 deferred + 残作業
 caeff88 docs(T081): 詳細設計 本格化 (Codex 4 round APPROVED)
 ```
 
-本セッション commit 計 8 個。 cascade port v2 全体 commit 累計 ~58 個 (= 前 50 + 本 8)。
+本セッション commit 計 10 個。 cascade port v2 全体 commit 累計 ~60 個。
 
 ---
 
-## 5. 次セッション first prompt 例 (B Phase 2 切替コミット step 1 着手用)
+## 5. 次セッション first prompt 例 (B step 1 本格化 + 実装着手用)
+
+skeleton 設計は本セッションで commit 済 (= `ff31f71`、 `devnotes/20260503-1024-B-phase2-step1-canonical-metrics/`)。 次セッションは **本格化 + Codex review + 実装** から。
 
 ```
 引き継ぎは devnotes/20260503-1023-T082-obsolete-phase2-handoff/handoff.md 読んで。
-B Phase 2 切替コミット step 1 (= canonical_metrics → main flow) を実装着手。
+B Phase 2 切替コミット step 1 (= canonical_metrics → main flow) の skeleton 設計
+(devnotes/20260503-1024-B-phase2-step1-canonical-metrics/) を本格化 → Codex review →
+実装 → main マージ。
 
-着手前:
-1. 7 step segmentation で進める運用 (= 1 module / 1 step、 個別 commit、 個別 Codex review)
-2. step 1 の概念設計 + 詳細設計を新規 devnotes/{YYYYMMDD-HHMM}-B-phase2-step1-canonical-metrics/ で作成
-3. 既存 compute_metrics(broker.Trade) との dual-path → LOG_ONLY → FAIL_CLOSED 切替経路設計
-4. zenigame-fx-alpha-design で Codex review APPROVED → zenigame-fx-implement で worktree todo/B-step1
-5. step 完了で main マージ + step 2 着手
+着手前調査 (= skeleton § 9 後続セッション昇格手順):
+1. T070 calendar.py の関数 grep + 名称確認 (= assign_session_bucket_and_business_day_index /
+   compute_business_day_universe の実存確認)
+2. evaluate_canonical_five の signature 詳細確認 (= thresholds 必須か?)
+3. broker.Trade の field 全件確認 (= entry_time / exit_time の TZ awareness)
 
-step 1-7 完了後:
-- T081 step 2-6 再開可能化
-- smoke 5 Run / 実 GA 動作確認
+本格化:
+4. _try_evaluate_canonical_five_safe の例外 fallback ロジック詳細化
+5. phase2.canonical_metrics_mode config の loader 経路詳細化
+
+Codex review:
+6. zenigame-fx-codex-review で gpt-5.3-codex / high、 label=design-review
+   - 概念設計 + 詳細設計を Round 1 で APPROVED まで合議
+   - LOG_ONLY mode で既存判定不変が担保されているか重点確認
+   - dual-path 計算 overhead が許容範囲か確認
+
+実装:
+7. zenigame-fx-implement で worktree todo/B-step1
+   - canonical_adapter.py 新規 + stage_gate.py に dual-path 配線追加
+   - phase2.canonical_metrics_mode config 追加
+   - adapter unit test + dual-path integration test
+   - 既存 test 全 PASS (= regression 0)
+   - ruff / mypy clean
+
+完了:
+8. impl-review (= gpt-5.3-codex / high、 label=impl-review) APPROVED → main マージ → step 2 へ
 ```
 
 ---
