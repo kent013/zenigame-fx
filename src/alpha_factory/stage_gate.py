@@ -178,13 +178,16 @@ def _log_canonical_dual_path(
     """dual-path 結果 (legacy + canonical) を構造化 log に出力.
 
     Args:
-        stage_label: § 4.7 ログ命名規約 SSOT (A / B_IS / B_fold / C_base / C_cross_pair)。
+        stage_label: § 4.7 ログ命名規約 SSOT
+            (A / B_IS / B_fold / C_base / C_stress / C_cross_pair)。
+            注: C_stress は step 1.7 で追加 (= Stage C spread stress backtest)。
         genome_name: genome 識別子 (= logger kwargs key `genome`)。
         legacy: BacktestMetrics (= 既存判定経路)。
         canonical: CanonicalFiveResult or None (= helper 例外時 / disabled mode)。
         fold_index: per-fold 識別子 (= 0..n_fold-1)。 stage_label="B_fold" のとき必須、
-            他 stage は None。 step 1.6 detailed-design § 4.7 / acceptance C4 / D5
-            で SSOT 化 (= B_fold log entry は (stage, genome, fold) で一意特定可能)。
+            他 stage (= A / B_IS / C_base / C_stress / C_cross_pair) は None。
+            step 1.6 detailed-design § 4.7 / acceptance C4 / D5 で SSOT 化
+            (= B_fold log entry は (stage, genome, fold) で一意特定可能)。
 
     Raises:
         ValueError: stage_label="B_fold" かつ fold_index is None
@@ -1395,12 +1398,19 @@ def evaluate_stage_c(
     if backtest_config.max_spread_bps is None:
         stress_payload["skipped"] = True
         reasons.append("spread_stress_skipped")
+        # B Phase 2 step 1.7: legacy stress skip → dual-path も skip (= 何も emit しない)
     else:
         # Decimal × Decimal で型安全 (max_spread_bps が Decimal/float いずれでも安全)
         base_max = Decimal(str(backtest_config.max_spread_bps))
         multiplier_dec = Decimal(str(stage_config.spread_stress_multiplier))
         new_max = base_max * multiplier_dec
         stress_config = replace(backtest_config, max_spread_bps=new_max)
+        # B Phase 2 step 1.7: dual-path 経路用に legacy 結果を保持 (= 別 try に渡す、
+        # acceptance D4 物理隔離契約)
+        stress_bt: BacktestMetrics | None = None
+        stress_trades: list[BrokerTrade] | None = None
+        stress_equity: list[tuple[datetime, Decimal]] | None = None
+        # === 既存 legacy stress 計算 (= stress_payload / reasons 確定、 完全不変) ===
         try:
             strategy = DslStrategy(genome, primitive_evaluator)
             broker = MockBroker(instrument_meta=meta)
@@ -1432,6 +1442,10 @@ def evaluate_stage_c(
                 stage_config.spread_stress_min_sharpe
             ):
                 reasons.append("spread_stress.sharpe<min")
+            # B Phase 2 step 1.7: dual-path 用に legacy 結果を保持
+            stress_bt = bt
+            stress_trades = res.trades
+            stress_equity = res.equity_curve
         except Exception as exc:
             logger.warning(
                 "stage_c.stress_failure",
@@ -1440,6 +1454,56 @@ def evaluate_stage_c(
             )
             stress_payload["skipped"] = True
             reasons.append("spread_stress_skipped")
+            # B Phase 2 step 1.7: stress 例外 → stress_bt は None のまま、 dual-path も skip
+
+        # === B Phase 2 step 1.7: stress dual-path (= 別 try で物理隔離、
+        # acceptance D1-D4)。 legacy stress 計算成功時のみ dual-path 観測
+        # (= 失敗時 skip、 既存 stress_failure WARN log で legacy 経路状態は記録済)。
+        # stress_payload / reasons は dual-path で絶対書き換えない (= D4) ===
+        if (
+            stress_bt is not None
+            and stress_trades is not None
+            and stress_equity is not None
+        ):
+            try:
+                canonical_sidecar_c_stress = _try_evaluate_canonical_five_safe(
+                    trades=stress_trades,
+                    equity_curve=stress_equity,
+                    bars=bars_holdout,
+                    live_criteria=stage_config.live_criteria,
+                    window_days=stage_config.stage_c_holdout_days,
+                    stage_label="C_stress",
+                    genome_name=genome.name,
+                    enabled=(
+                        stage_config.phase2_canonical_metrics_mode != "disabled"
+                    ),
+                )
+                # log 呼出も例外保護 (= step 1.5 / 1.6 と同型)
+                try:
+                    _log_canonical_dual_path(
+                        stage_label="C_stress",
+                        genome_name=genome.name,
+                        legacy=stress_bt,
+                        canonical=canonical_sidecar_c_stress,
+                        # fold_index=None default (= C_stress は fold key 不在)
+                    )
+                except Exception as log_exc:
+                    logger.warning(
+                        "stage_gate.canonical_five.log_failed",
+                        stage="C_stress",
+                        genome=genome.name,
+                        error=str(log_exc),
+                        error_type=type(log_exc).__name__,
+                    )
+            except Exception as canonical_exc:
+                # 想定外例外でも stress_payload / reasons は絶対変えない (= D1)
+                logger.warning(
+                    "stage_gate.canonical_five.unexpected_failure",
+                    stage="C_stress",
+                    genome=genome.name,
+                    error=str(canonical_exc),
+                    error_type=type(canonical_exc).__name__,
+                )
 
     # cross-pair shadow hook (T016)
     # Phase 2: shadow only — passed には影響させない (mode='hard' は別 TODO)
