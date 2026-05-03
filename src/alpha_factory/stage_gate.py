@@ -837,6 +837,38 @@ def evaluate_stage_b(
         )
         is_full_total_pnl = float(bt.total_pnl)
         is_full_trade_count = bt.trade_count
+        # B Phase 2 切替コミット step 1.5: dual-path canonical 5 metrics (LOG_ONLY mode)
+        # IS monitor (= bars_18m 全体 backtest) に対する dual-path 観測拡張。
+        # window_days は step 1 と同じ calendar day 基準 (= stage_b_window_months * 30)。
+        # 既存 fitness 判定経路には影響させない (= regression 0、 sidecar 計算 + log のみ)。
+        canonical_sidecar_b_is = _try_evaluate_canonical_five_safe(
+            trades=res.trades,
+            equity_curve=res.equity_curve,
+            bars=bars_18m,
+            live_criteria=stage_config.live_criteria,
+            window_days=stage_config.stage_b_window_months * 30,
+            stage_label="B_IS",
+            genome_name=genome.name,
+            enabled=(stage_config.phase2_canonical_metrics_mode != "disabled"),
+        )
+        # log 呼出も例外保護 (= step 1 と同型、 logger processor 異常時に
+        # legacy 経路を巻き込まない、 完全隔離)
+        try:
+            _log_canonical_dual_path(
+                stage_label="B_IS",
+                genome_name=genome.name,
+                legacy=bt,
+                canonical=canonical_sidecar_b_is,
+            )
+        except Exception as exc:
+            logger.warning(
+                "stage_gate.canonical_five.log_failed",
+                stage="B_IS",
+                genome=genome.name,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        # canonical_sidecar_b_is は payload 非添付 (= archive Parquet schema 不変)
     except Exception as exc:
         logger.warning(
             "stage_b.is_monitor_failure",
@@ -1183,6 +1215,37 @@ def evaluate_stage_c(
         for t in res.trades:
             if t.entry_time.date() != t.exit_time.date():
                 overnight_violations += 1
+        # B Phase 2 切替コミット step 1.5: dual-path canonical 5 metrics (LOG_ONLY mode)
+        # base evaluation (= bars_holdout 60d backtest) に対する dual-path 観測拡張。
+        # window_days は step 1 と同じ calendar day 基準 (= stage_c_holdout_days)。
+        # stress / cross_pair は別軸で step 1.5 スコープ外 (= 別 log で混入なし)。
+        canonical_sidecar_c_base = _try_evaluate_canonical_five_safe(
+            trades=res.trades,
+            equity_curve=res.equity_curve,
+            bars=bars_holdout,
+            live_criteria=stage_config.live_criteria,
+            window_days=stage_config.stage_c_holdout_days,
+            stage_label="C_base",
+            genome_name=genome.name,
+            enabled=(stage_config.phase2_canonical_metrics_mode != "disabled"),
+        )
+        # log 呼出も例外保護 (= step 1 と同型)
+        try:
+            _log_canonical_dual_path(
+                stage_label="C_base",
+                genome_name=genome.name,
+                legacy=bt,
+                canonical=canonical_sidecar_c_base,
+            )
+        except Exception as exc:
+            logger.warning(
+                "stage_gate.canonical_five.log_failed",
+                stage="C_base",
+                genome=genome.name,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        # canonical_sidecar_c_base は payload 非添付 (= archive Parquet schema 不変)
     except Exception as exc:
         logger.warning(
             "stage_c.base_failure",

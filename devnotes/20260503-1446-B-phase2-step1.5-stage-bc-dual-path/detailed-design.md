@@ -683,4 +683,4 @@ step 1.5 では以下を実装しない (= scope を limit、 過度な複雑化
 - canonical_adapter.py (凍結): `src/alpha_factory/canonical_adapter.py`
 - stage_gate.py (拡張対象): `src/alpha_factory/stage_gate.py:567-1378`
 - canonical_metrics.py: `src/alpha_factory/canonical_metrics.py` (= TradeRecord / BarEquitySeries / evaluate_canonical_five)
-- step 1 test: `tests/alpha_factory/test_stage_gate_canonical_dual_path.py` (= 12 ケース、 step 1.5 で +10 ケース追加)
+- step 1 test: `tests/alpha_factory/test_stage_gate_canonical_dual_path.py` (= 12 ケース、 step 1.5 で +21 ケース追加 = 計 33 ケース)
