@@ -1317,3 +1317,88 @@ class TestSerializeRunObservabilityReport:
         assert parsed["q_force_recommendation"]["reason"] == "raise"
         assert parsed["bypass_ratio"]["bypass_ratio"] == "0.20"
         assert parsed["selection"]["front1_cardinality"] == 12
+
+
+# ============================================================================
+# T081 step 1: 個別 default constructor の互換性 test
+# ============================================================================
+
+
+class TestDefaultConstructorEquality:
+    """T081 step 1: 個別 default constructor 9 件 を combine した結果が、 既存
+    build_stub_run_observability_report と byte-for-byte equality であること
+    (Codex Round 2 [Suggestion] 1 取込: stub builder の DRY 化互換性)。"""
+
+    def test_stub_report_equals_default_constructor_combine(self) -> None:
+        from src.alpha_factory.observability.run_metrics import (
+            build_default_ab_divergence_metric,
+            build_default_archive_churn_metric,
+            build_default_bypass_ratio_metric,
+            build_default_failure_metric,
+            build_default_feasible_ratio_metric,
+            build_default_inflow_consistency_metric,
+            build_default_q_force_recommendation,
+            build_default_selection_metric,
+            build_default_session_entropy_metric,
+        )
+        # 既存 stub builder
+        stub_report = build_stub_run_observability_report(
+            run_id="t081-equality",
+            dataset_epoch_id="epoch-1",
+            generation_count=42,
+        )
+        # 個別 default constructor 9 件 combine
+        manual_report = build_run_observability_report(
+            run_id="t081-equality",
+            dataset_epoch_id="epoch-1",
+            generation_count=42,
+            ab_divergence=build_default_ab_divergence_metric(),
+            q_force_recommendation=build_default_q_force_recommendation(),
+            archive_churn=build_default_archive_churn_metric(),
+            bypass_ratio=build_default_bypass_ratio_metric(),
+            session_entropy=build_default_session_entropy_metric(),
+            feasible_ratio=build_default_feasible_ratio_metric(),
+            selection=build_default_selection_metric(),
+            inflow_consistency=build_default_inflow_consistency_metric(),
+            failure=build_default_failure_metric("t081-equality"),
+        )
+        # dataclass 等価性
+        assert stub_report == manual_report
+
+    def test_stub_report_json_byte_equality_after_default_constructor_export(
+        self,
+    ) -> None:
+        """JSON serialize 後 byte-for-byte 一致 (= report.md 互換性保証)."""
+        from src.alpha_factory.observability.run_metrics import (
+            build_default_ab_divergence_metric,
+            build_default_archive_churn_metric,
+            build_default_bypass_ratio_metric,
+            build_default_failure_metric,
+            build_default_feasible_ratio_metric,
+            build_default_inflow_consistency_metric,
+            build_default_q_force_recommendation,
+            build_default_selection_metric,
+            build_default_session_entropy_metric,
+        )
+        stub_report = build_stub_run_observability_report(
+            run_id="byte-equality",
+            dataset_epoch_id="e",
+            generation_count=10,
+        )
+        manual_report = build_run_observability_report(
+            run_id="byte-equality",
+            dataset_epoch_id="e",
+            generation_count=10,
+            ab_divergence=build_default_ab_divergence_metric(),
+            q_force_recommendation=build_default_q_force_recommendation(),
+            archive_churn=build_default_archive_churn_metric(),
+            bypass_ratio=build_default_bypass_ratio_metric(),
+            session_entropy=build_default_session_entropy_metric(),
+            feasible_ratio=build_default_feasible_ratio_metric(),
+            selection=build_default_selection_metric(),
+            inflow_consistency=build_default_inflow_consistency_metric(),
+            failure=build_default_failure_metric("byte-equality"),
+        )
+        stub_js = serialize_run_observability_report(stub_report)
+        manual_js = serialize_run_observability_report(manual_report)
+        assert stub_js == manual_js  # byte-for-byte 一致
