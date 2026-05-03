@@ -90,3 +90,4 @@
 | ID | タイトル | テーマ | 優先度 | 廃止日時 | 理由 |
 |----|---------|-------|-------|---------|------|
 | T032 | signal-eval-consistency-fix | primitives | Critical | 2026-04-26 01:30 | superseded by T031 (selection_score feasibility added in cycle 1, T032 design content fully overlaps) |
+| T082 | TradeRecord.spread_cost / holding_cost 伝搬経路配線 (T078 follow-up) | ga-architecture | High | 2026-05-03 10:22 | TradeRecord 経路が main flow に未統合 (= broker Trade → TradeRecord 変換箇所が src/ に存在しない、 stage_bc_evaluator が library-only)。 T078 で確立した型整合性は B Phase 2 切替コミットで TradeRecord 経路を main flow に統合する際にそのまま効く。 finding: devnotes/20260503-1020-T082-blocker-finding/finding.md。 |
