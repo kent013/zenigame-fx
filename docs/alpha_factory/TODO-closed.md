@@ -86,6 +86,7 @@
 | T081 | RunObservabilityReport 9 metric 実値配線 (T080 follow-up、 6 step 内包) | infrastructure | High | 2026-05-03 09:13 | - |
 | T083 | B-phase2-step1.5-stage-bc-dual-path | stage-gate | High | 2026-05-03 16:51 | - |
 | T084 | B-phase2-step1.6-stage-b-per-fold-dual-path | stage-gate | Medium | 2026-05-03 21:54 | - |
+| T085 | B-phase2-step1.7-stage-c-stress-dual-path | stage-gate | Medium | 2026-05-04 00:03 | - |
 
 ## Obsoleted
 
