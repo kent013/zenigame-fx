@@ -269,6 +269,36 @@ class SchemaContractConfig:
 
 
 @dataclass(frozen=True)
+class Phase2Config:
+    """B Phase 2 切替コミット 用 config (= cascade port v2 段階統合管理).
+
+    cascade port v2 で導入した 8 module (canonical_metrics / cpps_archive /
+    nsga2_selection / loop_closure / failure_handling / stage_a_evaluator /
+    stage_bc_evaluator / observability) の main flow 統合フェーズを管理する。
+
+    canonical_metrics_mode (B step 1):
+        - log_only: dual-path で canonical 5 metrics を計算 + log のみ (default)、
+          legacy 判定は完全に不変 (= regression 0)。
+        - disabled: canonical 計算を完全 skip (= 計算 overhead 0、 緊急時 fallback)。
+        - fail_closed: 後続別 TODO で導入予定 (= step 1 では不許容、 __post_init__ で
+          ValueError raise = Codex Round 1 [Warning] 4 取込)。
+    """
+
+    canonical_metrics_mode: Literal["log_only", "disabled"] = "log_only"
+
+    def __post_init__(self) -> None:
+        # Codex Round 1 [Warning] 4 取込: step 1 では fail_closed を許容しない契約固定
+        # (= 後続別 TODO で許容値を Literal["log_only", "fail_closed", "disabled"] に拡張)
+        valid = {"log_only", "disabled"}
+        if self.canonical_metrics_mode not in valid:
+            raise ValueError(
+                f"Phase2Config.canonical_metrics_mode must be one of {sorted(valid)}, "
+                f"got {self.canonical_metrics_mode!r}. "
+                f"fail_closed は step 1 範囲外 (= 後続別 TODO で導入)."
+            )
+
+
+@dataclass(frozen=True)
 class AlphaFactoryConfig:
     """Alpha Factory 全体 config。loader から返される SSOT 構造。
 
@@ -286,6 +316,7 @@ class AlphaFactoryConfig:
     schema_contract: SchemaContractConfig = field(  # T058
         default_factory=SchemaContractConfig
     )
+    phase2: Phase2Config = field(default_factory=Phase2Config)  # B step 1 で追加
 
     @property
     def live_criteria(self) -> Mapping[str, float | int]:
@@ -505,6 +536,16 @@ def load_config(
     stage_gate = _build_stage_gate(
         raw.get("stage_gate") or {}, raw.get("live_criteria") or {}
     )
+    phase2 = _build_phase2(raw.get("phase2") or {})
+    # B Phase 2 切替コミット step 1 (Codex impl-review Round 1 [Critical] 1 取込):
+    # phase2.canonical_metrics_mode を StageGateConfig.phase2_canonical_metrics_mode に
+    # 値伝搬 (= 禁止事項 8 値伝搬漏れ防止)。 stage_gate caller が dual-path 計算の
+    # enabled flag をこの field から読む。
+    from dataclasses import replace as _dc_replace
+    stage_gate = _dc_replace(
+        stage_gate,
+        phase2_canonical_metrics_mode=phase2.canonical_metrics_mode,
+    )
     return AlphaFactoryConfig(
         dataset=_build_dataset(raw.get("dataset") or {}),
         backtest=_build_backtest(raw.get("backtest") or {}),
@@ -516,7 +557,22 @@ def load_config(
         ),
         fsp=_build_fsp(raw.get("factor_shadow") or {}),
         schema_contract=_build_schema_contract(raw.get("schema_contract") or {}),
+        phase2=phase2,
     )
+
+
+def _build_phase2(raw: Mapping[str, Any]) -> Phase2Config:
+    """B step 1: ``phase2`` yaml section → :class:`Phase2Config`.
+
+    unknown key は明示的に reject (= schema_contract と同パターン).
+    """
+    unknown_keys = set(raw.keys()) - {"canonical_metrics_mode"}
+    if unknown_keys:
+        raise ValueError(f"phase2: unknown keys {sorted(unknown_keys)}")
+    kwargs: dict[str, Any] = {}
+    if "canonical_metrics_mode" in raw:
+        kwargs["canonical_metrics_mode"] = str(raw["canonical_metrics_mode"])
+    return Phase2Config(**kwargs)
 
 
 def _build_schema_contract(raw: Mapping[str, Any]) -> SchemaContractConfig:
