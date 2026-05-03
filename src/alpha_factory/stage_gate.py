@@ -65,21 +65,22 @@ logger = structlog.get_logger(__name__)
 _CANONICAL_DUAL_PATH_DEFAULT_WIN_RATE_MIN: Final[float] = 0.45
 
 
-def _build_stage_a_canonical_thresholds(
+def _build_canonical_thresholds_for_window(
     *,
     live_criteria: Mapping[str, float | int],
     window_days: int,
     baseline_dataset_days: int = 730,
 ) -> CanonicalFiveThresholds:
-    """Stage A 評価窓用 CanonicalFiveThresholds を構築.
+    """評価窓用 CanonicalFiveThresholds を構築 (= 全 Stage 共通).
 
-    derive_stage_a_thresholds (= stage_a_evaluator) と異なり、
+    Stage A (60d) / Stage B IS (540d) / Stage C base (60d) で再利用される
+    汎用 helper。 derive_stage_a_thresholds (= stage_a_evaluator) と異なり、
     live_criteria に win_rate_min が無くても _CANONICAL_DUAL_PATH_DEFAULT_WIN_RATE_MIN
-    を default として使用 (= 既存 live_criteria 互換性維持、 step 1 範囲)。
+    を default として使用 (= 既存 live_criteria 互換性維持)。
 
     Args:
         live_criteria: stage_gate.live_criteria (= MappingProxyType[str, float|int])。
-        window_days: 評価窓日数 (= Stage A は 60d)。
+        window_days: 評価窓日数 (= calendar day 基準で step 1/1.5 統一)。
         baseline_dataset_days: live_criteria の baseline 期間 (= 730d default)。
 
     Returns:
@@ -142,7 +143,7 @@ def _try_evaluate_canonical_five_safe(
     if not enabled:
         return None
     try:
-        thresholds = _build_stage_a_canonical_thresholds(
+        thresholds = _build_canonical_thresholds_for_window(
             live_criteria=live_criteria,
             window_days=window_days,
         )
