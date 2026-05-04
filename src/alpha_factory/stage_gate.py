@@ -941,6 +941,9 @@ def evaluate_stage_b(
     oos_sharpes_imputed: list[float] = []
     # T035: fold ごとの unavailable フラグを保持し effective 集計に使う
     fold_was_unavailable: list[bool] = []
+    # cycle 21: fold ごとの trade_count を観測 (= time-concentrated 仮説検証用、
+    # diagnostics sidecar に出力するため payload に追加。 archive 列拡張なし)
+    fold_trade_counts: list[int] = []
     # T054: 排他的 reason 別カウント。sum(reason_counts.values()) == n_fold_unavailable
     # の不変条件を保つ (test_stage_gate.py で検証)。
     reason_counts: dict[FoldUnavailableReason, int] = dict.fromkeys(
@@ -1062,6 +1065,8 @@ def evaluate_stage_b(
             fold_bt = bt
             fold_trades = res.trades
             fold_equity = res.equity_curve
+            # cycle 21: fold trade_count 観測 (= time-concentrated 仮説検証)
+            fold_trade_counts.append(int(bt.trade_count))
         except Exception as exc:
             logger.warning(
                 "stage_b.fold_failure",
@@ -1072,6 +1077,7 @@ def evaluate_stage_b(
             )
             fold_sharpe = None
             fold_reason = FoldUnavailableReason.FOLD_EXCEPTION
+            fold_trade_counts.append(-1)  # cycle 21: fold_exception sentinel
 
         # === B Phase 2 step 1.6: per-fold dual-path (= 別 try で物理隔離、
         # acceptance D1-D5)。 legacy fold 計算成功時のみ実行、 失敗時は skip
@@ -1185,6 +1191,19 @@ def evaluate_stage_b(
         f"sum={sum(reason_counts.values())}, n_fold_unavailable={n_fold_unavailable}"
     )
 
+    # cycle 21: stage_b_pass=True 個体について fold_trade_counts を log 出力
+    # (= time-concentrated 仮説検証、 後続の log grep で集計)
+    if passed:
+        logger.info(
+            "stage_b.fold_trade_counts_observation",
+            genome=genome.name,
+            fold_trade_counts=fold_trade_counts,
+            n_fold=n_fold,
+            n_fold_unavailable=n_fold_unavailable,
+            median_oos_sharpe=median_oos,
+            positive_fold_ratio=positive_ratio,
+        )
+
     metrics_envelope: dict[str, object] = {
         "stage": "B",
         "genome_name": genome.name,
@@ -1206,6 +1225,9 @@ def evaluate_stage_b(
             "unavailable_reason_counts": {
                 r.value: c for r, c in reason_counts.items()
             },
+            # cycle 21: fold trade_count 観測 (= time-concentrated 仮説検証用、
+            # archive 列拡張なし、 payload only。 -1 は fold_exception sentinel)
+            "fold_trade_counts": tuple(fold_trade_counts),
         },
     }
     return StageResult(
