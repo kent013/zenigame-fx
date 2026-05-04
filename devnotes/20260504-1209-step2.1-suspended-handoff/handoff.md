@@ -7,6 +7,57 @@
 
 ---
 
+## 0-pre. 一連の実装の出発点 (= 「そもそも何のために始まったのか」 想起)
+
+**究極目標 (= synthesis § 1.1)**:
+> zenigame-fx Alpha Factory の使命は **live_criteria** (`config/alpha_factory/default.yaml`) を全て満たす FX イントラデイ戦略ゲノム個体を 1 つ見つけ出すこと。
+
+**起点**: 2026-04-28 `devnotes/20260428-2300-cascade-port-debate/` の Codex × 20 round 議論
+→ zenigame の selection cascade 思想 (T508/T509/T511/T513) を zenigame-fx に **big-bang 導入** する設計上位文書 (= synthesis Round 22 SSOT) を確立。
+
+**big-bang 方針 (= synthesis § 1.4 Round 19-20 確定)**:
+- 後方互換性・段階導入は **不要**
+- これまでの実装はベースラインにすらしない
+- NSGA-II と CPPS の切り替え機構 (fallback flag) は不要、 純 CPPS のみ
+
+**カスケードした流れ** (= 起点から本セッション保留まで):
+
+```
+2026-04-28  cascade port debate Round 1-20 (= big-bang 方針確定、 synthesis SSOT 化)
+2026-05-02  T076 synthesis Round 22 改訂 完了 (= Phase 2 配線完了に伴う SSOT 同期)
+            ├─ Phase 1 設計 18 件 (T058-T075) APPROVED 完了
+            └─ Phase 2 配線 18 件 (T058-T075) main merge + Closed 完了
+2026-05-02  T077-T080 follow-up 完了 (= applied_from_run_id 必須化 / TradeRecord schema 拡張 / DST / T071 caller stub 配線)
+            ├─ T080a で 9 metric stub builder 経路確立 (= reports/run-reports/{run_id}/observability.json 出力)
+            └─ T081 (9 metric 実値配線、 6 step) Open 登録、 T082 (spread_cost 伝搬) Open 登録
+2026-05-03  T081 step 1 (ABDivergenceMetric 実値配線) のみ完了
+            └─ T081 step 2-6 blocker 発覚: 上流 T063-T068 module が main flow 未統合
+2026-05-03  T082 Obsoleted: TradeRecord 経路が main flow に未統合で前提誤認
+            └─ blocker の根本対応として 「B Phase 2 切替コミット」 = canonical_metrics → main flow 直接統合 へ転換
+2026-05-03  B step 1 (canonical_metrics → main flow 統合) 完了 (commit 9bc6a02)
+2026-05-03  B step 1.5 (Stage B IS / Stage C base dual-path) 完了 (commit 6276d58)
+2026-05-03  B step 1.6 (Stage B per-fold dual-path) 完了 (commit 1dadc8b)
+2026-05-03  B step 1.7 (Stage C stress dual-path) 完了 (commit e3a428b)
+2026-05-04  B step 1.8 (Stage C cross_pair dual-path) 完了 (commit c3ee70a)
+2026-05-04  B step 2.1 (stage_bc_evaluator main flow shadow integration) 設計 R5 max → SSOT 不成立 → 保留
+            └─ ★ 本セッション末尾で軸転換: 「実 GA 走らせ + 死にコード解消」
+```
+
+**何が問題か** (= 振り返り):
+
+big-bang 方針で出発したが、 T081 blocker 以降「上流 module 未統合」 を解消する過程で:
+- B step 1 で canonical_metrics 1 経路を main 配線
+- step 1.5-1.8 で dual-path 観測 (= 旧 API + 新 API 並走) を 4 段重ねた
+- step 2 で shadow integration → 詳細設計 5 round で SSOT 不成立
+
+= **観測の精緻化 (dual-path) が膨らみすぎ、 「走らせて live_criteria 個体を 1 つ見つける」 という究極目標から遠ざかっていた**。
+
+**big-bang 方針への回帰** (= ユーザ指示の精神):
+
+走らせ可能な土台を確立 → 走らせる → 結果を見る → live_criteria 達成への距離を測る → 改善方向を判断、 が本来の loop。 観測拡充も dual-path 切替も、 この loop の **手段** であって目的ではない。
+
+---
+
 ## 0. ユーザの新しい指示 (= 本セッション末尾)
 
 > 「全体の GA を走らせられるところまで来たら教えて欲しい。 死にコードがない状態まで作り込んで、 走らせて...という」
@@ -200,6 +251,119 @@ step 2.1 の保留設計成果物 (= devnotes/20260504-1026-B-phase2-step2-...) 
 2. **死にコード判定基準の明文化**: 「何を死にコードと呼び、 削除 or 配線するかの判断基準」 を docs に追加 (= 例: T064 の参照実装は将来必要なら維持、 step 2.1 で配線するか議論)
 3. **GA 実走 baseline の確立**: 1 回目の GA 実走結果を `reports/run-reports/run-N/` に保存、 step 1.5-1.8 dual-path log の data sample として next-step calibration の基礎にする
 4. **AGENTS.md の更新**: 軸転換の経緯と現方針 (= 「dormant code を増やさず、 走らせ可能な状態を維持」) を反映するか検討
+
+---
+
+## 6.5 本セッション末尾の追加実証 (= 軸転換後の即時着手結果)
+
+### 6.5.1 GA 実走可否確認 ✅ 達成
+
+**smoke run (= pop=8 / gen=2 / max_workers=1)**: **35 秒で完走**
+```
+$ uv run python -m scripts.alpha_factory.run_ga \
+    --population-size 8 --generations 2 --max-workers 1 --no-report
+[done] run_id=run_20260504_032021 run_number=27 best=g1_i5 fitness_pen=-0.060712561910847986 stage_c=False report=skipped(--no-report)
+```
+
+**default run (= pop=40 / gen=15 / max_workers=2)**: **7 分で完走** (run-27)
+```
+[done] run_id=run_20260504_032451 run_number=27 best=g11_i3
+       fitness_pen=-0.007865665750332627 stage_c=False
+       report=reports/run-reports/run-27
+```
+- 全 15 世代 stage_a_pass=0 / stage_b_pass=0 / stage_c_pass=0 / graduation_count=0
+- best fitness_pen=-0.0079 (negative = 損失方向)、 過去 Run-22-26 と同傾向 (= live_criteria 達成個体未出現)
+- ABDivergenceMetric は status="insufficient_data" (n_pairs=0) = b_evaluated 個体ゼロのため計算不能
+
+**確認できた事実**:
+- aux データ preflight 全 PASS (= VIXCLS 94% / DTWEXBGS 91% / EUR_USD M1 67% / USD_JPY M1 67% / GC_F 92% / WTI 90% / Copper 85% / Pall 85% / SP500 92%)
+- Stage A bars 86400 / dataset_epoch_id=epoch_20251001_20260401 で正常動作
+- stage_gate.effective_threshold = 0.0 (config 由来、 history 適用なし)
+- B step 1-1.8 で配線した dual-path log (`stage_gate.canonical_five.dual_path`) が世代毎に emit されている
+- backtest engine から TradeRecord 構築 → canonical_metrics 5 metric 計算 → legacy 値と並走 log の経路が機能
+
+**= 「全体の GA を走らせられる」 = ユーザ要件 1 達成**。
+
+### 6.5.2 死にコード調査 — dormant chain 検出 (~5000+ 行)
+
+**検証手順**:
+1. `grep -rn "BCEvaluationResult|evaluate_bc_for_a_pass|evaluate_bc_safe" src/ scripts/` → production caller 0 件 (= test only)
+2. 各下流 module の caller を再 grep → import chain は残存、 production 経由は不到達
+
+**検出した dormant chain (=「死にコード」)**:
+
+| module / function | 行数 | production caller | 死にコード判定 |
+|---|---:|---|---|
+| `src/alpha_factory/stage_bc_evaluator.py` 全体 | 1419 | 0 件 | ✅ 完全 dormant |
+| `src/alpha_factory/failure_handling.evaluate_bc_safe` + 関連 BCEvaluationResult helper | ~600 | 0 件 | ✅ dormant |
+| `src/alpha_factory/loop_closure.py` 全体 | ~1100 | 0 件 (= run_ga.py から不到達) | ✅ dormant |
+| `src/alpha_factory/cpps_archive.determine_archive_role` + `compute_inflow_targets` | ~150 | loop_closure 経由のみ (= dormant 連鎖) | ✅ dormant |
+| `src/alpha_factory/nsga2_selection.py` 全体 | ~700 | observability/run_metrics 経由のみ + extract_selection_metrics は run_ga.py で **未呼出** (build_default_selection_metric を使用) | ✅ dormant |
+| `src/alpha_factory/observability/run_metrics.extract_*` / `compute_*` 8 関数 | ~800 | run_ga.py は build_default_*_metric を使う (= ABDivergence のみ実値、 残 8 metric stub) | ✅ dormant (= T081 step 2-6 未着手) |
+
+**累計推定: ~5000+ 行が dormant** (= production runtime で 1 回も呼ばれない)。
+
+**run_ga.py の現実経路** (= 確認済):
+```
+run_ga.py:1683  compute_ab_divergence_on_b_evaluated(...)        ← 実値配線 (T081 step 1)
+run_ga.py:1687  build_run_observability_report(
+                  ab_divergence=ab_divergence_metric,             ← 実値
+                  q_force_recommendation=...default...,           ← stub
+                  archive_churn=...default...,                    ← stub
+                  bypass_ratio=...default...,                     ← stub
+                  session_entropy=...default...,                  ← stub
+                  feasible_ratio=...default...,                   ← stub
+                  selection=...default...,                        ← stub (= GenerationSelectionResult 不到達)
+                  inflow_consistency=...default...,               ← stub (= WarmstartReport 不到達)
+                  failure=...default...,                          ← stub (= RunFailureSummary 不到達)
+                )
+```
+
+= **production runtime は ABDivergence 1/9 metric のみ実値**。 残 8 metric は stub default、 関連する T065-T068 module 配線も全て unreachable。
+
+### 6.5.3 構造的バグ発見 — TradeRecord exit==entry 同時刻エラー多発
+
+smoke 観察:
+```
+[warning] stage_gate.canonical_five.skipped
+  error='TradeRecord.exit_time_utc (2026-02-06 11:26:00+00:00)
+         must be > entry_time_utc (2026-02-06 11:26:00+00:00)'
+  error_type=TradeRecordInvalidError genome=g0_i2 stage=A
+```
+
+**頻度**: pop=8 で複数個体 (= g0_i2, g0_i4, g0_i5, g0_i6, g1_i0, g1_i1, g1_i4, g1_i5, g1_i7, g2_i0-g2_i5 ...)、 default smoke 観察でも g2 世代で 1/3 程度の個体で発生
+
+**現象**:
+- backtest engine が同一 bar (1 分 bar) 内で entry/exit する trade を生成
+- canonical_metrics.TradeRecord (`canonical_metrics.py:272`) で `exit_time_utc <= entry_time_utc` を fail-fast invariant としており、 該当 trade が 1 個でも含まれると **canonical_five 全体が skip**
+- legacy 評価は同一 trade を許容して走るので Stage A pass 判定は legacy 側のみで決まる
+
+**インパクト**:
+- canonical_metrics 経路で個体半数が skip → step 1.5-1.8 で苦労して配線した dual-path log が「両系で同時に値が見える個体」 が半分しかない状態
+- big-bang 切替 (= step 2 完了で legacy 廃止) を強行すると **個体半数が「skip 扱いで Stage A 不通過」** になる構造的問題
+
+**根本原因候補 (= 未確定、 要追跡)**:
+- backtest engine 側の 0-bar holding trade を canonical_metrics 構築前に filter すべきか
+- canonical_metrics.TradeRecord invariant を緩和して 0-bar trade を許容すべきか (= synthesis SSOT 観点で要議論)
+- 上記いずれを採るか = step 2 切替前に確定すべき問題、 dormant chain 解消より優先度高
+
+### 6.5.4 死にコード解消の選択肢 (= 次セッション判断)
+
+dormant chain 5000+ 行に対する対応:
+
+| 案 | 工数 | リスク | big-bang 方針 (synthesis § 1.4) との整合 |
+|---|---|---|---|
+| **A. 完成配線**: step 2.1-2.3 + T081 step 2-6 を完走 | 数週間 | 設計 R5 で SSOT 不成立、 過去 round 経緯で品質懸念 | ◯ (= cascade port v2 設計の最終段) |
+| **B. 完全削除**: stage_bc_evaluator + loop_closure + 関連 helper / metric extract を big-bang で削除 | 数日 | synthesis § 5.2 確定式・§ 8.2 archive_role 設計を捨てる | △ (= big-bang 方針だが設計を捨てる) |
+| **C. 段階削除 + 配線維持**: 完全 dormant の stage_bc_evaluator のみ削除、 nsga2_selection / observability の extract 経路は将来 metric 拡張に備えて維持 | 数日 | extract 関数群の dormant 状態は残る | ◯ (= 走らせ可能性維持 + 大物 dormant 削減) |
+| **D. 現状維持 + dormant 明示**: docstring / README に「dormant、 将来 step 2 で配線」 を明示、 即時削除なし | 数時間 | 死にコード「ない状態」 にはならない | × (= ユーザ要件 2 未達) |
+
+**推奨**: **案 C 段階削除** が big-bang 方針と「走らせ可能性維持」 の両立として最も合理的。 ただし TradeRecord exit==entry 構造的バグ (§ 6.5.3) を先に解決しないと、 dormant chain 削除後の big-bang 切替で個体半数が skip 扱いになる致命的問題が表面化する。
+
+**順序提案**:
+1. **TradeRecord 0-bar trade 構造問題の解決** (= backtest filter or invariant 緩和) ← 最優先
+2. **default GA 実走完走実証 + 結果分析** (= 1 回目の RUN baseline 確立)
+3. **死にコード解消 (案 C)** ← legacy + canonical 両系で同等個体数が走るようになってから
 
 ---
 
