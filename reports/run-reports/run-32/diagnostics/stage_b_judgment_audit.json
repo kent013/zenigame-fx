@@ -1,0 +1,62 @@
+{
+  "run_id": "run_20260504_111153",
+  "run_number": 32,
+  "decision_trace": {
+    "rule_version": "v1",
+    "thresholds": {
+      "stage_b_median_oos_sharpe_min": 0.05,
+      "stage_b_positive_fold_min": 0.6
+    },
+    "used_metrics_source": "archive",
+    "unavailable_imputation_policy": "fold metric_unavailable は 0 として母数に含める",
+    "judgment_logic": "Stage B passed iff (median_oos_sharpe >= threshold) AND (positive_fold_ratio >= threshold) AND (not all_folds_unavailable)"
+  },
+  "stage_pass_counts": {
+    "a": 99,
+    "b": 2,
+    "c": 0
+  },
+  "stage_b_reason_distribution": {
+    "median_oos_sharpe<min": 96,
+    "positive_fold_ratio<min": 97,
+    "all_folds_unavailable": 2,
+    "__pass__": 2
+  },
+  "archive_columns_warning": {
+    "trade_sharpe_stage_b": "Stage B IS 全期間 Sharpe (= 判定 SSOT ではない、 median_oos_sharpe と混同禁止)",
+    "positive_fold_ratio_effective": "unavailable 除外母数 (= 判定 SSOT ではない、 全 fold 母数の positive_fold_ratio と混同禁止)"
+  },
+  "analytical_AND_vs_stage_b_pass": {
+    "analytical_AND_count": 29,
+    "actual_stage_b_pass_count": 2,
+    "discrepancy": 27,
+    "note": "discrepancy > 0 が観察された場合、 archive 観測補助列の AND と 判定 SSOT 不一致 (= 母数の違い + metric の違いによる identification error)"
+  },
+  "stage_b_pass_individuals": [
+    {
+      "individual_name": "g8_i33",
+      "generation": 8,
+      "trade_count": 16,
+      "fitness_pen": 0.06057645179905452,
+      "trade_sharpe_raw": 0.08007645179905452,
+      "trade_sharpe_stage_b_archive": 0.03600414827375606,
+      "positive_fold_ratio_effective_archive": 0.6666666666666666,
+      "n_fold_effective": 9.0,
+      "stage_c_pass": false,
+      "live_criteria_compatible_trade_count": false
+    },
+    {
+      "individual_name": "g12_i17",
+      "generation": 12,
+      "trade_count": 17,
+      "fitness_pen": 0.001714567625504905,
+      "trade_sharpe_raw": 0.021214567625504905,
+      "trade_sharpe_stage_b_archive": -0.00642754955860492,
+      "positive_fold_ratio_effective_archive": 0.6666666666666666,
+      "n_fold_effective": 9.0,
+      "stage_c_pass": false,
+      "live_criteria_compatible_trade_count": false
+    }
+  ],
+  "warnings": []
+}
