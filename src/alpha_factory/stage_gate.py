@@ -174,25 +174,39 @@ def _log_canonical_dual_path(
     legacy: BacktestMetrics,
     canonical: CanonicalFiveResult | None,
     fold_index: int | None = None,
+    pair_label: str | None = None,
 ) -> None:
     """dual-path 結果 (legacy + canonical) を構造化 log に出力.
 
     Args:
         stage_label: § 4.7 ログ命名規約 SSOT
             (A / B_IS / B_fold / C_base / C_stress / C_cross_pair)。
-            注: C_stress は step 1.7 で追加 (= Stage C spread stress backtest)。
+            注: C_stress は step 1.7 で追加、 C_cross_pair は step 1.8 で追加。
         genome_name: genome 識別子 (= logger kwargs key `genome`)。
-        legacy: BacktestMetrics (= 既存判定経路)。
+        legacy: BacktestMetrics (= 既存判定経路、 cross_pair の場合は per-pair `bt`)。
         canonical: CanonicalFiveResult or None (= helper 例外時 / disabled mode)。
         fold_index: per-fold 識別子 (= 0..n_fold-1)。 stage_label="B_fold" のとき必須、
             他 stage (= A / B_IS / C_base / C_stress / C_cross_pair) は None。
             step 1.6 detailed-design § 4.7 / acceptance C4 / D5 で SSOT 化
             (= B_fold log entry は (stage, genome, fold) で一意特定可能)。
+        pair_label: per-pair 識別子 (= 実 pair 名、 例 "EUR_USD")。
+            stage_label="C_cross_pair" のとき必須、 他 stage (= A / B_IS /
+            B_fold / C_base / C_stress) は None。
+            step 1.8 で追加 (= 詳細設計 § 2.5、 acceptance D5、
+            役割識別 (target / anchor1 / anchor2) は dual-path log に出さず、
+            将来 role 分析時は Stage C payload の `target_pair` / `anchor_pairs` と
+            `(genome, pair)` で join する設計)。
 
     Raises:
         ValueError: stage_label="B_fold" かつ fold_index is None
-            (= acceptance D5、 識別子契約違反は fail-fast、 step 1.6 Codex Round 2
-            [Warning] 反映)。
+            (= step 1.6 acceptance D5)。
+        ValueError: stage_label="C_cross_pair" かつ pair_label が None / 空文字 /
+            空白文字列 / 前後空白付き文字列 (= step 1.8 acceptance D5、
+            識別子契約 SSOT、 C_cross_pair log entry は (stage, genome, pair) で
+            一意特定可能でなければならない、 実 pair 名のみ許可)。
+        ValueError: stage_label != "C_cross_pair" かつ pair_label is not None
+            (= step 1.8 acceptance D5、 pair_label は C_cross_pair 専用、
+            他 stage で指定するとログ名前空間汚染)。
 
     解釈規約 (Codex Round 1 [Warning] 3 取込):
     - dual-path log は **方向性監視** を目的とする (= 値一致や良し悪し判定ではない)。
@@ -205,12 +219,41 @@ def _log_canonical_dual_path(
     - flags_source="default_false" + fail_fast_flags_comparable=False で
       step 1 では broker engine から伝搬していないことを明示。
     """
-    # 識別子契約 SSOT (= step 1.6 acceptance D5)
+    # 識別子契約 SSOT (= step 1.6 + step 1.8、 fold_index も pair_label と
+    # 対称的に non-B_fold で拒否 = Codex impl-review Round 1 [Warning] 反映)
     if stage_label == "B_fold" and fold_index is None:
         raise ValueError(
             "_log_canonical_dual_path(stage_label='B_fold') requires fold_index "
             "(= step 1.6 acceptance D5 / 識別子契約 SSOT、 "
             "B_fold log entry は (stage, genome, fold) で一意特定可能でなければならない)"
+        )
+    if stage_label != "B_fold" and fold_index is not None:
+        raise ValueError(
+            f"_log_canonical_dual_path(stage_label={stage_label!r}) does not accept "
+            "fold_index (= step 1.8 識別子契約 SSOT、 fold_index は B_fold 専用、 "
+            "他 stage で指定するとログ名前空間汚染、 "
+            "Codex impl-review Round 1 [Warning] 反映)"
+        )
+    if stage_label == "C_cross_pair":
+        if not isinstance(pair_label, str) or not pair_label.strip():
+            raise ValueError(
+                "_log_canonical_dual_path(stage_label='C_cross_pair') requires "
+                "non-empty pair_label (= step 1.8 acceptance D5 / 識別子契約 SSOT、 "
+                "C_cross_pair log entry は (stage, genome, pair) で一意特定可能 "
+                "でなければならない、 None / 空文字 / 空白文字列はいずれも識別子契約違反)"
+            )
+        if pair_label != pair_label.strip():
+            raise ValueError(
+                "_log_canonical_dual_path(stage_label='C_cross_pair') requires "
+                "pair_label without leading / trailing whitespace "
+                "(= step 1.8 acceptance D5、 実 pair 名契約: 'EUR_USD' は OK、 "
+                "' EUR_USD ' は NG)"
+            )
+    elif pair_label is not None:
+        raise ValueError(
+            f"_log_canonical_dual_path(stage_label={stage_label!r}) does not accept "
+            "pair_label (= step 1.8 識別子契約 SSOT、 pair_label は C_cross_pair 専用、 "
+            "他 stage で指定するとログ名前空間汚染)"
         )
 
     if canonical is None:
@@ -221,6 +264,8 @@ def _log_canonical_dual_path(
         }
         if fold_index is not None:
             log_kwargs["fold"] = fold_index
+        if pair_label is not None:
+            log_kwargs["pair"] = pair_label
         logger.info("stage_gate.canonical_five.dual_path", **log_kwargs)
         return
 
@@ -254,6 +299,8 @@ def _log_canonical_dual_path(
     }
     if fold_index is not None:
         log_kwargs["fold"] = fold_index
+    if pair_label is not None:
+        log_kwargs["pair"] = pair_label
     logger.info("stage_gate.canonical_five.dual_path", **log_kwargs)
 
 # T034: Stage A fitness_pen sentinel 序列。
@@ -542,6 +589,45 @@ class CrossPairInputs(TypedDict):
 
 
 @dataclass(frozen=True)
+class _PairSidecarInputs:
+    """canonical_five 計算用 input 集合 (= dual-path 経路でのみ使用).
+
+    ``cross_pair.py`` で per-pair backtest 結果 (= trades / equity_curve / bt) を
+    保持し、 ``stage_gate.py`` 側 dual-path 配線で canonical 5 軸を計算する際に
+    使う ephemeral 入力集合。 deep copy なし、 既存経路の shallow copy
+    (例: ``bars=list(pair_bars[pair])``) を許容。 canonical 計算後、
+    ``CrossPairResult._shadow_sidecar_inputs`` の sanitize (= 空 dict 差し替え)
+    で payload / IPC / archive に絶対漏れない契約 (= B step 1.8 詳細設計 § 2.4 /
+    acceptance E)。
+
+    本 dataclass は ``stage_gate.py`` 側に定義することで、 ``cross_pair.py`` から
+    の単方向 import 経路を維持し循環依存を回避する (= B step 1.8 概念設計
+    Round 2 [Critical 3] 反映)。
+
+    Import 契約 (= B step 1.8 詳細設計 Round 1 [Suggestion 施策 1] 反映):
+        ``cross_pair.py`` からは ``from src.alpha_factory.stage_gate import
+        CrossPairResult, _PairSidecarInputs`` で参照する。
+        - cross_pair.py → stage_gate.py の単方向 import (= 既存配線維持)
+        - stage_gate.py → cross_pair.py の逆 import は禁止 (= 循環依存 防止)
+        - 他 module からの import は想定しない (= leading underscore で
+          module-private を明示)
+
+    不変前提 (= B step 1.8 詳細設計 Round 1 [Warning 施策 1] 反映):
+        bars / trades / equity_curve は production code (= cross_pair.py /
+        stage_gate.py / canonical_adapter.py / canonical_metrics) で書き込まれない
+        契約。 sidecar 構築から sanitize 完了までの間、 内容は不変
+        (= acceptance E7 で deep equality 比較で固定)。 frozen=True dataclass で
+        attr 再代入は防げるが、 list / dict は技術的に mutable のため、 production
+        code の振る舞い契約として明文化する。
+    """
+
+    bars: list[PriceBar]
+    trades: list[BrokerTrade]
+    equity_curve: list[tuple[datetime, Decimal]]
+    bt: BacktestMetrics
+
+
+@dataclass(frozen=True)
 class CrossPairResult:
     """cross-pair (ii-lite) 評価の戻り値。
 
@@ -557,6 +643,18 @@ class CrossPairResult:
     passed: bool
     metrics: Mapping[str, object]
     reason_codes: tuple[str, ...] = ()
+    # B step 1.8: dual-path 経路用 ephemeral sidecar (= public API ではない、
+    # archive / payload transport には漏れない契約、 詳細設計 § 2.3)。
+    # field 設定:
+    #   - default_factory=dict: multiprocessing pickle 互換 (= MappingProxyType 不可、
+    #     概念設計 Round 2 [Critical 2])
+    #   - repr=False: snapshot 比較ノイズ排除 (= 概念設計 Round 2 [Warning])
+    #   - compare=False: dataclass equality から除外 (= acceptance E5)
+    _shadow_sidecar_inputs: dict[str, _PairSidecarInputs] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
 
 
 class CrossPairEvaluator(Protocol):
@@ -1553,6 +1651,117 @@ def evaluate_stage_c(
             )
             cross_pair_payload["skipped"] = cp_skipped
             cross_pair_payload["result"] = cp_result
+
+    # === B Phase 2 step 1.8: cross_pair dual-path (= 別 try-finally で物理隔離 +
+    # 常時 sanitize、 acceptance D1-D5 + E1-E6)。 cp_result 受け取り後・
+    # cross_pair_payload 確定後に走る。 dual-path 経路の例外有無 / disabled mode /
+    # sidecar 空 / pair_failure / cp_result is None 全分岐で finally 句の sanitize は
+    # 常時実行される (= Codex detailed-review Round 1 [Critical 施策 5] 反映で
+    # try-finally に強化) ===
+    try:
+        cp_result_local = cross_pair_payload.get("result")
+        if (
+            isinstance(cp_result_local, CrossPairResult)
+            and not bool(cross_pair_payload["skipped"])
+        ):
+            sidecar_map: dict[str, _PairSidecarInputs] = (
+                getattr(cp_result_local, "_shadow_sidecar_inputs", {}) or {}
+            )
+            cp_enabled = (
+                stage_config.phase2_canonical_metrics_mode != "disabled"
+            )
+            # disabled mode 軽量分岐 (= per-pair iterate は走るが canonical 計算のみ
+            # skip、 lightweight log を emit、 Codex detailed-review Round 1 + Round 3
+            # [Warning 施策 5] 反映、 step 1.6 disabled mode と整合)
+            if not cp_enabled:
+                for pair_name in list(sidecar_map.keys()):
+                    if not isinstance(pair_name, str) or not pair_name.strip():
+                        logger.warning(
+                            "stage_gate.canonical_five.invalid_pair_key",
+                            stage="C_cross_pair",
+                            genome=genome.name,
+                            pair=repr(pair_name),
+                        )
+                        continue
+                    try:
+                        _log_canonical_dual_path(
+                            stage_label="C_cross_pair",
+                            genome_name=genome.name,
+                            legacy=sidecar_map[pair_name].bt,
+                            canonical=None,
+                            pair_label=pair_name,
+                        )
+                    except Exception as log_exc:
+                        logger.warning(
+                            "stage_gate.canonical_five.log_failed",
+                            stage="C_cross_pair",
+                            genome=genome.name,
+                            pair=pair_name,
+                            error=str(log_exc),
+                            error_type=type(log_exc).__name__,
+                        )
+            else:
+                # enabled mode: per-pair canonical 計算 + log emit
+                for pair_name, sidecar in sidecar_map.items():
+                    # pair キー妥当性検証 (= Codex detailed-review Round 1
+                    # [Warning 施策 5] 反映、 内部不整合の早期検出)
+                    if not isinstance(pair_name, str) or not pair_name.strip():
+                        logger.warning(
+                            "stage_gate.canonical_five.invalid_pair_key",
+                            stage="C_cross_pair",
+                            genome=genome.name,
+                            pair=repr(pair_name),
+                        )
+                        continue
+                    try:
+                        canonical_sidecar_cp = _try_evaluate_canonical_five_safe(
+                            trades=sidecar.trades,
+                            equity_curve=sidecar.equity_curve,
+                            bars=sidecar.bars,
+                            live_criteria=stage_config.live_criteria,
+                            window_days=stage_config.stage_c_holdout_days,
+                            stage_label="C_cross_pair",
+                            genome_name=genome.name,
+                            enabled=True,
+                        )
+                        try:
+                            _log_canonical_dual_path(
+                                stage_label="C_cross_pair",
+                                genome_name=genome.name,
+                                legacy=sidecar.bt,
+                                canonical=canonical_sidecar_cp,
+                                pair_label=pair_name,
+                            )
+                        except Exception as log_exc:
+                            logger.warning(
+                                "stage_gate.canonical_five.log_failed",
+                                stage="C_cross_pair",
+                                genome=genome.name,
+                                pair=pair_name,
+                                error=str(log_exc),
+                                error_type=type(log_exc).__name__,
+                            )
+                    except Exception as canonical_exc:
+                        logger.warning(
+                            "stage_gate.canonical_five.unexpected_failure",
+                            stage="C_cross_pair",
+                            genome=genome.name,
+                            pair=pair_name,
+                            error=str(canonical_exc),
+                            error_type=type(canonical_exc).__name__,
+                        )
+    finally:
+        # === sanitize 経路 (= sidecar が payload / IPC / archive に絶対漏れない契約、
+        # acceptance E1-E6、 詳細設計 § 2.4)。 dual-path 経路の例外有無 / 中断 /
+        # disabled mode / pair_failure / cp_result is None / skipped 全分岐で常時実行
+        # (= Codex detailed-review Round 1 [Critical 施策 5] 反映、 finally 保証) ===
+        cp_result_for_sanitize = cross_pair_payload.get("result")
+        if isinstance(cp_result_for_sanitize, CrossPairResult) and getattr(
+            cp_result_for_sanitize, "_shadow_sidecar_inputs", None
+        ):
+            cross_pair_payload["result"] = replace(
+                cp_result_for_sanitize, _shadow_sidecar_inputs={}
+            )
 
     passed = len(reasons) == 0
     elapsed = _time.perf_counter() - start
