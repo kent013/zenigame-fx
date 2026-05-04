@@ -1,0 +1,380 @@
+{
+  "run_id": "run_20260504_065916",
+  "run_number": 31,
+  "diagnosis": "P1",
+  "confidence": "high",
+  "config_source": "run_effective",
+  "evaluated_hypotheses": [
+    "P1",
+    "P2"
+  ],
+  "diagnosis_rationale": [],
+  "falsification": {
+    "P1": {
+      "condition": "raw_max < 0.005",
+      "actual": 0.004640911397074999,
+      "match": true,
+      "rationale": "trade_sharpe_raw max が 0.005 未満 = primitive 構成が「market neutral random-like」 しか生成しておらず GA 探索が positive sharpe 領域へ到達不能"
+    },
+    "P2": {
+      "condition": "penalty_killed >= max(3, ceil(0.01*N_valid=606)) = 7",
+      "actual": 2,
+      "match": false
+    },
+    "P3": {
+      "condition": "n_nodes std drop > 0.5 ∧ active_clause unique == 1",
+      "actual": "non_evaluable",
+      "match": false,
+      "non_evaluable_reason": "run-effective config max_clause=1 <= 1 のため active_clause unique==1 は config 由来の擬陽性、 P3 識別力なし"
+    }
+  },
+  "plateau_length": 2,
+  "plateau_start_generation": 14,
+  "stage_pass_counts": {
+    "a": 2,
+    "b": 0,
+    "c": 0
+  },
+  "fitness_pen_decomposition": {
+    "trade_sharpe_raw": {
+      "max": 0.004640911397074999,
+      "mean": -0.07763796981221795,
+      "std": 0.09746987380067061
+    },
+    "fitness_pen": {
+      "max": -0.008859088602925001,
+      "mean": -0.0891453955547922,
+      "std": 0.097619241884719
+    },
+    "size_norm_inferred": {
+      "max": 0.6500000000000006,
+      "mean": 0.3835808580858086,
+      "std": 0.15066864490862494
+    },
+    "penalty": {
+      "max": 0.019500000000000017,
+      "mean": 0.011507425742574257,
+      "std": 0.0045200593472587485
+    },
+    "_alpha_used": 0.03,
+    "_size_norm_note": "逆算 size_norm = (raw - pen) / alpha (近似)"
+  },
+  "trade_sharpe_by_generation": [
+    {
+      "generation": 0,
+      "n": 40,
+      "max": -0.02999080678481416,
+      "mean": -0.18371371468300673,
+      "median": -0.10700956717667884,
+      "n_positive": 0
+    },
+    {
+      "generation": 1,
+      "n": 40,
+      "max": -0.017737951153762324,
+      "mean": -0.10965612681830188,
+      "median": -0.06535819817805899,
+      "n_positive": 0
+    },
+    {
+      "generation": 2,
+      "n": 40,
+      "max": -0.017737951153762324,
+      "mean": -0.11432995308108801,
+      "median": -0.05728463402931033,
+      "n_positive": 0
+    },
+    {
+      "generation": 3,
+      "n": 40,
+      "max": -0.011827011422860127,
+      "mean": -0.0891366759608843,
+      "median": -0.05368615903267916,
+      "n_positive": 0
+    },
+    {
+      "generation": 4,
+      "n": 40,
+      "max": -0.011827011422860127,
+      "mean": -0.10561187885500775,
+      "median": -0.06594407442297098,
+      "n_positive": 0
+    },
+    {
+      "generation": 5,
+      "n": 40,
+      "max": -0.011827011422860127,
+      "mean": -0.06906453379013,
+      "median": -0.06594407442297098,
+      "n_positive": 0
+    },
+    {
+      "generation": 6,
+      "n": 40,
+      "max": -0.011827011422860127,
+      "mean": -0.06726413742745962,
+      "median": -0.06506756033376719,
+      "n_positive": 0
+    },
+    {
+      "generation": 7,
+      "n": 40,
+      "max": -0.011827011422860127,
+      "mean": -0.06238847344962851,
+      "median": -0.06716534498764987,
+      "n_positive": 0
+    },
+    {
+      "generation": 8,
+      "n": 40,
+      "max": -0.011827011422860127,
+      "mean": -0.06644839894873653,
+      "median": -0.06976613594562459,
+      "n_positive": 0
+    },
+    {
+      "generation": 9,
+      "n": 40,
+      "max": -0.011827011422860127,
+      "mean": -0.08759733464390423,
+      "median": -0.0566081611524827,
+      "n_positive": 0
+    },
+    {
+      "generation": 10,
+      "n": 40,
+      "max": -0.011827011422860127,
+      "mean": -0.04865830960423666,
+      "median": -0.03935202948063172,
+      "n_positive": 0
+    },
+    {
+      "generation": 11,
+      "n": 40,
+      "max": -0.011827011422860127,
+      "mean": -0.04047811580572673,
+      "median": -0.0310239036500828,
+      "n_positive": 0
+    },
+    {
+      "generation": 12,
+      "n": 40,
+      "max": -0.011827011422860127,
+      "mean": -0.06661611651135857,
+      "median": -0.049000188644547395,
+      "n_positive": 0
+    },
+    {
+      "generation": 13,
+      "n": 40,
+      "max": -0.011827011422860127,
+      "mean": -0.07464367053782063,
+      "median": -0.011827011422860127,
+      "n_positive": 0
+    },
+    {
+      "generation": 14,
+      "n": 40,
+      "max": 0.004640911397074999,
+      "mean": -0.048309310201589614,
+      "median": -0.052199174566753256,
+      "n_positive": 1
+    },
+    {
+      "generation": 15,
+      "n": 40,
+      "max": 0.004640911397074999,
+      "mean": -0.04681834566218311,
+      "median": -0.04260213550348724,
+      "n_positive": 1
+    }
+  ],
+  "trade_count_buckets": [
+    {
+      "bucket": "0",
+      "n": 19,
+      "trade_sharpe_mean": null,
+      "fitness_pen_mean": null
+    },
+    {
+      "bucket": "1-49",
+      "n": 20,
+      "trade_sharpe_mean": -0.5602012180077252,
+      "fitness_pen_mean": -0.5668012180077251
+    },
+    {
+      "bucket": "50-499",
+      "n": 21,
+      "trade_sharpe_mean": -0.234575692307694,
+      "fitness_pen_mean": -0.2487185494505511
+    },
+    {
+      "bucket": "500-1499",
+      "n": 21,
+      "trade_sharpe_mean": -0.30999686890620365,
+      "fitness_pen_mean": -0.3245682974776323
+    },
+    {
+      "bucket": ">=1500",
+      "n": 559,
+      "trade_sharpe_mean": -0.05869692277401361,
+      "fitness_pen_mean": -0.07003413207633917
+    }
+  ],
+  "diversity": [
+    {
+      "generation": 0,
+      "n_nodes_mean": 2.625,
+      "n_nodes_std": 1.0047961905856255,
+      "active_clause_mean": 0.95,
+      "active_clause_unique": 2
+    },
+    {
+      "generation": 1,
+      "n_nodes_mean": 3.2,
+      "n_nodes_std": 0.8533493588238806,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    },
+    {
+      "generation": 2,
+      "n_nodes_mean": 3.05,
+      "n_nodes_std": 0.9857965671450027,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    },
+    {
+      "generation": 3,
+      "n_nodes_mean": 2.9,
+      "n_nodes_std": 0.9001424388708769,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    },
+    {
+      "generation": 4,
+      "n_nodes_mean": 2.525,
+      "n_nodes_std": 0.9867714774546074,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    },
+    {
+      "generation": 5,
+      "n_nodes_mean": 1.75,
+      "n_nodes_std": 0.8086075400626399,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    },
+    {
+      "generation": 6,
+      "n_nodes_mean": 1.65,
+      "n_nodes_std": 0.8022404524765275,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    },
+    {
+      "generation": 7,
+      "n_nodes_mean": 1.9,
+      "n_nodes_std": 0.8711913446392584,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    },
+    {
+      "generation": 8,
+      "n_nodes_mean": 1.85,
+      "n_nodes_std": 0.8638019716079873,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    },
+    {
+      "generation": 9,
+      "n_nodes_mean": 2.225,
+      "n_nodes_std": 0.9195177108206347,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    },
+    {
+      "generation": 10,
+      "n_nodes_mean": 2.225,
+      "n_nodes_std": 1.0738738884082843,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    },
+    {
+      "generation": 11,
+      "n_nodes_mean": 2.625,
+      "n_nodes_std": 0.7403221751892368,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    },
+    {
+      "generation": 12,
+      "n_nodes_mean": 2.975,
+      "n_nodes_std": 0.5767948575466912,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    },
+    {
+      "generation": 13,
+      "n_nodes_mean": 2.95,
+      "n_nodes_std": 0.6385078759829887,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    },
+    {
+      "generation": 14,
+      "n_nodes_mean": 3.0,
+      "n_nodes_std": 0.5063696835418333,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    },
+    {
+      "generation": 15,
+      "n_nodes_mean": 2.9,
+      "n_nodes_std": 0.6717752982077053,
+      "active_clause_mean": 1.0,
+      "active_clause_unique": 1
+    }
+  ],
+  "penalty_effect": {
+    "n_raw_positive": 2,
+    "n_raw_positive_and_penalty_killed": 2,
+    "n_raw_positive_and_pass": 0
+  },
+  "extra_metrics": {
+    "raw_positive_count": 2,
+    "fitness_pen_positive_count": 0,
+    "sentinel_by_generation": {
+      "0": 12,
+      "1": 2,
+      "2": 4,
+      "4": 5,
+      "5": 1,
+      "6": 1,
+      "7": 1,
+      "8": 1,
+      "9": 2,
+      "10": 1,
+      "12": 2,
+      "13": 2
+    },
+    "best_generation": 14
+  },
+  "data_quality": {
+    "n_total": 640,
+    "n_valid": 606,
+    "sentinel_breakdown": {
+      "total_sentinel_individuals": 34,
+      "note": "T034 sentinel 値は全て -1e9 で同一、 archive に Stage A reason_codes 列なしのため NO_EXPOSURE / METRIC_UNAVAILABLE / SYSTEM_FAILURE の内訳分離不能"
+    },
+    "warnings": []
+  },
+  "run_effective_config": {
+    "_source": "run_effective",
+    "_summary_path": "/Users/ishitoya/repository/zenigame-fx/reports/run-reports/run-31/summary.json",
+    "max_clause": 1,
+    "stage_a_alpha": 0.03,
+    "stage_a_threshold": -0.0172,
+    "summary_run_id": "run_20260504_065916"
+  },
+  "summary_run_id_matched": true
+}
