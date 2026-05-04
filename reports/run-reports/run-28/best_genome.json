@@ -1,0 +1,39 @@
+{
+  "dataset_epoch_id": "epoch_20251001_20260401",
+  "name": "g5_i10",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F10",
+          "weight": 1.162626271671869,
+          "params": {
+            "n": 41
+          }
+        },
+        {
+          "name": "P9",
+          "weight": 0.8151168929273279,
+          "params": {
+            "mom_n": 28,
+            "scale": 0.06696904083836243,
+            "staleness_bars": 36
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.8407436521970657
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.2482659619908827,
+    "exit_threshold": 0.23276449498324386,
+    "max_pos": 3,
+    "time_stop_min": 77
+  },
+  "risk": {
+    "stop_atr": 1.7586810712874594,
+    "take_atr": 3.1403553640041575
+  }
+}
