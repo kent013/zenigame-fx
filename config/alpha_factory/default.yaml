@@ -86,7 +86,7 @@ stage_gate:
     window_days: 60
     target_pass_rate: 0.15      # 探索圧の代理指標 (calibrate-gate T027 で使用)
     alpha: 0.03
-    threshold: 0.0              # cycle 13 revert: 並走 T054 で 0.15 に変更されたが、Run-26 で Stage A pass=0 完全崩壊。並走 config drift を切り離し variance 確認のため 0.0 復元。
+    threshold: -0.0172          # cycle 13 revert: 並走 T054 で 0.15 に変更されたが、Run-26 で Stage A pass=0 完全崩壊。並走 config drift を切り離し variance 確認のため 0.0 復元。
     # T034: trade_count<min_exposure_trade_count の個体は no_exposure reason +
     # NO_EXPOSURE_FITNESS sentinel で淘汰する (selection_score tie-break で
     # 「無取引優位」を構造的に解消)。default 1 = 「1 trade 未満 = 取引未成立」。
