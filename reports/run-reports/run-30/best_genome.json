@@ -1,0 +1,41 @@
+{
+  "dataset_epoch_id": "epoch_20251001_20260401",
+  "name": "g13_i15",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F3",
+          "weight": 1.2699134760464295,
+          "params": {
+            "n": 40,
+            "k": 2.4209690710796172,
+            "atr_n": 27
+          }
+        },
+        {
+          "name": "F12",
+          "weight": 1.0308278094847696,
+          "params": {
+            "n": 48,
+            "window": 145,
+            "k_scale": 3.726385713461899
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.1235893302160869
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.22419135678942986,
+    "exit_threshold": 0.16671765857342338,
+    "max_pos": 2,
+    "time_stop_min": 43
+  },
+  "risk": {
+    "stop_atr": 1.7398388157254177,
+    "take_atr": 1.7058092837763756
+  }
+}
