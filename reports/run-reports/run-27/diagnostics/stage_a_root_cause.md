@@ -1,4 +1,4 @@
-# Stage A Root Cause Diagnostic: run_20260504_032451
+# Stage A Root Cause Diagnostic: run_20260504_043138
 
 - **run_number**: 27
 - **diagnosis**: **INCONCLUSIVE**
@@ -7,108 +7,105 @@
 - **evaluated_hypotheses**: ['P1', 'P2']
 
 ## サマリー
-- Stage A pass: 0 / B pass: 0 / C pass: 0
+- Stage A pass: 142 / B pass: 0 / C pass: 0
 - best generation: 11
-- best plateau length: 5 (start gen: 11)
+- best plateau length: 2 (start gen: 14)
 
 ## 分類判定 (= 反証結果)
 - **P1**:
   - condition: `raw_max < 0.005`
-  - actual: `0.0011343342496673721`
-  - match: **True**
-  - rationale: trade_sharpe_raw max が 0.005 未満 = primitive 構成が「market neutral random-like」 しか生成しておらず GA 探索が positive sharpe 領域へ到達不能
+  - actual: `0.15990754144831815`
+  - match: **False**
 - **P2**:
-  - condition: `penalty_killed >= max(3, ceil(0.01*N_valid=623)) = 7`
-  - actual: `30`
-  - match: **True**
+  - condition: `penalty_killed >= max(3, ceil(0.01*N_valid=537)) = 6`
+  - actual: `1`
+  - match: **False**
 - **P3**:
   - condition: `n_nodes std drop > 0.5 ∧ active_clause unique == 1`
   - actual: `non_evaluable`
   - match: **False**
-  - non_evaluable_reason: summary.json から max_clause 取得不能
+  - non_evaluable_reason: run-effective config max_clause=1 <= 1 のため active_clause unique==1 は config 由来の擬陽性、 P3 識別力なし
 
 ## 判定理由
-- 複数仮説該当: ['P1', 'P2'] = 1 つに絞れず
+- どの仮説にも明確該当せず
 
 ## fitness_pen 分解
 | 統計量 | trade_sharpe_raw | size_norm (逆算) | penalty | fitness_pen |
 |---|---|---|---|---|
-| max | 0.001134 | 0.650000 | 0.019500 | -0.007866 |
-| mean | -0.081115 | 0.365490 | 0.010965 | -0.092079 |
-| std | 0.105303 | 0.124027 | 0.003721 | 0.106203 |
+| max | 0.159908 | 0.650000 | 0.019500 | 0.150908 |
+| mean | -0.102578 | 0.312663 | 0.009380 | -0.111958 |
+| std | 0.143054 | 0.116853 | 0.003506 | 0.142982 |
 
 _注: 逆算 size_norm = (raw - pen) / alpha (近似) (alpha=0.03)_
 
 ## trade_sharpe_raw 世代別
 | generation | n | max | mean | median | n_positive |
 |---|---|---|---|---|---|
-| 0 | 40 | -0.0218 | -0.2102 | -0.1161 | 0 |
-| 1 | 40 | -0.0190 | -0.1440 | -0.0926 | 0 |
-| 2 | 40 | -0.0247 | -0.1135 | -0.0750 | 0 |
-| 3 | 40 | -0.0132 | -0.0922 | -0.0687 | 0 |
-| 4 | 40 | -0.0132 | -0.0643 | -0.0675 | 0 |
-| 5 | 40 | -0.0132 | -0.0576 | -0.0512 | 0 |
-| 6 | 40 | -0.0215 | -0.0537 | -0.0535 | 0 |
-| 7 | 40 | -0.0215 | -0.0610 | -0.0232 | 0 |
-| 8 | 40 | -0.0051 | -0.0692 | -0.0496 | 0 |
-| 9 | 40 | -0.0051 | -0.0508 | -0.0215 | 0 |
-| 10 | 40 | -0.0051 | -0.0694 | -0.0429 | 0 |
-| 11 | 40 | 0.0011 | -0.0703 | -0.0398 | 2 |
-| 12 | 40 | 0.0011 | -0.0410 | -0.0215 | 5 |
-| 13 | 40 | 0.0011 | -0.0664 | -0.0707 | 6 |
-| 14 | 40 | 0.0011 | -0.0949 | -0.0603 | 7 |
-| 15 | 40 | 0.0011 | -0.0730 | -0.0650 | 10 |
+| 0 | 40 | -0.0359 | -0.2270 | -0.1443 | 0 |
+| 1 | 40 | -0.0235 | -0.1683 | -0.1011 | 0 |
+| 2 | 40 | 0.0253 | -0.1120 | -0.0770 | 1 |
+| 3 | 40 | 0.0253 | -0.0906 | -0.0782 | 2 |
+| 4 | 40 | 0.0253 | -0.0751 | -0.0659 | 3 |
+| 5 | 40 | 0.0253 | -0.1124 | -0.0876 | 4 |
+| 6 | 40 | 0.0253 | -0.0770 | -0.0749 | 6 |
+| 7 | 40 | 0.0253 | -0.0955 | -0.0790 | 6 |
+| 8 | 40 | 0.0253 | -0.1072 | -0.0704 | 8 |
+| 9 | 40 | 0.0253 | -0.0576 | -0.0384 | 11 |
+| 10 | 40 | 0.0253 | -0.1067 | -0.0239 | 16 |
+| 11 | 40 | 0.1599 | -0.0856 | 0.0253 | 17 |
+| 12 | 40 | 0.0253 | -0.1258 | -0.1635 | 12 |
+| 13 | 40 | 0.1071 | -0.0976 | -0.0776 | 14 |
+| 14 | 40 | 0.1071 | -0.0757 | 0.0253 | 19 |
+| 15 | 40 | 0.1071 | -0.0346 | 0.0253 | 20 |
 
 ## trade_count バケット別
 | バケット | n | trade_sharpe mean | fitness_pen mean |
 |---|---|---|---|
-| 0 | 9 | — | — |
-| 1-49 | 8 | — | — |
-| 50-499 | 18 | -0.3866 | -0.4005 |
-| 500-1499 | 28 | -0.2955 | -0.3069 |
-| >=1500 | 577 | -0.0612 | -0.0720 |
+| 0 | 20 | — | — |
+| 1-49 | 89 | -0.4215 | -0.4312 |
+| 50-499 | 215 | -0.0636 | -0.0734 |
+| 500-1499 | 47 | -0.2529 | -0.2643 |
+| >=1500 | 269 | -0.1003 | -0.1091 |
 
 ## diversity (n_nodes / active_clause 推移)
 | generation | n_nodes mean | n_nodes std | active_clause mean | active_clause unique |
 |---|---|---|---|---|
-| 0 | 3.05 | 1.011 | 1.00 | 1 |
-| 1 | 3.05 | 1.011 | 1.00 | 1 |
-| 2 | 2.65 | 0.864 | 1.00 | 1 |
-| 3 | 2.48 | 0.905 | 1.00 | 1 |
-| 4 | 2.42 | 0.958 | 1.00 | 1 |
-| 5 | 2.40 | 0.810 | 1.00 | 1 |
-| 6 | 2.10 | 0.441 | 1.00 | 1 |
-| 7 | 2.02 | 0.423 | 1.00 | 1 |
-| 8 | 2.10 | 0.545 | 1.00 | 1 |
-| 9 | 2.30 | 0.464 | 1.00 | 1 |
-| 10 | 2.42 | 0.636 | 1.00 | 1 |
-| 11 | 2.23 | 0.530 | 1.00 | 1 |
-| 12 | 2.25 | 0.543 | 1.00 | 1 |
-| 13 | 2.48 | 0.679 | 1.00 | 1 |
-| 14 | 2.33 | 0.656 | 1.00 | 1 |
-| 15 | 2.17 | 0.781 | 1.00 | 1 |
+| 0 | 2.50 | 0.877 | 0.97 | 2 |
+| 1 | 2.48 | 1.062 | 1.00 | 1 |
+| 2 | 2.33 | 1.023 | 1.00 | 1 |
+| 3 | 2.08 | 0.764 | 1.00 | 1 |
+| 4 | 1.85 | 0.736 | 1.00 | 1 |
+| 5 | 2.00 | 0.641 | 1.00 | 1 |
+| 6 | 1.80 | 0.564 | 1.00 | 1 |
+| 7 | 1.82 | 0.636 | 1.00 | 1 |
+| 8 | 1.93 | 0.656 | 1.00 | 1 |
+| 9 | 1.95 | 0.639 | 1.00 | 1 |
+| 10 | 1.98 | 0.530 | 1.00 | 1 |
+| 11 | 1.95 | 0.504 | 1.00 | 1 |
+| 12 | 1.85 | 0.533 | 1.00 | 1 |
+| 13 | 2.02 | 0.577 | 1.00 | 1 |
+| 14 | 2.05 | 0.597 | 1.00 | 1 |
+| 15 | 2.15 | 0.770 | 1.00 | 1 |
 
 ## penalty 効果
-- raw>0 個体数: 30
-- raw>0 ∧ fitness_pen<=0 (= penalty で潰された): 30
-- raw>0 ∧ fitness_pen>0 (= 通過候補): 0
+- raw>0 個体数: 139
+- raw>0 ∧ fitness_pen<=0 (= penalty で潰された): 1
+- raw>0 ∧ fitness_pen>0 (= 通過候補): 138
 
 ## extra_metrics
-- raw_positive_count: 30
-- fitness_pen_positive_count: 0
-- sentinel_by_generation: {0: 10, 1: 2, 2: 1, 6: 2, 9: 1, 13: 1}
+- raw_positive_count: 139
+- fitness_pen_positive_count: 138
+- sentinel_by_generation: {0: 14, 2: 1, 3: 2, 4: 2, 5: 4, 6: 9, 7: 10, 8: 5, 9: 5, 10: 6, 11: 9, 12: 10, 13: 8, 14: 6, 15: 12}
 
 ## data_quality
-- n_valid / n_total: 623 / 640
-- sentinel 個体数: 17
+- n_valid / n_total: 537 / 640
+- sentinel 個体数: 103
   - T034 sentinel 値は全て -1e9 で同一、 archive に Stage A reason_codes 列なしのため NO_EXPOSURE / METRIC_UNAVAILABLE / SYSTEM_FAILURE の内訳分離不能
-- warnings:
-  - summary.run_id (run_20260504_032436) != archive run_id (run_20260504_032451) = run_id 取り違えの可能性、 P3 判定を degrade
 
 ## run_effective_config (= audit trail)
 - _source: run_effective
 - summary_path: /Users/ishitoya/repository/zenigame-fx/reports/run-reports/run-27/summary.json
-- summary_run_id: run_20260504_032436
-- max_clause: None
+- summary_run_id: run_20260504_043138
+- max_clause: 1
 - stage_a_alpha: 0.03
-- stage_a_threshold: 0.0
+- stage_a_threshold: -0.0172

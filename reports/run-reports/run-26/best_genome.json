@@ -1,0 +1,29 @@
+{
+  "name": "g42_i6",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F10",
+          "weight": 0.9586811819355684,
+          "params": {
+            "n": 33
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.5110273179078036
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.42037529681914093,
+    "exit_threshold": 0.3532910862989004,
+    "max_pos": 2,
+    "time_stop_min": 131
+  },
+  "risk": {
+    "stop_atr": 2.5535892219116496,
+    "take_atr": 3.3693174878623786
+  }
+}

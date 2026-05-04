@@ -1,0 +1,58 @@
+{
+  "name": "g58_i19",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "P7",
+          "weight": 1.1237318425254879,
+          "params": {
+            "spx_n": 31,
+            "vix_threshold": 20.04059152027903,
+            "vix_scale": 1.1075560612554964,
+            "vix_staleness_days": 3.7400062887753336,
+            "spx_staleness_bars": 419
+          }
+        },
+        {
+          "name": "F6",
+          "weight": 0.682395893384954,
+          "params": {
+            "session": 2,
+            "k": 2.6694521878438886,
+            "atr_n": 26
+          }
+        },
+        {
+          "name": "P2",
+          "weight": 0.9771361447722939,
+          "params": {
+            "atr_n": 12
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "M2",
+          "weight": 1.132446482092208,
+          "params": {
+            "session": 1,
+            "soft_edge_min": 9.831436636293965
+          }
+        }
+      ],
+      "weight": 1.2329521538653543
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.2995141219602656,
+    "exit_threshold": 0.06759590198662699,
+    "max_pos": 3,
+    "time_stop_min": 272
+  },
+  "risk": {
+    "stop_atr": 3.057171757065934,
+    "take_atr": 2.028905129301451
+  }
+}

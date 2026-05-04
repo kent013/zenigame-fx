@@ -367,6 +367,51 @@ dormant chain 5000+ 行に対する対応:
 
 ---
 
+## 6.6 improve-cycle 1 の経過 (= /loop ではなく単発実行)
+
+**起動**: 2026-05-04 12:36 JST、 引数 `--repeat`
+**tmp_dir**: `devnotes/20260504-1236-fx-improve/`
+
+### Phase 1 analyze-run (Run-27 = run_20260504_032451)
+- archive 全 640 個体で stage_a_pass=0、 best fitness_pen=-0.0079
+- Codex 独立分析が C1 (Design-first) と C2 (X 無い=バグ禁止) で重要修正
+  - 「primitive 拡充を即 Critical」 = 仕組み未検証で値弄り違反
+  - 「archive NaN = 死にコード断定」 = C2 違反、 切り分け監査が先
+
+### Phase 2 plan-and-design
+- consensus Round 2 で APPROVED: 「Run-28 = (c) diagnostic instrumentation のみ」
+- design-review Round 3 で APPROVED (= 3 round 合議): run-effective config 取得経路の確定
+- 反証可能仮説: Stage A pass=0 の root cause は (P1) primitive / (P2) penalty / (P3) 探索 dynamics のいずれか
+
+### Phase 2.5 calibrate-gate
+- decision: **loosen**, threshold 0.0 → **-0.0172** (= 200 行集計、 q_target=-0.0172)
+
+### Phase 3 implement (= TODO 不在のため Claude 直接、 main commit `f6c7c43`)
+- 新規 `scripts/alpha_factory/analyze_stage_a_diagnostic.py` (~450 行)
+- 新規 `tests/scripts/test_analyze_stage_a_diagnostic.py` (16 テスト全 PASS)
+- Run-27 適用結果: **diagnosis=INCONCLUSIVE confidence=low** (= 設計予測 P1 high が外れた、 improvement loop の典型)
+  - **P1 match**: raw_max=0.0011 < 0.005 ✓
+  - **P2 match**: penalty_killed=30 (= 全 raw>0 個体 30 個が penalty で潰されている) ✓
+  - **P3 N/A**: summary.run_id ≠ archive run_id 検出で degrade
+
+### Phase 3 副次発見: archive write vs summary write の run_id 不一致
+- archive parquet 名: `run_20260504_032451`
+- summary.json run_id: `run_20260504_032436` (= 15 秒前)
+- = production runtime で archive と summary の run_id 生成タイミングがズレる構造的問題候補
+- **別 cycle で扱う題材 (= 今 cycle の C1 で偶然検出)**
+
+### 重要な学び (= Run-27 diagnostic からの観察)
+- raw_positive_count=30 (= 想定 1 個体ではない、 = primitive は positive sharpe を生成可能)
+- 全 30 個体が penalty で潰されている = **P2 (penalty / config 設計) が真の支配的要因の可能性**
+- = Codex 予測 (P1 high) を archive が反証 = improvement loop が機能した好例
+
+### Phase 4-6 (= 進行中 / 後続 cycle)
+- Phase 4 Run-28: BG 実行中 (threshold=-0.0172 適用済)
+- Phase 5: Run-28 完了後に diagnostic 適用 + run-report 生成
+- Phase 6: --repeat なので次 cycle へ (Run-28 結果次第で P2 仮説 = penalty / config 設計打ち手の検討)
+
+---
+
 ## 7. ユーザ指示の精神 (= 改めて)
 
 > 「死にコードがない状態まで作り込んで、 走らせて...という」

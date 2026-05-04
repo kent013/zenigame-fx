@@ -1,0 +1,30 @@
+{
+  "name": "g28_i35",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F9",
+          "weight": 1.3677874792209792,
+          "params": {
+            "n": 7,
+            "scale": 27.054130192078365
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.9410054265595621
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.21061770272948038,
+    "exit_threshold": 0.04560241479301288,
+    "max_pos": 3,
+    "time_stop_min": 56
+  },
+  "risk": {
+    "stop_atr": 1.5065595551310855,
+    "take_atr": 3.4318131525886484
+  }
+}
