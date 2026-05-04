@@ -33,7 +33,7 @@ from typing import Literal
 
 import structlog
 
-from src.alpha_factory.stage_gate import CrossPairResult
+from src.alpha_factory.stage_gate import CrossPairResult, _PairSidecarInputs
 from src.backtest.engine import BacktestConfig, run_backtest
 from src.backtest.metrics import DEFAULT_TRADE_COUNT_MIN_FOR_SHARPE, compute_metrics
 from src.broker.mock import InstrumentMeta, MockBroker
@@ -128,15 +128,31 @@ def _run_pair_sharpe(
     backtest_config: BacktestConfig,
     primitive_evaluator: PrimitiveEvaluator,
     trade_count_min_for_sharpe: int = DEFAULT_TRADE_COUNT_MIN_FOR_SHARPE,
-) -> tuple[float, str | None]:
-    """単一ペアで backtest 実行し、Sharpe を返す。
+) -> tuple[float, str | None, _PairSidecarInputs | None]:
+    """単一ペアで backtest 実行し、Sharpe + dual-path sidecar を返す。
+
+    B step 1.8 で 3-tuple に拡張: 第3要素 ``sidecar_inputs`` は dual-path 経路用の
+    canonical_five 計算用 input 集合 (= bars / trades / equity_curve / bt)、
+    bt 計算成功時のみ ``_PairSidecarInputs`` instance、 exception 時は None。
+    cross_pair.py 内では参照保持のみ、 canonical 計算は呼ばない (= 案 A' 責務境界、
+    詳細設計 § 1.4)。
 
     Returns:
-        ``(sharpe, failure_reason)``. 成功時 ``(sharpe, None)``、失敗時は
-        ``(0.0, "<reason>")``。reason 例:
+        ``(sharpe, failure_reason, sidecar_inputs)``。
 
-        - ``"metric_unavailable"`` — no trades 等で sharpe is None
-        - ``"exception:<ExceptionType>"`` — backtest 内で例外
+        - 成功時 (= bt 計算成功 + trade_sharpe_raw is not None):
+          ``(sharpe, None, _PairSidecarInputs(...))``
+        - metric_unavailable (= bt 計算成功だが trade_sharpe_raw is None):
+          ``(0.0, "metric_unavailable", _PairSidecarInputs(...))``
+          (= bt は valid、 sidecar 保持で dual-path で canonical 計算 / log emit
+          経路に進む。 _try_evaluate_canonical_five_safe の no-raise 契約で
+          内部 fallback で None 返り、 dual_path event は canonical_skipped=True
+          で emit される、 観測価値: trade なし genome の per-pair canonical 状態が
+          観測可能、 Codex detailed-review Round 1 [Warning 施策 3] / Round 2
+          [Warning 施策 3] 反映)
+        - exception (= run_backtest / compute_metrics raise):
+          ``(0.0, "exception:<Type>", None)``
+          (= sidecar 不在、 dual-path skip、 詳細設計 acceptance C6)
     """
     pair_config = replace(backtest_config, instrument=pair)
     try:
@@ -148,11 +164,20 @@ def _run_pair_sharpe(
             result.equity_curve,
             trade_count_min_for_sharpe=trade_count_min_for_sharpe,
         )
+        # B step 1.8: bt 計算成功時は sidecar を必ず保持 (= trade_sharpe_raw が
+        # None かどうかに依存しない)。 trade_sharpe_raw None 時は metric_unavailable
+        # failure_reason を返すが sidecar は保持 (= dual-path で canonical 観測継続)
+        sidecar_inputs = _PairSidecarInputs(
+            bars=bars,
+            trades=result.trades,
+            equity_curve=result.equity_curve,
+            bt=bt,
+        )
         # T-sharpe Phase 1A: trade_sharpe_raw (v2) を使用。
         # None は fail-fast (skip 扱い禁止) — 呼び出し元の集計で 0.0 として混入させる
         if bt.trade_sharpe_raw is None:
-            return 0.0, "metric_unavailable"
-        return float(bt.trade_sharpe_raw), None
+            return 0.0, "metric_unavailable", sidecar_inputs
+        return float(bt.trade_sharpe_raw), None, sidecar_inputs
     except Exception as exc:
         logger.warning(
             "cross_pair.pair_failure",
@@ -161,7 +186,9 @@ def _run_pair_sharpe(
             error=str(exc),
             error_type=type(exc).__name__,
         )
-        return 0.0, f"exception:{type(exc).__name__}"
+        # exception 時のみ sidecar None (= bt 計算自体に失敗、
+        # dual-path で参照すべき bt がない)
+        return 0.0, f"exception:{type(exc).__name__}", None
 
 
 def _make_skipped_result(
@@ -269,8 +296,11 @@ def evaluate_cross_pair(
     # --- run 3 backtests ---
     sharpe_per_pair: dict[str, float] = {}
     pair_failures: list[str] = []
+    # B step 1.8: per-pair sidecar 集約 (= dual-path 経路用、 stage_gate.py 側で
+    # canonical 計算 + log emit、 cross_pair.py 内では canonical 計算は呼ばない)
+    sidecar_inputs_per_pair: dict[str, _PairSidecarInputs] = {}
     for pair in required:
-        sh, fail = _run_pair_sharpe(
+        sh, fail, sidecar_inputs = _run_pair_sharpe(
             genome=genome,
             pair=pair,
             bars=list(pair_bars[pair]),
@@ -281,6 +311,8 @@ def evaluate_cross_pair(
         sharpe_per_pair[pair] = sh
         if fail is not None:
             pair_failures.append(f"pair_failure:{pair}:{fail}")
+        if sidecar_inputs is not None:
+            sidecar_inputs_per_pair[pair] = sidecar_inputs
 
     # --- aggregation (pstdev = ddof=0 母標準偏差) ---
     sharpes = list(sharpe_per_pair.values())
@@ -353,6 +385,11 @@ def evaluate_cross_pair(
         passed=bool(pc["all"]),
         metrics=metrics,
         reason_codes=tuple(reasons),
+        # B step 1.8: per-pair sidecar (= dual-path 経路用、 stage_gate.py 側で
+        # canonical 計算 + log emit + sanitize)。
+        # CrossPairResult.metrics には絶対入れない (= public metrics 空間を汚染しない、
+        # 概念設計 § 2.6 名前空間隔離契約、 acceptance E1/E2)
+        _shadow_sidecar_inputs=sidecar_inputs_per_pair,
     )
 
 

@@ -780,3 +780,99 @@ T072 SSOT で禁止。
 - OANDA Developer Portal 公式 spec 確認後に Phase 2 で
   `broker_full_close_holidays` / `date_overrides` を production 反映 (Phase 1 は
   単体テスト範囲、 confidence=medium)
+
+---
+
+## B Phase 2 切替コミット dual-path log SSOT (= step 1-1.8)
+
+### § 4.7 ログ命名規約 SSOT
+
+`stage_gate.canonical_five.dual_path` event の `stage` field と識別子契約は以下:
+
+| stage_label | 評価対象 | step | fold_index | pair_label |
+|---|---|---|---|---|
+| `A` | Stage A 評価窓 (60d) | step 1 (= main commit 9bc6a02) | None | None |
+| `B_IS` | Stage B 18m 全体 IS | step 1.5 (= 6276d58) | None | None |
+| `B_fold` | Stage B per-fold OOS | step 1.6 (= 1dadc8b) | **必須 (0..n_fold-1)** | None |
+| `C_base` | Stage C base evaluation (holdout 60d) | step 1.5 (= 6276d58) | None | None |
+| `C_stress` | Stage C spread stress backtest (holdout 60d × spread_multiplier) | step 1.7 (= e3a428b) | None | None |
+| **`C_cross_pair`** | Stage C cross-pair (ii-lite) shadow per-pair | **step 1.8 (本 commit)** | None | **必須 (実 pair 名 = "EUR_USD" 等)** |
+
+### 識別子契約 (= `_log_canonical_dual_path` fail-fast)
+
+`src/alpha_factory/stage_gate.py:_log_canonical_dual_path` は識別子契約違反を `ValueError` で fail-fast:
+
+- `stage_label="B_fold"` で `fold_index is None` → ValueError
+- `stage_label="C_cross_pair"` で `pair_label` が `None` / 空文字 / 空白文字列 / 前後空白付き文字列 → ValueError
+- `stage_label != "B_fold"` で `fold_index is not None` → ValueError (= ログ名前空間汚染防止、 step 1.8 で対称化)
+- `stage_label != "C_cross_pair"` で `pair_label is not None` → ValueError (= ログ名前空間汚染防止)
+
+`pair_label` には **実 pair 名のみ許可** (= `"EUR_USD"` / `"USD_JPY"` 等)。 役割識別 (= target / anchor1 / anchor2) は dual-path log に出さない (= SSOT 簡潔化)。 将来 role 分析時は Stage C payload の `target_pair` / `anchor_pairs` と `(genome, pair)` で join する設計。
+
+### dual-path skip SSOT (= step 1.8 で確立)
+
+cross_pair dual-path 経路の skip 条件は **`sidecar_inputs is None`** (= exception pair のみ skip)。
+
+- **exception pair** (= `_run_pair_sharpe` 内で `run_backtest` / `compute_metrics` raise) → `sidecar_inputs is None` → dual-path skip
+- **metric_unavailable pair** (= bt 計算成功 + `trade_sharpe_raw is None`) → `sidecar_inputs` 保持 → dual-path で `_try_evaluate_canonical_five_safe` 呼出 → 内部 fallback で None 返り → `canonical_skipped=True` event emit
+
+`pair_failures` リストは **既存 cross_pair gate** (= aggregate_fitness / pass_criteria) 用で、 dual-path 配線とは **独立**。
+
+### sanitize 経路 (= step 1.8 で確立)
+
+`evaluate_stage_c` の cross_pair 区画は dual-path 経路を `try ... finally` で囲み、 finally 句で **常時** sanitize:
+
+```python
+try:
+    # dual-path: per-pair iterate + canonical 計算 + log emit
+    ...
+finally:
+    # sidecar が payload / IPC / archive に絶対漏れない契約
+    cross_pair_payload["result"] = replace(cp_result, _shadow_sidecar_inputs={})
+```
+
+dual-path 経路の **例外有無 / disabled mode / sidecar 空 / cp_result is None / pair_failure 全分岐** で sanitize は常時実行される。 sanitize 後の `CrossPairResult._shadow_sidecar_inputs` は空 dict、 multiprocessing pickle (= `parallel_eval._pool.map`) 経路でも IPC に sidecar が漏れない。
+
+### `CrossPairResult._shadow_sidecar_inputs` field 契約
+
+- `field(default_factory=dict, repr=False, compare=False)` (= step 1.8)
+- `default_factory=dict`: multiprocessing pickle 互換 (= `MappingProxyType` 不可、 `pickle.dumps` で TypeError 防止)
+- `repr=False`: snapshot 比較ノイズ排除
+- `compare=False`: dataclass equality から除外 (= sidecar 内容のみ異なる 2 個の `CrossPairResult` は等価扱い)
+- leading underscore で **public API ではない ephemeral 属性** を明示
+
+### smoke merge gate (= acceptance B2 / B3、 step 1.8 で導入)
+
+`scripts/smoke/measure_step1.8_memory.sh` + `scripts/smoke/aggregate_step1.8_memory.py` (= psutil sampling SSOT) で merge 条件を実測:
+
+- **B2 主条件**: `sampled_max_worker_rss < 3 GB` (= psutil sampling、 元制約「6 worker / 1 worker 約 3 GB」 を直接検証)
+- **B2 補助条件**: `sampled_process_tree_rss_max < 18 GB` (= 6 worker × 3 GB の総量上限、 暫定)
+- **B3**: `wall_time_mean_per_run` が **step 1.7 baseline 比 ±20% 以内** (= `reports/smoke/step1.7/` を `--baseline-dir` で参照、 baseline 不在 / 計測欠損時は B3 INCONCLUSIVE で **merge 失敗** 扱い)
+
+aggregate helper (= `aggregate_step1.8_memory.py`) の exit code:
+
+- `0`: B2 PASS かつ B3 PASS
+- `1`: それ以外 (= B2 FAIL / B3 FAIL / B2 INCONCLUSIVE / B3 INCONCLUSIVE のいずれか)
+
+sampling 失敗時 (= 以下いずれか) は **B2 INCONCLUSIVE で merge 不可** (= SSOT を崩さない、 暫定運用しない、 詳細設計 § 12.4 Case B):
+
+- `sampled_worker_rss` / `sampled_process_tree_rss` いずれか欠損
+- `n_samplers_succeeded != n_runs` (= 一部 run の sample-N.jsonl が存在しない / 0 sample) — Codex impl-review Round 3 [Critical] 反映で導入
+- `n_samplers_failed > 0` (= sample-N.jsonl 存在するが parse 失敗 / 空 / header 不在 / run_index mismatch)
+
+stale file contamination guard (= Codex impl-review Round 4 [Critical] 反映):
+
+- `measure_step1.8_memory.sh` 開始時に `rm -f reports/smoke/step1.8/{run-*.log,sample-*.jsonl}` で前回 run の残骸を初期化
+- sampler は出力 JSONL の **1 行目に header** (= `run_index` / `started_at` / `root_pid` / `target_cmdline`) を書き込む
+- aggregate は header の `run_index` と `run-N.log` の番号を pair 検証 (= mismatch なら sampler_failed)
+- aggregate は JSONDecodeError も failed 扱い (= SSOT 計測で malformed line を見逃さない)
+
+fallback は `ps -o rss= -p <pid>` 等の手動計測で SSOT を再 verify してから merge。
+
+sampler の cross-run contamination guard:
+
+- `--target-cmdline` で対象 root process を cmdline 部分一致で特定
+- **sampler 起動時刻以後に起動した process だけを対象** (= 既存の別 run_ga が残っていても捕捉しない、 詳細設計 Round 5 [Suggestion 施策 6] + 実装 Round 2 [Warning] 反映)
+- 任意で `--extra-marker` を渡せば run-specific cmdline marker でさらに絞り込み可能 (= 並列 smoke の future improvement)
+
+詳細: `devnotes/20260504-0010-B-phase2-step1.8-stage-c-cross-pair-dual-path/{conceptual,detailed}-design.md`
