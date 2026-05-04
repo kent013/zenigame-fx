@@ -1,0 +1,1 @@
+cycle 22 ensemble 集約で過去 RUN の stage_b_pass 個体 840 個発見、 ただし trade_count>=50 + stage_b_pass=True の 834 個は全て単一 RUN run_20260426_145502 由来、 trade_sharpe_stage_c=null = Stage C 評価不在。 私の cycle 1-21 では trade_count>=50 + stage_b_pass=True 個体ゼロ。 cycle 23 で run_20260426_145502 config 比較。
