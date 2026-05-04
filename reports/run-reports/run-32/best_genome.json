@@ -1,0 +1,30 @@
+{
+  "dataset_epoch_id": "epoch_20251001_20260401",
+  "name": "g4_i25",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F11",
+          "weight": 1.4070521122250197,
+          "params": {
+            "n": 58
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.3411635432315079
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.29055753418820385,
+    "exit_threshold": 0.28681508806733935,
+    "max_pos": 1,
+    "time_stop_min": 184
+  },
+  "risk": {
+    "stop_atr": 1.7662924619219953,
+    "take_atr": 2.4125861599777294
+  }
+}

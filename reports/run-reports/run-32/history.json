@@ -1,0 +1,146 @@
+[
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 0,
+    "best_fitness": "-0.053512491098299086",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 1,
+    "best_fitness": "-0.03499834584167944",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 2,
+    "best_fitness": "-0.03499834584167944",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 3,
+    "best_fitness": "-0.03499834584167944",
+    "stage_a_pass": 0,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 4,
+    "best_fitness": "-0.006762525181137494",
+    "stage_a_pass": 1,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 5,
+    "best_fitness": "-0.006762525181137494",
+    "stage_a_pass": 1,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 6,
+    "best_fitness": "-0.006762525181137494",
+    "stage_a_pass": 1,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 7,
+    "best_fitness": "-0.006762525181137494",
+    "stage_a_pass": 1,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 8,
+    "best_fitness": "-0.006762525181137494",
+    "stage_a_pass": 1,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 9,
+    "best_fitness": "-0.006762525181137494",
+    "stage_a_pass": 4,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 10,
+    "best_fitness": "-0.006762525181137494",
+    "stage_a_pass": 5,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 11,
+    "best_fitness": "-0.006762525181137494",
+    "stage_a_pass": 6,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 12,
+    "best_fitness": "-0.006762525181137494",
+    "stage_a_pass": 5,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 13,
+    "best_fitness": "-0.006762525181137494",
+    "stage_a_pass": 5,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 14,
+    "best_fitness": "-0.006762525181137494",
+    "stage_a_pass": 6,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  },
+  {
+    "dataset_epoch_id": "epoch_20251001_20260401",
+    "generation": 15,
+    "best_fitness": "-0.006762525181137494",
+    "stage_a_pass": 8,
+    "stage_b_pass": 0,
+    "stage_c_pass": 0,
+    "graduation_count": 0
+  }
+]
