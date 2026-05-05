@@ -341,7 +341,10 @@ __all__ = [
 # state file (calibrate_state) で「異なる stage gate ロジックの履歴を適用しない」
 # cross-run contamination guard に使用。Stage B fold reason 集計や
 # fold-trade-count guard 等のロジック改変時にバージョンを上げる。
-STAGE_GATE_VERSION: Final[str] = "v3_stage_b_fold_min_trade_count"
+# T087: bars_stage_b が Stage A 期間と時系列上 disjoint 化されたため
+# v3_stage_b_fold_min_trade_count → v4_stage_b_disjoint に bump。
+# 過去 v3 history の threshold が新条件下で誤適用されないよう cross-run guard に伝搬。
+STAGE_GATE_VERSION: Final[str] = "v4_stage_b_disjoint"
 
 
 # T054: Stage B fold が unavailable になった理由の排他的 enum 化。
@@ -907,7 +910,7 @@ def _classify_fold_unavailable(
 
 def evaluate_stage_b(
     genome: Genome,
-    bars_18m: list[PriceBar],
+    bars_stage_b: list[PriceBar],
     meta: InstrumentMeta,
     backtest_config: BacktestConfig,
     primitive_evaluator: PrimitiveEvaluator,
@@ -918,7 +921,11 @@ def evaluate_stage_b(
     """Stage B — Walk-Forward OOS gate + IS monitor。
 
     fold ごとの test 区間で sharpe を取り、median / 正 fold 比率で複合 AND 判定。
-    18 ヶ月全体の IS metrics は monitor として記録 (hard gate には使わない)。
+    Stage B 全体の IS metrics は monitor として記録 (hard gate には使わない)。
+
+    T087: ``bars_stage_b`` は Stage A 期間を時系列上 disjoint に除外したもの
+    (`stage_partition_guard.validate_stage_partition` で起動時保証)。
+    旧引数名 ``bars_18m`` は ``stage_b_window_months=18`` 由来の legacy 命名。
 
     fold metric_unavailable policy: ``oos_sharpe is None`` の fold は **0 と
     みなして母数に含める** (no-trade を hide させない設計)。
@@ -930,7 +937,7 @@ def evaluate_stage_b(
     reasons: list[str] = []
 
     folds = make_wf_folds(
-        bars_18m,
+        bars_stage_b,
         train_days=stage_config.wf_train_days,
         test_days=stage_config.wf_test_days,
         step_days=stage_config.wf_step_days,
@@ -957,7 +964,7 @@ def evaluate_stage_b(
     try:
         strategy = DslStrategy(genome, primitive_evaluator)
         broker = MockBroker(instrument_meta=meta)
-        res = run_backtest(bars_18m, strategy, broker, backtest_config)
+        res = run_backtest(bars_stage_b, strategy, broker, backtest_config)
         bt = compute_metrics(
             res.trades,
             res.equity_curve,
@@ -970,13 +977,13 @@ def evaluate_stage_b(
         is_full_total_pnl = float(bt.total_pnl)
         is_full_trade_count = bt.trade_count
         # B Phase 2 切替コミット step 1.5: dual-path canonical 5 metrics (LOG_ONLY mode)
-        # IS monitor (= bars_18m 全体 backtest) に対する dual-path 観測拡張。
+        # IS monitor (= bars_stage_b 全体 backtest) に対する dual-path 観測拡張。
         # window_days は step 1 と同じ calendar day 基準 (= stage_b_window_months * 30)。
         # 既存 fitness 判定経路には影響させない (= regression 0、 sidecar 計算 + log のみ)。
         canonical_sidecar_b_is = _try_evaluate_canonical_five_safe(
             trades=res.trades,
             equity_curve=res.equity_curve,
-            bars=bars_18m,
+            bars=bars_stage_b,
             live_criteria=stage_config.live_criteria,
             window_days=stage_config.stage_b_window_months * 30,
             stage_label="B_IS",
@@ -1207,7 +1214,7 @@ def evaluate_stage_b(
     metrics_envelope: dict[str, object] = {
         "stage": "B",
         "genome_name": genome.name,
-        "n_bars": len(bars_18m),
+        "n_bars": len(bars_stage_b),
         "wall_time_seconds": elapsed,
         "payload": {
             "n_fold": n_fold,

@@ -61,7 +61,7 @@ def _pick_individuals(
 def inspect_one(
     *,
     rec: dict[str, Any],
-    bars_18m: list,
+    bars_stage_b: list,
     meta,
     backtest_config,
     primitive_evaluator: RegistryEvaluator,
@@ -79,7 +79,7 @@ def inspect_one(
     genome = genome_from_dict(genome_dict)
 
     folds = make_wf_folds(
-        bars_18m,
+        bars_stage_b,
         train_days=stage_cfg.wf_train_days,
         test_days=stage_cfg.wf_test_days,
         step_days=stage_cfg.wf_step_days,
@@ -201,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     bundle = _load_lane_bars(
         cfg.dataset.instrument, cfg.dataset, cfg.stage_windows
     )
-    bars_18m = bundle.bars_stage_b
+    bars_stage_b = bundle.bars_stage_b
     meta = bundle.meta
     bt_factory = _make_bt_factory(cfg.dataset, cfg.backtest)
     bt_cfg = bt_factory(cfg.dataset.instrument)
@@ -212,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     for rec in picked:
         report = inspect_one(
             rec=rec,
-            bars_18m=bars_18m,
+            bars_stage_b=bars_stage_b,
             meta=meta,
             backtest_config=bt_cfg,
             primitive_evaluator=primitive_evaluator,

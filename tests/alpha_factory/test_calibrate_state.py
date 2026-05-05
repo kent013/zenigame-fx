@@ -558,7 +558,7 @@ class TestThresholdSourceCliOverridesHistory:
             base_hash=base_hash,
             dataset_span=[str(af_cfg.dataset.start), str(af_cfg.dataset.end)],
             instrument=af_cfg.dataset.instrument,
-            stage_gate_version="v3_stage_b_fold_min_trade_count",
+            stage_gate_version="v4_stage_b_disjoint",
             dataset_epoch_id="epoch_legacy",
         )
         _write_history([rec], history)
@@ -586,7 +586,7 @@ class TestThresholdSourceCliOverridesHistory:
             base_hash=base_hash,
             dataset_span=[str(af_cfg.dataset.start), str(af_cfg.dataset.end)],
             instrument=af_cfg.dataset.instrument,
-            stage_gate_version="v3_stage_b_fold_min_trade_count",
+            stage_gate_version="v4_stage_b_disjoint",
             dataset_epoch_id="epoch_legacy",
         )
         _write_history([rec], history)

@@ -166,7 +166,7 @@ def _make_tier1_lane(
         population=population,
         instrument=instrument,
         bars_60d=_stub_bars(instrument, n=4),
-        bars_18m=_stub_bars(instrument, n=8),
+        bars_stage_b=_stub_bars(instrument, n=8),
         bars_holdout=_stub_bars(instrument, n=4),
         meta=_stub_meta(instrument),
         state=cast(Any, state),
@@ -207,7 +207,7 @@ def _make_lane_manager(
     if factory is None:
         factory = _stub_bt_factory_intraday()
     if stage_gate_config is None:
-        # T035: 既存 fixture は bars_18m=8 unique dates で十分な観測日数を持たない
+        # T035: 既存 fixture は bars_stage_b=8 unique dates で十分な観測日数を持たない
         # ため、デフォルトの wf_train_days=120/test=20/embargo=1 (sum=141) では
         # skip-path 発動。既存テストの期待を維持するため小さい wf 値を与える。
         stage_gate_config = StageGateConfig(
@@ -345,7 +345,7 @@ def test_tier1_lane_inheritance() -> None:
         population=[],
         instrument="EUR_JPY",
         bars_60d=_stub_bars(n=2),
-        bars_18m=[],
+        bars_stage_b=[],
         bars_holdout=[],
         meta=_stub_meta("EUR_JPY"),
     )
@@ -394,7 +394,7 @@ def test_lane_manager_init_instrument_key_mismatch() -> None:
         population=[],
         instrument="USD_JPY",  # mismatch
         bars_60d=[],
-        bars_18m=[],
+        bars_stage_b=[],
         bars_holdout=[],
         meta=_stub_meta("USD_JPY"),
     )
@@ -414,7 +414,7 @@ def test_lane_manager_init_meta_none_raises() -> None:
         population=[],
         instrument="EUR_JPY",
         bars_60d=[],
-        bars_18m=[],
+        bars_stage_b=[],
         bars_holdout=[],
         meta=None,  # invalid
     )
@@ -916,7 +916,7 @@ def test_run_generation_skips_cp_evaluator_when_pair_data_missing(
 def test_stage_b_skipped_when_unique_dates_below_minimum(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """bars_18m の unique dates < wf_min_unique_dates → T044 pre-flight が先取りし
+    """bars_stage_b の unique dates < wf_min_unique_dates → T044 pre-flight が先取りし
     reason_codes=('stage_b_pre_flight_underfilled',) で記録される (T035 wf_min_unique_dates 単独経路は dead)."""
     counts = _patch_stage_funcs(
         monkeypatch,
@@ -925,7 +925,7 @@ def test_stage_b_skipped_when_unique_dates_below_minimum(
     )
     archive = MagicMock(spec=GenomeArchive)
     # default _make_lane_manager が小さい wf cfg を渡すので、それを大きい cfg で
-    # 上書きして underfilled を再現する (bars_18m=8 unique dates < 141)
+    # 上書きして underfilled を再現する (bars_stage_b=8 unique dates < 141)
     big_cfg = StageGateConfig()  # wf_train=120 + embargo=1 + test=20 = 141
     mgr = _make_lane_manager(archive=archive, stage_gate_config=big_cfg)
     mgr.run_generation("tier1_EUR_JPY")
@@ -950,14 +950,14 @@ def test_stage_b_skipped_when_unique_dates_below_minimum(
 def test_stage_b_evaluated_when_unique_dates_meet_minimum(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """bars_18m unique dates >= wf_min_unique_dates → 通常 evaluate_stage_b 発火."""
+    """bars_stage_b unique dates >= wf_min_unique_dates → 通常 evaluate_stage_b 発火."""
     counts = _patch_stage_funcs(
         monkeypatch,
         a_result=_stage_a_result(passed=True),
         b_result=_stage_b_result(passed=False),
     )
     archive = MagicMock(spec=GenomeArchive)
-    # default fixture は小さい wf (2+0+1=3) で bars_18m=8 だから skip-path 不発動
+    # default fixture は小さい wf (2+0+1=3) で bars_stage_b=8 だから skip-path 不発動
     mgr = _make_lane_manager(archive=archive)
     mgr.run_generation("tier1_EUR_JPY")
     assert counts["a"] == 2
@@ -971,14 +971,14 @@ def test_stage_b_evaluated_when_unique_dates_meet_minimum(
 def test_stage_b_skipped_pre_flight_when_max_folds_below_min(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """bars_18m が max_folds<min_folds_required → pre-flight skip-path."""
+    """bars_stage_b が max_folds<min_folds_required → pre-flight skip-path."""
     counts = _patch_stage_funcs(
         monkeypatch,
         a_result=_stage_a_result(passed=True),
         b_result=_stage_b_result(passed=False),
     )
     archive = MagicMock(spec=GenomeArchive)
-    # train=120, test=20, embargo=1, step=20 → fold_len=141。bars_18m=8 → max_folds=0 < min=2
+    # train=120, test=20, embargo=1, step=20 → fold_len=141。bars_stage_b=8 → max_folds=0 < min=2
     big_cfg = StageGateConfig(wf_min_folds_required=2)
     mgr = _make_lane_manager(archive=archive, stage_gate_config=big_cfg)
     mgr.run_generation("tier1_EUR_JPY")

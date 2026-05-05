@@ -214,6 +214,31 @@ def _fmt_stats(stats: dict[str, Any]) -> str:
     )
 
 
+def _resolve_stage_b_inconclusive_flag(
+    summary: Any, archive_rows: list[dict[str, Any]] | None
+) -> bool | None:
+    """T087: Stage B inconclusive 判定の SSOT 解決.
+
+    優先順位:
+        1. ``summary["stage_b"]["statistical_inconclusive"]`` (新 run)
+        2. archive 内 best 個体行の ``n_fold_effective`` から再導出 (旧 run / fallback)
+        3. None (判定不能)
+    """
+    from src.alpha_factory.stage_b_inconclusive import is_stage_b_inconclusive
+
+    sb_block = summary.get("stage_b") if isinstance(summary, dict) else None
+    if isinstance(sb_block, dict) and "statistical_inconclusive" in sb_block:
+        return bool(sb_block["statistical_inconclusive"])
+    # fallback: archive の "best" 個体名から該当 row を引き当て、 n_fold_effective から再導出。
+    best = summary.get("best") if isinstance(summary, dict) else None
+    best_name = best.get("name") if isinstance(best, dict) else None
+    if archive_rows and best_name:
+        for row in archive_rows:
+            if row.get("individual_name") == best_name:
+                return is_stage_b_inconclusive(row.get("n_fold_effective"))
+    return None
+
+
 def _ii_lite_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
     c: Counter[str] = Counter()
     for r in rows:
@@ -345,6 +370,15 @@ def main(argv: list[str] | None = None) -> int:
         for bk in ("bars_stage_a", "bars_stage_b", "bars_holdout"):
             if bk in ds:
                 lines.append(f"  - {bk}: {ds[bk]}")
+        # T087: Stage A/B disjoint 化を運用者へ明示
+        if ds.get("bars_stage_b_excludes_stage_a"):
+            lines.append(
+                "  - Stage B excludes Stage A window "
+                f"(stage_b: {ds.get('stage_b_bar_first', '—')} → "
+                f"{ds.get('stage_b_bar_last', '—')}, "
+                f"stage_a: {ds.get('stage_a_bar_first', '—')} → "
+                f"{ds.get('stage_a_bar_last', '—')})"
+            )
     lines.append("")
 
     # 使命判定
@@ -376,6 +410,15 @@ def main(argv: list[str] | None = None) -> int:
         lines.append(f"- Stage A pass: {sp['stage_a_pass']}")
         lines.append(f"- Stage B pass: {sp['stage_b_pass']}")
         lines.append(f"- Stage C pass: {sp['stage_c_pass']}")
+    # T087: Stage B inconclusive (n_fold_effective < 3) 注記。
+    # summary に flag があればそれを使い、 無ければ best 個体の archive row から
+    # is_stage_b_inconclusive() で再導出する (downstream / 旧 run 互換)。
+    inconclusive_flag = _resolve_stage_b_inconclusive_flag(summary, archive_rows)
+    if inconclusive_flag is True:
+        lines.append(
+            "- ⚠ Stage B verdict is **statistically inconclusive** "
+            "(`n_fold_effective < 3`)."
+        )
     lines.append("")
 
     # Lane 別落下分布

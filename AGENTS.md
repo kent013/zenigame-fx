@@ -132,6 +132,27 @@ yaml を chore commit で reset しても history が新しければ history 値
 
 ---
 
+## Stage A/B disjoint 化と Stage Partition Guard (T087)
+
+`run_ga.py` は dataset を以下の 3 区間に時系列上 disjoint に分割する:
+
+- Stage A: `[dataset.end - stage_a_window, dataset.end)` (GA fitness 評価対象、 末尾固定)
+- Stage B: `[dataset.start, dataset.end - stage_a_window)` (fold WF + IS monitor、 Stage A 期間を除外)
+- Stage C holdout: `[dataset.end, dataset.end + stage_c_holdout_days)`
+
+起動時 `stage_partition_guard.validate_stage_partition` が以下を fail-closed で検証 (escape hatch なし):
+
+- B-0 入力健全性 (non_empty / UTC tz / not null / monotonic / unique-within-stage)
+- B-1 partition 整合性 (chronological order 3 条件 + exact timestamp disjoint 3 条件)
+
+旧 `stage_windows.allow_stage_c_fallback_slice` は廃止。 holdout が DB から取得できない場合は常に RuntimeError。test fixture で synthetic holdout が必要な場合は test-only helper で `LaneBarsBundle` を直接構築する。
+
+`STAGE_GATE_VERSION` は `v4_stage_b_disjoint` に bump 済み (旧 `v3_stage_b_fold_min_trade_count` 期の calibrate-gate history は cross-run guard で誤適用されない)。
+
+詳細: `docs/alpha_factory/stage-gates.md` § "Stage A/B disjoint 契約 (T087)" / `docs/alpha_factory/runbook.md` § 4-1。
+
+---
+
 ## .claude/ 設定の現状
 
 `.claude/skills/` 配下は以下の三層構成:

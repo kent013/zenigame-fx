@@ -695,7 +695,27 @@ class GenomeArchive:
                 run_id=self.run_id,
             )
 
-        table = pa.Table.from_pylist(clean_rows, schema=GENOMES_SCHEMA)
+        # T087: archive parquet schema metadata に Stage Partition 文脈を埋め込む。
+        # archive 単体 consumer が bars_stage_b の意味と stage_gate_version を
+        # 把握できるようにする (列追加なし、 schema metadata の key-value)。
+        # 循環 import 回避のため STAGE_GATE_VERSION は遅延 import する。
+        from src.alpha_factory.stage_gate import STAGE_GATE_VERSION
+
+        new_metadata: dict[bytes, bytes] = {
+            b"stage_gate_version": STAGE_GATE_VERSION.encode("utf-8"),
+            b"bars_stage_b_excludes_stage_a": b"true",
+            b"genome_entry_schema_version": str(
+                GENOME_ENTRY_SCHEMA_VERSION
+            ).encode("utf-8"),
+        }
+        existing_metadata: dict[bytes, bytes] = dict(GENOMES_SCHEMA.metadata or {})
+        existing_metadata.update(new_metadata)
+        schema_with_metadata = GENOMES_SCHEMA.with_metadata(existing_metadata)
+
+        table = pa.Table.from_pylist(clean_rows, schema=schema_with_metadata)
+        # 念のため Table 側にも同じ metadata を再適用 (pa.from_pylist が schema
+        # metadata を保持しないバージョンへの保険)。
+        table = table.replace_schema_metadata(existing_metadata)
         pq.write_table(table, path)
         return path
 

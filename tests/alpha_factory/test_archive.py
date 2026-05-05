@@ -538,6 +538,58 @@ def test_flush_creates_parquet_file(tmp_path: Path) -> None:
     assert out.exists()
 
 
+def test_flush_writes_stage_partition_metadata(tmp_path: Path) -> None:
+    """T087: archive parquet schema metadata に stage_gate_version /
+    bars_stage_b_excludes_stage_a が記録される."""
+    import pyarrow.parquet as pq
+
+    from src.alpha_factory.stage_gate import STAGE_GATE_VERSION
+
+    arc = _make_archive()
+    arc.collect_stage_a(_stub_genome(), "lane", 0, _stage_a_result(),
+                         instrument="USD_JPY")
+    out = arc.flush(tmp_path)
+
+    schema = pq.read_schema(out)
+    metadata = schema.metadata or {}
+    assert metadata.get(b"stage_gate_version") == STAGE_GATE_VERSION.encode("utf-8")
+    assert metadata.get(b"bars_stage_b_excludes_stage_a") == b"true"
+    assert metadata.get(b"genome_entry_schema_version") is not None
+
+
+def test_flush_metadata_preserves_existing_genomes_schema_keys(
+    tmp_path: Path,
+) -> None:
+    """T087: 既存 GENOMES_SCHEMA.metadata に他 key があれば消失しないこと."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from src.alpha_factory import archive as archive_module
+
+    # GENOMES_SCHEMA に追加 metadata を一時的に注入
+    original_schema = archive_module.GENOMES_SCHEMA
+    extra_metadata = {b"existing_extra_key": b"preserved_value"}
+    monkey_schema = original_schema.with_metadata(
+        {**(original_schema.metadata or {}), **extra_metadata}
+    )
+    archive_module.GENOMES_SCHEMA = monkey_schema
+    try:
+        arc = _make_archive()
+        arc.collect_stage_a(_stub_genome(), "lane", 0, _stage_a_result(),
+                             instrument="USD_JPY")
+        out = arc.flush(tmp_path)
+        schema = pq.read_schema(out)
+        metadata = schema.metadata or {}
+        # 新 key
+        assert metadata.get(b"stage_gate_version") is not None
+        # 既存 key が保持されている
+        assert metadata.get(b"existing_extra_key") == b"preserved_value"
+    finally:
+        archive_module.GENOMES_SCHEMA = original_schema
+    # type-check を通すため pa を参照しておく
+    _ = pa.string()
+
+
 def test_flush_load_roundtrip(tmp_path: Path) -> None:
     arc = _make_archive()
     g = _stub_genome()

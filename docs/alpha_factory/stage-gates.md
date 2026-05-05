@@ -43,6 +43,23 @@ session close は engine 不変条件として fitness に反映される。
   2. 正 fold 比率 ≥ 閾値
   3. DSR ≥ 閾値（Phase 2 では monitor、Phase 3+ で hard）
 
+#### Stage A/B disjoint 契約 (T087)
+
+`bars_stage_b` は dataset から Stage A 期間（末尾 `stage_a_window_days` 営業日相当）を**時系列上 disjoint に除外**したもの。Stage B fold + IS monitor は `[dataset.start, dataset.end - stage_a_window)`、Stage A は `[dataset.end - stage_a_window, dataset.end)`、Stage C holdout は `[dataset.end, dataset.end + holdout_days)`。
+
+これにより Stage A IS（GA fitness の評価対象）と Stage B fold OOS（gate 検証対象）は時系列上一切重ならず、選択汚染（IS と OOS の重複）を構造的に排除する。
+
+`Stage Partition Integrity Guard`（[stage_partition_guard.py](../../src/alpha_factory/stage_partition_guard.py)）が起動時に以下を fail-closed で検証:
+
+- **B-0 入力健全性**: 各 stage の non_empty / UTC tz / not null / monotonic / unique-within-stage
+- **B-1 partition 整合性**:
+  - 境界条件 1-3: `max(stage_b) < min(stage_a) < min(holdout)` 等の chronological order
+  - 集合条件 4-6: `set(stage_a) ∩ set(stage_b) == ∅` 等の exact timestamp disjoint
+
+違反時は `StagePartitionInputError` (B-0) / `StagePartitionLeakError` (B-1) が raise され、escape hatch なしで起動停止する。
+
+`stage_b_statistical_inconclusive`（`n_fold_effective < 3`）は summary 経由で伝搬し、archive consumer は archive 列の `n_fold_effective` から `is_stage_b_inconclusive()` で同等判定可能。archive parquet schema metadata に `stage_gate_version` および `bars_stage_b_excludes_stage_a=true` が記録される。
+
 ### Stage C — Live Criteria + Stress + (ii-lite)
 
 - holdout 期間で live_criteria 全条件を AND 評価
@@ -74,7 +91,7 @@ def evaluate_stage_a(
 
 def evaluate_stage_b(
     genome: Genome,
-    bars_18m: list[PriceBar],
+    bars_stage_b: list[PriceBar],  # T087: bars_18m から rename。 Stage A 期間を除外した bars
     meta: InstrumentMeta,
     backtest_config: BacktestConfig,
     primitive_evaluator: PrimitiveEvaluator,
