@@ -43,6 +43,9 @@ def _record_dict(
         # T058 (PR 3): v2 必須 field
         "calibrate_history_schema_version": 2,
         "dataset_epoch_id": dataset_epoch_id,
+        # T077: v2 必須化フィールド (空文字 / None は reject)。
+        # 既存 fixture が欠落していたため from_dict_or_none で skip されていた。
+        "applied_from_run_id": run_id,
     }
 
 
