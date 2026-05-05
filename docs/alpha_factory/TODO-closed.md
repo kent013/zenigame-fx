@@ -88,6 +88,7 @@
 | T084 | B-phase2-step1.6-stage-b-per-fold-dual-path | stage-gate | Medium | 2026-05-03 21:54 | - |
 | T085 | B-phase2-step1.7-stage-c-stress-dual-path | stage-gate | Medium | 2026-05-04 00:03 | - |
 | T086 | B-phase2-step1.8-stage-c-cross-pair-dual-path | cross-pair | High | 2026-05-04 10:17 | - |
+| T087 | stage-ab-disjoint-and-holdout-guard | stage-gate | High | 2026-05-05 11:52 | - |
 
 ## Obsoleted
 
