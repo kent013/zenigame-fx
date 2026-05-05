@@ -19,8 +19,7 @@ look-ahead bias 回避:
 
 from __future__ import annotations
 
-from collections import deque
-
+import numba
 import numpy as np
 
 _EPS = 1e-10
@@ -114,42 +113,85 @@ def rolling_std(values: np.ndarray, n: int, ddof: int = 0) -> np.ndarray:
 
 
 def rolling_max(values: np.ndarray, n: int) -> np.ndarray:
-    """Monotonic deque による O(N) rolling max。warmup (i<n-1) は NaN。"""
+    """Monotonic deque による O(N) rolling max。warmup (i<n-1) は NaN。
+
+    Numba JIT 化 (T088 cycle 1 profile-optimize): collections.deque を fixed-size
+    int64 circular buffer (head/tail インデックス) に置換。 現行 comparator
+    (`<=` で右から drop) をそのまま再現、 数値出力は現行と numerically identical。
+    """
     if n <= 0:
         raise ValueError(f"n must be >= 1, got {n}")
     values = np.asarray(values, dtype=np.float64)
-    length = len(values)
+    return _rolling_max_jit(values, n)
+
+
+@numba.njit(cache=True, fastmath=False)
+def _rolling_max_jit(values: np.ndarray, n: int) -> np.ndarray:
+    length = values.shape[0]
     out = np.full(length, np.nan, dtype=np.float64)
-    dq: deque[int] = deque()
+    # circular buffer: 最大 n 個保持 (window 外を drop するので n より長くならない)
+    dq = np.empty(n, dtype=np.int64)
+    head = 0  # buffer の先頭 index (front)
+    tail = 0  # buffer の末尾 index (back exclusive)
+    size = 0
     for i in range(length):
-        # ウィンドウ外になった index を左から drop
-        while dq and dq[0] <= i - n:
-            dq.popleft()
-        # 小さい値を右から drop (strict: >= なら drop; 等値は残しておく)
-        while dq and values[dq[-1]] <= values[i]:
-            dq.pop()
-        dq.append(i)
+        # window 外を front から drop
+        while size > 0 and dq[head] <= i - n:
+            head = (head + 1) % n
+            size -= 1
+        # 小さい値を back から drop (strict: <= で drop = 等値も drop = 現行と一致)
+        while size > 0:
+            back_idx = (tail - 1 + n) % n
+            if values[dq[back_idx]] <= values[i]:
+                tail = back_idx
+                size -= 1
+            else:
+                break
+        # back に追加
+        dq[tail] = i
+        tail = (tail + 1) % n
+        size += 1
         if i >= n - 1:
-            out[i] = values[dq[0]]
+            out[i] = values[dq[head]]
     return out
 
 
 def rolling_min(values: np.ndarray, n: int) -> np.ndarray:
-    """Monotonic deque による O(N) rolling min。warmup (i<n-1) は NaN。"""
+    """Monotonic deque による O(N) rolling min。warmup (i<n-1) は NaN。
+
+    Numba JIT 化 (T088 cycle 1 profile-optimize): rolling_max と完全対称、
+    comparator が `>=` で右から drop の違いのみ。
+    """
     if n <= 0:
         raise ValueError(f"n must be >= 1, got {n}")
     values = np.asarray(values, dtype=np.float64)
-    length = len(values)
+    return _rolling_min_jit(values, n)
+
+
+@numba.njit(cache=True, fastmath=False)
+def _rolling_min_jit(values: np.ndarray, n: int) -> np.ndarray:
+    length = values.shape[0]
     out = np.full(length, np.nan, dtype=np.float64)
-    dq: deque[int] = deque()
+    dq = np.empty(n, dtype=np.int64)
+    head = 0
+    tail = 0
+    size = 0
     for i in range(length):
-        while dq and dq[0] <= i - n:
-            dq.popleft()
-        while dq and values[dq[-1]] >= values[i]:
-            dq.pop()
-        dq.append(i)
+        while size > 0 and dq[head] <= i - n:
+            head = (head + 1) % n
+            size -= 1
+        while size > 0:
+            back_idx = (tail - 1 + n) % n
+            if values[dq[back_idx]] >= values[i]:  # rolling_max と違い >=
+                tail = back_idx
+                size -= 1
+            else:
+                break
+        dq[tail] = i
+        tail = (tail + 1) % n
+        size += 1
         if i >= n - 1:
-            out[i] = values[dq[0]]
+            out[i] = values[dq[head]]
     return out
 
 
@@ -216,7 +258,10 @@ def _wilder_smooth(values: np.ndarray, n: int) -> np.ndarray:
 
     values の先頭 n 個の平均を seed とし、以降 recurrence。
     入力 NaN は 0 扱いしない（呼び出し側で除外する契約）。
-    warmup: out[i<n-1] = NaN。
+    warmup: out[i<n-1] = NaN。途中 NaN は前値維持 (現行契約)。
+
+    T088 cycle 1 profile-optimize: recurrence loop のみ Numba JIT 化、 seed は
+    現行 np.nanmean/mean を維持して exact parity を保証 (Codex Round 1 指摘)。
     """
     if n <= 0:
         raise ValueError(f"n must be >= 1, got {n}")
@@ -225,20 +270,47 @@ def _wilder_smooth(values: np.ndarray, n: int) -> np.ndarray:
     out = np.full(length, np.nan, dtype=np.float64)
     if length < n:
         return out
+    # seed: 現行と完全に同一の演算順序で計算 (exact parity 保証)
     # NaN を含む場合、先頭 n に NaN が混じっていたら seed が NaN に伝播する
-    seed = float(np.nanmean(values[:n])) if np.any(np.isnan(values[:n])) else float(values[:n].mean())
+    seed = (
+        float(np.nanmean(values[:n]))
+        if np.any(np.isnan(values[:n]))
+        else float(values[:n].mean())
+    )
+    if np.isnan(seed):
+        # 全 NaN 等で seed = NaN → out は全区間 NaN のまま return (現行と整合)
+        # Note: ±inf の場合は早期 return せず、 現行と同様 recurrence に流す
+        # (`out[n-1]=inf` → 以降 inf 伝播 = 現行 Python loop と numerically identical)。
+        return out
     out[n - 1] = seed
+    # recurrence loop のみ Numba JIT 化 (途中 NaN 前値維持の semantics 維持)
+    _wilder_smooth_recurrence_jit(values, out, n, seed)
+    return out
+
+
+@numba.njit(cache=True, fastmath=False)
+def _wilder_smooth_recurrence_jit(
+    values: np.ndarray,
+    out: np.ndarray,
+    n: int,
+    seed: float,
+) -> None:
+    """In-place: out[n:length] を recurrence で埋める。 out[n-1]=seed は呼び出し側で設定済。"""
+    length = values.shape[0]
     prev = seed
+    n_minus_1 = float(n - 1)
+    n_float = float(n)
     for i in range(n, length):
         v = values[i]
-        if np.isnan(v):
-            # NaN 入力は前値を維持（Wilder は自己回帰）
+        # IEEE 754: NaN != NaN なので `v == v` は np.isnan(v) と等価 (float64 前提)。
+        # Numba 内では np.isnan より `v == v` が高速かつ JIT 互換性が高い。
+        if v == v:  # not NaN
+            cur = (prev * n_minus_1 + v) / n_float
+            out[i] = cur
+            prev = cur
+        else:
+            # 途中 NaN は前値維持 (現行契約、 adx() の NaN parity)
             out[i] = prev
-            continue
-        cur = (prev * (n - 1) + v) / n
-        out[i] = cur
-        prev = cur
-    return out
 
 
 # ---------------------------------------------------------------------------

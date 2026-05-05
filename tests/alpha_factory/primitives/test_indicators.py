@@ -318,3 +318,309 @@ class TestLogReturns:
         r = log_returns_from_close(c)
         assert np.isnan(r[1])
         assert np.isnan(r[2])
+
+
+# ---------------------------------------------------------------------------
+# T088: Numba JIT 化 parity tests (rolling_max / rolling_min / _wilder_smooth)
+# ---------------------------------------------------------------------------
+
+
+def _rolling_max_oracle(values: np.ndarray, n: int) -> np.ndarray:
+    """test 内 self-contained oracle: 現行 deque 版 rolling_max と同じロジック。
+
+    T088 の Numba JIT 化版が numerically identical であることを保証するため、
+    test 内で独立に同じ comparator (`<=` で右から drop) を再現する。
+    """
+    from collections import deque
+
+    if n <= 0:
+        raise ValueError(f"n must be >= 1, got {n}")
+    values = np.asarray(values, dtype=np.float64)
+    length = len(values)
+    out = np.full(length, np.nan, dtype=np.float64)
+    dq: deque[int] = deque()
+    for i in range(length):
+        while dq and dq[0] <= i - n:
+            dq.popleft()
+        while dq and values[dq[-1]] <= values[i]:
+            dq.pop()
+        dq.append(i)
+        if i >= n - 1:
+            out[i] = values[dq[0]]
+    return out
+
+
+def _rolling_min_oracle(values: np.ndarray, n: int) -> np.ndarray:
+    """test 内 self-contained oracle: 現行 deque 版 rolling_min と同じロジック。"""
+    from collections import deque
+
+    if n <= 0:
+        raise ValueError(f"n must be >= 1, got {n}")
+    values = np.asarray(values, dtype=np.float64)
+    length = len(values)
+    out = np.full(length, np.nan, dtype=np.float64)
+    dq: deque[int] = deque()
+    for i in range(length):
+        while dq and dq[0] <= i - n:
+            dq.popleft()
+        while dq and values[dq[-1]] >= values[i]:
+            dq.pop()
+        dq.append(i)
+        if i >= n - 1:
+            out[i] = values[dq[0]]
+    return out
+
+
+def _wilder_smooth_oracle(values: np.ndarray, n: int) -> np.ndarray:
+    """test 内 self-contained oracle: 現行 plain Python 版 _wilder_smooth と同じロジック。
+
+    NaN 契約 (seed = nanmean if NaN含む else mean、 途中 NaN は前値維持) を再現。
+    """
+    if n <= 0:
+        raise ValueError(f"n must be >= 1, got {n}")
+    values = np.asarray(values, dtype=np.float64)
+    length = len(values)
+    out = np.full(length, np.nan, dtype=np.float64)
+    if length < n:
+        return out
+    seed = (
+        float(np.nanmean(values[:n]))
+        if np.any(np.isnan(values[:n]))
+        else float(values[:n].mean())
+    )
+    # 現行 plain Python 版は早期 return しない: seed が NaN/inf いずれでも
+    # out[n-1]=seed → recurrence で伝播。 NaN→all NaN, inf→inf 伝播。
+    out[n - 1] = seed
+    prev = seed
+    for i in range(n, length):
+        v = values[i]
+        if np.isnan(v):
+            out[i] = prev
+            continue
+        cur = (prev * (n - 1) + v) / n
+        out[i] = cur
+        prev = cur
+    return out
+
+
+def _assert_arrays_identical_with_nan(
+    actual: np.ndarray, expected: np.ndarray
+) -> None:
+    """NaN 同位置一致 + 有限値は厳密一致 (assert_array_equal) を確認。"""
+    assert actual.shape == expected.shape
+    nan_mask_actual = np.isnan(actual)
+    nan_mask_expected = np.isnan(expected)
+    np.testing.assert_array_equal(nan_mask_actual, nan_mask_expected)
+    finite = ~nan_mask_actual
+    np.testing.assert_array_equal(actual[finite], expected[finite])
+
+
+class TestRollingMaxNumbaParity:
+    """T088: rolling_max Numba JIT 化版が現行 deque 実装と numerically identical。"""
+
+    def test_normal_input(self):
+        rng = np.random.default_rng(42)
+        v = rng.normal(size=200)
+        for n in (3, 5, 14, 50):
+            actual = rolling_max(v, n)
+            expected = _rolling_max_oracle(v, n)
+            _assert_arrays_identical_with_nan(actual, expected)
+
+    def test_n_equals_one(self):
+        v = np.array([3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0])
+        actual = rolling_max(v, 1)
+        expected = _rolling_max_oracle(v, 1)
+        _assert_arrays_identical_with_nan(actual, expected)
+        # n=1 では各点が自分自身
+        np.testing.assert_array_equal(actual, v)
+
+    def test_repeated_values(self):
+        # 重複値が連続: comparator strict (`<=` で drop = 等値も drop) 確認
+        v = np.array([2.0, 2.0, 2.0, 2.0, 2.0, 1.0, 3.0, 3.0, 3.0])
+        for n in (1, 2, 3, 5):
+            actual = rolling_max(v, n)
+            expected = _rolling_max_oracle(v, n)
+            _assert_arrays_identical_with_nan(actual, expected)
+
+    def test_length_less_than_n(self):
+        v = np.array([1.0, 2.0])
+        actual = rolling_max(v, 5)
+        expected = _rolling_max_oracle(v, 5)
+        _assert_arrays_identical_with_nan(actual, expected)
+        # length < n でも warmup NaN 条件で出力すべて NaN
+        assert np.all(np.isnan(actual))
+
+
+class TestRollingMinNumbaParity:
+    """T088: rolling_min Numba JIT 化版が現行 deque 実装と numerically identical。"""
+
+    def test_normal_input(self):
+        rng = np.random.default_rng(7)
+        v = rng.normal(size=200)
+        for n in (3, 5, 14, 50):
+            actual = rolling_min(v, n)
+            expected = _rolling_min_oracle(v, n)
+            _assert_arrays_identical_with_nan(actual, expected)
+
+    def test_n_equals_one(self):
+        v = np.array([3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0])
+        actual = rolling_min(v, 1)
+        expected = _rolling_min_oracle(v, 1)
+        _assert_arrays_identical_with_nan(actual, expected)
+        np.testing.assert_array_equal(actual, v)
+
+    def test_repeated_values(self):
+        v = np.array([2.0, 2.0, 2.0, 2.0, 2.0, 1.0, 3.0, 3.0, 3.0])
+        for n in (1, 2, 3, 5):
+            actual = rolling_min(v, n)
+            expected = _rolling_min_oracle(v, n)
+            _assert_arrays_identical_with_nan(actual, expected)
+
+    def test_length_less_than_n(self):
+        v = np.array([1.0, 2.0])
+        actual = rolling_min(v, 5)
+        expected = _rolling_min_oracle(v, 5)
+        _assert_arrays_identical_with_nan(actual, expected)
+        assert np.all(np.isnan(actual))
+
+
+class TestWilderSmoothNumbaParity:
+    """T088: _wilder_smooth Numba JIT 化版が現行 plain Python 実装と numerically identical。
+
+    seed 計算は Python 側維持 (nanmean/mean)、 recurrence loop のみ JIT 化。
+    NaN 同位置一致 + 有限値は assert_array_equal で bit-identical 確認。
+    """
+
+    def test_all_finite(self):
+        # case (a): 全 finite 入力
+        from src.alpha_factory.primitives._indicators import _wilder_smooth
+
+        rng = np.random.default_rng(123)
+        v = rng.normal(size=200)
+        for n in (3, 5, 14, 30):
+            actual = _wilder_smooth(v, n)
+            expected = _wilder_smooth_oracle(v, n)
+            _assert_arrays_identical_with_nan(actual, expected)
+
+    def test_leading_nan_in_seed(self):
+        # case (b): 先頭 n 個に NaN 1 個 (seed が nanmean で計算される)
+        from src.alpha_factory.primitives._indicators import _wilder_smooth
+
+        v = np.array([1.0, np.nan, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+        for n in (3, 5):
+            actual = _wilder_smooth(v, n)
+            expected = _wilder_smooth_oracle(v, n)
+            _assert_arrays_identical_with_nan(actual, expected)
+
+    def test_mid_nan(self):
+        # case (c): 途中に NaN 1 個 (前値維持の semantics 確認)
+        from src.alpha_factory.primitives._indicators import _wilder_smooth
+
+        v = np.array([1.0, 2.0, 3.0, 4.0, np.nan, 6.0, 7.0, 8.0, 9.0, 10.0])
+        for n in (3, 5):
+            actual = _wilder_smooth(v, n)
+            expected = _wilder_smooth_oracle(v, n)
+            _assert_arrays_identical_with_nan(actual, expected)
+
+    def test_all_nan(self):
+        # case (d): 全 NaN (seed = NaN → 全区間 NaN)
+        from src.alpha_factory.primitives._indicators import _wilder_smooth
+
+        v = np.full(20, np.nan, dtype=np.float64)
+        for n in (3, 5, 10):
+            actual = _wilder_smooth(v, n)
+            expected = _wilder_smooth_oracle(v, n)
+            _assert_arrays_identical_with_nan(actual, expected)
+            assert np.all(np.isnan(actual))
+
+    def test_length_less_than_n(self):
+        # case (e): length < n
+        from src.alpha_factory.primitives._indicators import _wilder_smooth
+
+        v = np.array([1.0, 2.0, 3.0])
+        actual = _wilder_smooth(v, 10)
+        expected = _wilder_smooth_oracle(v, 10)
+        _assert_arrays_identical_with_nan(actual, expected)
+        assert np.all(np.isnan(actual))
+
+    def test_seed_window_contains_inf(self):
+        # case (f): 先頭 n 個に +inf / -inf を含むケース。 現行は seed=inf で
+        # recurrence に流して inf を伝播させる。 Numba 化版もこれを破ってはならない
+        # (Codex Round 1 Critical 対応: seed=inf で early return しないこと)。
+        from src.alpha_factory.primitives._indicators import _wilder_smooth
+
+        for inf_val in (np.inf, -np.inf):
+            v = np.array(
+                [1.0, inf_val, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+            )
+            for n in (3, 5):
+                actual = _wilder_smooth(v, n)
+                expected = _wilder_smooth_oracle(v, n)
+                _assert_arrays_identical_with_nan(actual, expected)
+
+
+class TestAdxViaWilderSmoothNumbaParity:
+    """T088: adx() 全体が _wilder_smooth Numba 化後も現行と numerically identical。"""
+
+    def test_adx_atr_parity_with_oracle_wilder(self):
+        """adx() の出力 (adx, +DI, -DI) が、 _wilder_smooth oracle 版で計算した
+        参照実装と完全一致することを確認。 _wilder_smooth は adx 内の atr/+DI/-DI
+        計算経路で 3 回呼ばれる。
+        """
+        rng = np.random.default_rng(2026)
+        size = 150
+        # OHLC 系列を擬似生成
+        close = 100.0 + np.cumsum(rng.normal(scale=0.5, size=size))
+        high = close + np.abs(rng.normal(scale=0.3, size=size))
+        low = close - np.abs(rng.normal(scale=0.3, size=size))
+
+        n = 14
+        adx_actual, plus_di_actual, minus_di_actual = adx(high, low, close, n)
+
+        # 参照実装: adx() 内のロジックを oracle wilder で再現
+        from src.alpha_factory.primitives._indicators import true_range
+
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        plus_dm = np.where(
+            (up_move > down_move) & (up_move > 0), up_move, 0.0
+        )
+        minus_dm = np.where(
+            (down_move > up_move) & (down_move > 0), down_move, 0.0
+        )
+        plus_dm_full = np.concatenate([[0.0], plus_dm])
+        minus_dm_full = np.concatenate([[0.0], minus_dm])
+        tr = true_range(high, low, close)
+        sm_tr = _wilder_smooth_oracle(tr, n)
+        sm_plus = _wilder_smooth_oracle(plus_dm_full, n)
+        sm_minus = _wilder_smooth_oracle(minus_dm_full, n)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            plus_di_expected = np.where(
+                sm_tr > 0, 100.0 * sm_plus / sm_tr, 0.0
+            )
+            minus_di_expected = np.where(
+                sm_tr > 0, 100.0 * sm_minus / sm_tr, 0.0
+            )
+        plus_di_expected = np.where(
+            np.isnan(sm_tr), np.nan, plus_di_expected
+        )
+        minus_di_expected = np.where(
+            np.isnan(sm_tr), np.nan, minus_di_expected
+        )
+        di_sum = plus_di_expected + minus_di_expected
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dx = np.where(
+                di_sum > 0,
+                100.0 * np.abs(plus_di_expected - minus_di_expected) / di_sum,
+                0.0,
+            )
+        dx = np.where(
+            np.isnan(plus_di_expected) | np.isnan(minus_di_expected),
+            np.nan,
+            dx,
+        )
+        adx_expected = _wilder_smooth_oracle(dx, n)
+
+        _assert_arrays_identical_with_nan(adx_actual, adx_expected)
+        _assert_arrays_identical_with_nan(plus_di_actual, plus_di_expected)
+        _assert_arrays_identical_with_nan(minus_di_actual, minus_di_expected)
