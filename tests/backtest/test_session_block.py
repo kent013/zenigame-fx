@@ -12,8 +12,11 @@ from decimal import Decimal
 import pytest
 
 from src.backtest.session_block import (
+    _HOUR_TO_BUCKET,
     BLOCK_BUCKET_RANGES_UTC,
     SessionBlock,
+    SessionBlockBucket,
+    _build_hour_to_bucket,
     aggregate_session_blocks,
     apply_spread_stress,
     compute_bucket_for_bar,
@@ -100,6 +103,186 @@ class TestComputeBucketForBar:
         jst = timezone(timedelta(hours=9))
         with pytest.raises(ValueError, match="UTC offset"):
             compute_bucket_for_bar(datetime(2024, 1, 15, 12, 0, tzinfo=jst))
+
+    def test_compute_bucket_for_bar_lookup_table_parity(self) -> None:
+        """T089: lookup table 版が test 内 self-contained dict iter oracle と完全一致.
+
+        全 24 hour × 複数 minute/second の組合せで `compute_bucket_for_bar`
+        (= lookup 版) と test 内 oracle (= 旧 dict iter ロジック) が同一 bucket
+        を返すことを assert. SSOT は引数なしで `BLOCK_BUCKET_RANGES_UTC` を直接
+        参照 (= production と同じ partition).
+        """
+
+        def oracle(bar_time: datetime) -> SessionBlockBucket:
+            """旧 dict iter ロジックの test 内 self-contained 実装."""
+            hour = bar_time.hour
+            for bucket, (start, end) in BLOCK_BUCKET_RANGES_UTC.items():
+                if start <= hour < end:
+                    return bucket
+            raise AssertionError(  # pragma: no cover
+                f"hour {hour} not covered (oracle): {BLOCK_BUCKET_RANGES_UTC}"
+            )
+
+        for hour in range(24):
+            for minute, second in [(0, 0), (15, 30), (45, 59), (59, 0)]:
+                t = datetime(2024, 1, 15, hour, minute, second, tzinfo=UTC)
+                assert compute_bucket_for_bar(t) == oracle(t), (
+                    f"parity break: hour={hour} minute={minute} second={second}"
+                )
+
+    def test_compute_bucket_for_bar_validation_unchanged(self) -> None:
+        """T089: tzinfo / UTC offset validation の振る舞いが置換前と同一であること.
+
+        naive datetime / 非 UTC offset の両方で ValueError が発火し、 raise
+        メッセージの key term (= "timezone-aware" / "UTC offset") を含む.
+        """
+        with pytest.raises(ValueError, match="timezone-aware"):
+            compute_bucket_for_bar(datetime(2024, 6, 1, 5, 0))
+
+        for offset_hours in (-5, 1, 9):
+            tz = timezone(timedelta(hours=offset_hours))
+            with pytest.raises(ValueError, match="UTC offset"):
+                compute_bucket_for_bar(datetime(2024, 6, 1, 5, 0, tzinfo=tz))
+
+    def test_compute_bucket_for_bar_lookup_faster_than_oracle(self) -> None:
+        """T089 perf gate: lookup 版が test 内 oracle 比 15%+ 高速 (median ratio < 0.85).
+
+        Round 1 Critical 対応: 絶対値 timing assert は環境差で flaky なので
+        相対比較 ratio のみで gate. 比較対象は **bucket 決定ステップ単独**
+        (= validation overhead を両側で完全一致させた状態) で計測する。
+        production 関数 `compute_bucket_for_bar` は (validation + lookup) の
+        合算なので、 oracle 関数も (同 validation + dict iter) 構成にして
+        差分が iter vs lookup のみになるようにする.
+
+        flake 緩和: warmup 後に sample_count 回計測し median 比較。
+        median_oracle が極小 (< 1us) の環境では ratio が安定しないため、
+        合計バー数を 96 → 480 に増やして 1 sample 当たり数十 us スケールにする.
+        """
+        import statistics
+        from time import perf_counter_ns
+
+        def oracle(bar_time: datetime) -> SessionBlockBucket:
+            """旧実装と同じ validation + dict iter 経路 (test self-contained)."""
+            if bar_time.tzinfo is None:
+                raise ValueError(  # pragma: no cover
+                    f"bar_time must be timezone-aware (UTC), got naive: {bar_time}"
+                )
+            offset = bar_time.utcoffset()
+            if offset != timedelta(0):
+                raise ValueError(  # pragma: no cover
+                    f"bar_time must be UTC offset, got offset={offset}: {bar_time}"
+                )
+            hour = bar_time.hour
+            for bucket, (start, end) in BLOCK_BUCKET_RANGES_UTC.items():
+                if start <= hour < end:
+                    return bucket
+            raise AssertionError("oracle uncovered")  # pragma: no cover
+
+        # input set: 24 hour × 各 20 minute pattern = 480 datetimes (sample 当たり ~数十 us)
+        inputs = [
+            datetime(2024, 1, 15, h, m, 0, tzinfo=UTC)
+            for h in range(24)
+            for m in range(0, 60, 3)
+        ]
+
+        # JIT/cache を温める warmup (sample_count と同オーダー)
+        for _ in range(5):
+            for t in inputs:
+                compute_bucket_for_bar(t)
+                oracle(t)
+
+        sample_count = 25
+        lookup_samples_ns: list[int] = []
+        oracle_samples_ns: list[int] = []
+        for _ in range(sample_count):
+            t0 = perf_counter_ns()
+            for t in inputs:
+                compute_bucket_for_bar(t)
+            t1 = perf_counter_ns()
+            for t in inputs:
+                oracle(t)
+            t2 = perf_counter_ns()
+            lookup_samples_ns.append(t1 - t0)
+            oracle_samples_ns.append(t2 - t1)
+
+        median_lookup = statistics.median(lookup_samples_ns)
+        median_oracle = statistics.median(oracle_samples_ns)
+        assert median_oracle > 0
+        ratio = median_lookup / median_oracle
+        assert ratio < 0.85, (
+            f"lookup median ({median_lookup} ns) is not 15%+ faster than "
+            f"oracle ({median_oracle} ns); ratio={ratio:.3f} (要求 < 0.85)"
+        )
+
+
+class TestBuildHourToBucket:
+    """T089: `_build_hour_to_bucket` builder の partition validation 検証."""
+
+    def test_build_hour_to_bucket_returns_tuple_of_24(self) -> None:
+        """正常 case (= production の BLOCK_BUCKET_RANGES_UTC) で len 24 + 全要素 SessionBlockBucket."""
+        table = _build_hour_to_bucket(BLOCK_BUCKET_RANGES_UTC)
+        assert isinstance(table, tuple)
+        assert len(table) == 24
+        # 各要素が SessionBlockBucket Literal の値 (= "tokyo" / "london" / "ny")
+        valid_buckets = {"tokyo", "london", "ny"}
+        for h, bucket in enumerate(table):
+            assert bucket in valid_buckets, f"hour {h}: invalid bucket={bucket}"
+        # module-level lookup table と完全一致 (production との parity)
+        assert table == _HOUR_TO_BUCKET
+
+    def test_build_hour_to_bucket_detects_invalid_partition(self) -> None:
+        """4 種類 partition violation で RuntimeError. mock dict で検証."""
+        # 1) range invalid (start >= end)
+        invalid_range: dict[SessionBlockBucket, tuple[int, int]] = {
+            "tokyo": (8, 8),  # start == end は要求 0 <= start < end <= 24 違反
+            "london": (8, 16),
+            "ny": (16, 24),
+        }
+        with pytest.raises(RuntimeError, match="0 <= start < end <= 24"):
+            _build_hour_to_bucket(invalid_range)
+
+        # 1b) range invalid (end > 24)
+        invalid_range_2: dict[SessionBlockBucket, tuple[int, int]] = {
+            "tokyo": (0, 8),
+            "london": (8, 16),
+            "ny": (16, 25),  # end > 24
+        }
+        with pytest.raises(RuntimeError, match="0 <= start < end <= 24"):
+            _build_hour_to_bucket(invalid_range_2)
+
+        # 2) 重複
+        overlapping: dict[SessionBlockBucket, tuple[int, int]] = {
+            "tokyo": (0, 10),  # 8, 9 が london と重複
+            "london": (8, 16),
+            "ny": (16, 24),
+        }
+        with pytest.raises(RuntimeError, match="重複"):
+            _build_hour_to_bucket(overlapping)
+
+        # 3) 未 covering (gap)
+        not_covering: dict[SessionBlockBucket, tuple[int, int]] = {
+            "tokyo": (0, 8),
+            "london": (10, 16),  # hour 8, 9 が抜ける
+            "ny": (16, 24),
+        }
+        with pytest.raises(RuntimeError, match="not covered"):
+            _build_hour_to_bucket(not_covering)
+
+        # 4) mixed (range invalid + 重複の混合だが、 range invalid が先に発火)
+        mixed: dict[SessionBlockBucket, tuple[int, int]] = {
+            "tokyo": (5, 3),  # range invalid (start > end)
+            "london": (8, 16),
+            "ny": (16, 24),
+        }
+        with pytest.raises(RuntimeError, match="0 <= start < end <= 24"):
+            _build_hour_to_bucket(mixed)
+
+        # 4b) 別の mixed: 24h を超える range + 未 covering
+        mixed_2: dict[SessionBlockBucket, tuple[int, int]] = {
+            "tokyo": (0, 30),  # end > 24 が先に発火
+        }
+        with pytest.raises(RuntimeError, match="0 <= start < end <= 24"):
+            _build_hour_to_bucket(mixed_2)
 
 
 class TestComputeBucketForTrade:

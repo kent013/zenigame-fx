@@ -38,7 +38,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 from src.broker.orders import Trade
 from src.domain.price import PriceBar
@@ -77,6 +77,56 @@ BLOCK_BUCKET_RANGES_UTC: Final[dict[SessionBlockBucket, tuple[int, int]]] = {
     "london": (8, 16),  # [8, 16)
     "ny": (16, 24),  # [16, 24)
 }
+
+
+def _build_hour_to_bucket(
+    ranges: Mapping[SessionBlockBucket, tuple[int, int]],
+) -> tuple[SessionBlockBucket, ...]:
+    """import 時に hour-indexed lookup table を構築 + partition contract を検証する.
+
+    T089 (cycle 2/3 profile-optimize): `compute_bucket_for_bar` の per-call dict
+    iter を O(1) tuple lookup に置換するための builder. SSOT は引数 `ranges`
+    (= 通常 `BLOCK_BUCKET_RANGES_UTC`、 test では mock dict).
+
+    検証項目 (concept design Round 2 §_build_hour_to_bucket 検証対象):
+        1. 各 (start, end) で 0 <= start < end <= 24 (range validity)
+        2. bucket 同士で重複なし (range 排他性)
+        3. 24 要素 (hours 0-23) 全 covering
+        (4. total length sum = 24 — 上記 1-3 から自動的に成立する checksum
+            冗長検証、 実装上は 1-3 で実質的に担保される)
+
+    Raises:
+        RuntimeError: partition contract 違反時 (startup invariant、 import 時
+            fail-fast)。 production では `BLOCK_BUCKET_RANGES_UTC` が
+            module-level Final で 8h × 3 covering を満たすため発火しない.
+    """
+    table: list[SessionBlockBucket | None] = [None] * 24
+    for bucket, (start, end) in ranges.items():
+        if not (0 <= start < end <= 24):
+            raise RuntimeError(
+                f"BLOCK_BUCKET_RANGES_UTC partition contract violation: "
+                f"bucket={bucket} range=({start}, {end}) "
+                f"(要求: 0 <= start < end <= 24)"
+            )
+        for h in range(start, end):
+            if table[h] is not None:
+                raise RuntimeError(
+                    f"BLOCK_BUCKET_RANGES_UTC partition contract violation: "
+                    f"hour {h} 重複 (既存={table[h]} 新={bucket})"
+                )
+            table[h] = bucket
+    if any(b is None for b in table):
+        missing = [h for h, b in enumerate(table) if b is None]
+        raise RuntimeError(
+            f"BLOCK_BUCKET_RANGES_UTC partition contract violation: "
+            f"hours {missing} not covered (24h covering 違反): {dict(ranges)}"
+        )
+    return tuple(cast(SessionBlockBucket, b) for b in table)
+
+
+_HOUR_TO_BUCKET: Final[tuple[SessionBlockBucket, ...]] = _build_hour_to_bucket(
+    BLOCK_BUCKET_RANGES_UTC
+)
 
 # SSOT 駆動 (概念設計 §3.1 / 詳細設計 §3.1)
 _BUCKETS: Final[tuple[SessionBlockBucket, ...]] = tuple(BLOCK_BUCKET_RANGES_UTC.keys())
@@ -304,11 +354,16 @@ class SessionBlock:
 def compute_bucket_for_bar(bar_time: datetime) -> SessionBlockBucket:
     """UTC hour から SessionBlockBucket を決定論的に割当.
 
-    SSOT: 概念設計 §5.1. BLOCK_BUCKET_RANGES_UTC 駆動.
+    SSOT: 概念設計 §5.1. BLOCK_BUCKET_RANGES_UTC 駆動。
+    T089 (cycle 2/3 profile-optimize): 3 要素 dict iter から hour-indexed
+    tuple O(1) lookup へ置換 (`_HOUR_TO_BUCKET[bar_time.hour]`).
+    partition contract 検証は import 時に `_build_hour_to_bucket()` で行う
+    (= startup invariant、 per-call check 不要).
 
     Raises:
         ValueError: bar_time.tzinfo is None / 非 UTC offset.
-        RuntimeError: BLOCK_BUCKET_RANGES_UTC が 24h covering を満たさない場合.
+        (RuntimeError は import 時に発火し、 本関数 call 時には発火しない。
+         partition contract violation は startup で early-fail される.)
     """
     if bar_time.tzinfo is None:
         raise ValueError(
@@ -319,14 +374,7 @@ def compute_bucket_for_bar(bar_time: datetime) -> SessionBlockBucket:
         raise ValueError(
             f"bar_time must be UTC offset, got offset={offset}: {bar_time}"
         )
-    hour = bar_time.hour
-    for bucket, (start, end) in BLOCK_BUCKET_RANGES_UTC.items():
-        if start <= hour < end:
-            return bucket
-    raise RuntimeError(
-        f"hour {hour} not covered by BLOCK_BUCKET_RANGES_UTC "
-        f"(= partition contract violation): {BLOCK_BUCKET_RANGES_UTC}"
-    )
+    return _HOUR_TO_BUCKET[bar_time.hour]
 
 
 def compute_bucket_for_trade(trade: Trade) -> SessionBlockBucket:
