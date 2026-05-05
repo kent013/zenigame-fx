@@ -62,6 +62,18 @@ def _compute(
     """mid OHLC (bid/ask 平均) を float64 配列で返す。cache 無しの pure compute。
 
     元の 3 モジュールに複製されていた実装を統合した canonical 実装。
+
+    profile-optimize cycle 3/3 (T090): bid/ask 属性アクセスを 1 bar あたり
+    1 回ずつ local 変数化 (b.bid → bid、b.ask → ask)、 中間変数
+    (bo, bh, bl, bc, ao, ah, al, ac) を削除して直接 mid 計算に集約。
+    LOAD_ATTR 削減のみが目的、 加算・乗算の演算順序および
+    `float(...)` cast 回数 (8 回/bar) は完全同一。
+    cast 順序は ``bo,bh,bl,bc,ao,ah,al,ac`` 一括先行 → mid 計算 から
+    OHLC 単位で交互 (``open bid+ask → high bid+ask → ...``) へ変更されるが、
+    各 mid 計算式 ``(float(bid.X) + float(ask.X)) * 0.5`` は **数値結果**
+    (有限値の bit-identical / quiet NaN の同位置発生) に関して現行と一致する。
+    例外発生タイミングは cast 順序変更により異なり得るため、 例外境界での
+    完全同一性は保証しない (signal 値計算用 mid OHLC として影響なし)。
     """
     length = len(bars)
     o = np.empty(length, dtype=np.float64)
@@ -69,18 +81,12 @@ def _compute(
     low = np.empty(length, dtype=np.float64)
     c = np.empty(length, dtype=np.float64)
     for i, b in enumerate(bars):
-        bo = float(b.bid.open)
-        bh = float(b.bid.high)
-        bl = float(b.bid.low)
-        bc = float(b.bid.close)
-        ao = float(b.ask.open)
-        ah = float(b.ask.high)
-        al = float(b.ask.low)
-        ac = float(b.ask.close)
-        o[i] = (bo + ao) * 0.5
-        h[i] = (bh + ah) * 0.5
-        low[i] = (bl + al) * 0.5
-        c[i] = (bc + ac) * 0.5
+        bid = b.bid  # was: b.bid.open / b.bid.high / b.bid.low / b.bid.close で 4 回
+        ask = b.ask  # was: 4 回
+        o[i] = (float(bid.open) + float(ask.open)) * 0.5
+        h[i] = (float(bid.high) + float(ask.high)) * 0.5
+        low[i] = (float(bid.low) + float(ask.low)) * 0.5
+        c[i] = (float(bid.close) + float(ask.close)) * 0.5
     return o, h, low, c
 
 
