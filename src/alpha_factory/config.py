@@ -189,19 +189,19 @@ class GAConfig:
 
 @dataclass(frozen=True)
 class StageWindowsConfig:
-    """Stage A/B/C bars の切り出しルール。
+    """Stage A/B/C bars の切り出しルール (T087: Stage A/B disjoint 化適用後)。
 
-    - Stage B bars = ``[dataset.start, dataset.end)``
-    - Stage A bars = Stage B 末尾 ``stage_a_window_days`` 営業日相当
+    - Stage A bars = ``[dataset.end - stage_a_window, dataset.end)``
+    - Stage B bars = ``[dataset.start, dataset.end - stage_a_window)``
+      (Stage A 期間を時系列上 disjoint に除外)
     - Stage C holdout bars = ``[dataset.end, dataset.end + stage_c_holdout_days)``
-      を DB から別途取得。取得できない場合、
-      ``allow_stage_c_fallback_slice=True`` で Stage B 末尾 holdout_days 分の
-      slice へフォールバック (**test fixture 専用**; production では常に False)。
+      を DB から別途取得。取得不能時は **fail-closed (RuntimeError)**。
+      かつての ``allow_stage_c_fallback_slice`` (Stage B 末尾を holdout に再利用)
+      は :mod:`stage_partition_guard` の disjoint 検証と矛盾するため T087 で廃止。
     """
 
     stage_a_window_days: int = 60
     stage_c_holdout_days: int = 60
-    allow_stage_c_fallback_slice: bool = False
 
     def __post_init__(self) -> None:
         if self.stage_a_window_days < 1:
@@ -502,15 +502,21 @@ def _build_cross_pair(raw: Mapping[str, Any]) -> CrossPairConfig:
 def _build_stage_windows(
     raw: Mapping[str, Any], stage_gate: StageGateConfig
 ) -> StageWindowsConfig:
+    if "allow_stage_c_fallback_slice" in raw:
+        # T087: stage_partition_guard との disjoint 矛盾のため fallback は廃止。
+        # 既存設定が残っていれば fail-closed で気づかせる。
+        raise ValueError(
+            "stage_windows.allow_stage_c_fallback_slice is deprecated by T087 "
+            "(conflicts with stage_partition_guard disjoint contract). "
+            "Remove the key from your config; tests requiring synthetic holdout "
+            "must use test-only helpers that build LaneBarsBundle directly."
+        )
     return StageWindowsConfig(
         stage_a_window_days=int(
             raw.get("stage_a_window_days", stage_gate.stage_a_window_days)
         ),
         stage_c_holdout_days=int(
             raw.get("stage_c_holdout_days", stage_gate.stage_c_holdout_days)
-        ),
-        allow_stage_c_fallback_slice=bool(
-            raw.get("allow_stage_c_fallback_slice", False)
         ),
     )
 

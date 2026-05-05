@@ -185,7 +185,12 @@ def _install_mock_session(
     holdout_rows: list[Any],
     dataset_end: datetime,
 ) -> list[_MockSession]:
-    """run_ga.SessionLocal を差し替えて MockSession を返す."""
+    """run_ga.SessionLocal を差し替えて MockSession を返す.
+
+    T087: テスト fixture は step_minutes=60 で bar 行を生成するため、
+    `_BARS_PER_DAY` を本番値 (1440 = M1) から 24 (= 60min × 24h) へ patch して
+    stage_a_window_days と bar 数の換算が一致するようにする。
+    """
     created: list[_MockSession] = []
 
     def _factory() -> _MockSession:
@@ -194,6 +199,7 @@ def _install_mock_session(
         return sess
 
     monkeypatch.setattr(run_ga_module, "SessionLocal", _factory)
+    monkeypatch.setattr(run_ga_module, "_BARS_PER_DAY", 24)
     return created
 
 
@@ -217,7 +223,7 @@ def test_load_config_from_fixture_yaml() -> None:
     assert cfg.stage_gate.live_criteria["sharpe_min"] == 1.0
     # stage_windows
     assert cfg.stage_windows.stage_a_window_days == 1
-    assert cfg.stage_windows.allow_stage_c_fallback_slice is True
+    # T087: allow_stage_c_fallback_slice は廃止 (config attribute も削除)
 
 
 def test_load_config_default_yaml_loads() -> None:
@@ -335,8 +341,9 @@ def test_main_constructs_lane_eval_context_with_preflight_payload(
         "LaneEvalContext.preflight_payload must be set in main() "
         "(Codex impl-review §1 Critical)"
     )
-    # 7 日 × 24 時間 = 168 bars / 60 分 = 168 bars (test fixture step_minutes=60)
-    assert lane_ctx.preflight_payload.n_bars == len(stage_b_rows)
+    # T087: bars_stage_b は Stage A 期間 (末尾 stage_a_window_days=1 = 24 bars) を
+    # 除外したもの。 7d × 24h = 168 bars 全体から末尾 24 bars を引いた 144 bars。
+    assert lane_ctx.preflight_payload.n_bars == len(stage_b_rows) - 24
 
 
 def test_load_config_with_cli_overrides() -> None:
@@ -434,6 +441,69 @@ def _prepare_smoke_inputs(
     return pair, stage_b_rows, holdout_rows
 
 
+def test_load_lane_bars_disjoint_stage_a_b(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T087: bars_stage_a と bars_stage_b の bar_time 集合が完全 disjoint."""
+    pair, stage_b_rows, holdout_rows = _prepare_smoke_inputs(
+        fallback_holdout=False
+    )
+    _install_mock_session(
+        monkeypatch,
+        pair,
+        stage_b_rows,
+        holdout_rows,
+        datetime(2026, 1, 8, tzinfo=UTC),
+    )
+    from src.alpha_factory.config import load_config as _load
+
+    cfg = _load(CONFIG_PATH)
+    bundle = run_ga_module._load_lane_bars(
+        cfg.dataset.instrument, cfg.dataset, cfg.stage_windows
+    )
+    a_set = {b.bar_time for b in bundle.bars_stage_a}
+    b_set = {b.bar_time for b in bundle.bars_stage_b}
+    assert a_set & b_set == set()
+    # Stage A は末尾、 Stage B はそれ以前
+    assert max(b.bar_time for b in bundle.bars_stage_b) < min(
+        b.bar_time for b in bundle.bars_stage_a
+    )
+
+
+def test_load_lane_bars_raises_when_dataset_smaller_or_equal_to_stage_a(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T087: stage_a_n_bars >= len(bars_stage_b_full) で RuntimeError (== 境界含む)."""
+    pair = _make_currency_pair("EUR_JPY")
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = datetime(2026, 1, 2, tzinfo=UTC)
+    # 1 day の dataset を 60-min step で生成 → 24 bars。
+    # _install_mock_session で _BARS_PER_DAY=24 に patch されるため、
+    # stage_a_window_days=1 → stage_a_n_bars=24 = len(stage_b_full) で `>=` 違反。
+    stage_b_rows = _generate_bar_rows(pair, start, end, step_minutes=60)
+    holdout_rows = _generate_bar_rows(
+        pair, end, end + timedelta(days=1), step_minutes=60
+    )
+    _install_mock_session(
+        monkeypatch, pair, stage_b_rows, holdout_rows, end
+    )
+    from src.alpha_factory.config import load_config as _load
+
+    overrides = {
+        "dataset": {
+            "instrument": "EUR_JPY",
+            "start": "2026-01-01T00:00:00Z",
+            "end": "2026-01-02T00:00:00Z",
+        },
+        "stage_windows": {"stage_a_window_days": 1},
+    }
+    cfg = _load(CONFIG_PATH, overrides=overrides)
+    with pytest.raises(RuntimeError, match="dataset too short"):
+        run_ga_module._load_lane_bars(
+            cfg.dataset.instrument, cfg.dataset, cfg.stage_windows
+        )
+
+
 def test_smoke_run_holdout_ok(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -504,6 +574,21 @@ def test_smoke_run_holdout_ok(
     # 新規: bars_stage_a/bars_stage_b/bars_holdout
     assert summary["dataset"]["bars_stage_a"] > 0
     assert summary["dataset"]["bars_holdout"] > 0
+    # T087: disjoint metadata
+    assert summary["dataset"]["bars_stage_b_excludes_stage_a"] is True
+    assert summary["dataset"]["bars_dataset_total"] == (
+        summary["dataset"]["bars_stage_a"] + summary["dataset"]["bars_stage_b"]
+    )
+    # `bars` キーは disjoint 化前と同じ意味 (= 全期間) で据え置き
+    assert summary["dataset"]["bars"] == summary["dataset"]["bars_dataset_total"]
+    # 起動 log が引ける形で時刻情報が記録される
+    assert "stage_a_bar_first" in summary["dataset"]
+    assert "stage_b_bar_last" in summary["dataset"]
+    assert "holdout_bar_first" in summary["dataset"]
+    # T087: stage_b inconclusive flag
+    assert "stage_b" in summary
+    assert "statistical_inconclusive" in summary["stage_b"]
+    assert isinstance(summary["stage_b"]["statistical_inconclusive"], bool)
     # best.fitness は Decimal 互換 (有限値)
     Decimal(summary["best"]["fitness"])
     assert isinstance(summary["best"]["fitness_finite"], bool)
@@ -536,56 +621,13 @@ def test_smoke_run_holdout_ok(
         assert "graduation_count" in h
 
 
-def test_smoke_run_holdout_fallback_slice(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """holdout bars が DB で空 + allow_stage_c_fallback_slice=True.
+def test_load_config_rejects_deprecated_fallback_slice() -> None:
+    """T087: stage_windows.allow_stage_c_fallback_slice は廃止 → load_config で fail-closed."""
+    from src.alpha_factory.config import load_config as _load
 
-    fixture yaml は既に fallback=True なのでそのまま使う。
-    """
-    pair, stage_b_rows, holdout_rows = _prepare_smoke_inputs(
-        fallback_holdout=True
-    )
-    assert holdout_rows == []
-    _install_mock_session(
-        monkeypatch,
-        pair,
-        stage_b_rows,
-        holdout_rows,
-        datetime(2026, 1, 8, tzinfo=UTC),
-    )
-    monkeypatch.setattr(run_ga_module, "RUN_REPORTS_DIR", tmp_path / "reports")
-    monkeypatch.setattr(
-        run_ga_module, "RUN_CACHE_DIR", tmp_path / "cache"
-    )
-    monkeypatch.setattr(
-        run_ga_module, "get_latest_run_number", lambda: 0
-    )
-    from src.alpha_factory.archive import GenomeArchive as _Archive
-
-    monkeypatch.setattr(
-        _Archive, "DEFAULT_OUTPUT_DIR", tmp_path / "archive"
-    )
-
-    rc = run_ga_module.main(
-        [
-            "--config",
-            str(CONFIG_PATH),
-            "--run-id",
-            "run_test_fallback",
-            "--population-size",
-            "3",
-            "--generations",
-            "0",
-            "--seed",
-            "1",
-        ]
-    )
-    assert rc == 0
-    run_dir = tmp_path / "reports" / "run-1"
-    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
-    # fallback でも bars_holdout > 0
-    assert summary["dataset"]["bars_holdout"] > 0
+    overrides = {"stage_windows": {"allow_stage_c_fallback_slice": True}}
+    with pytest.raises(ValueError, match="allow_stage_c_fallback_slice is deprecated"):
+        _load(CONFIG_PATH, overrides=overrides)
 
 
 def test_fitness_to_str_handles_non_finite() -> None:
@@ -605,10 +647,10 @@ def test_fitness_to_str_handles_non_finite() -> None:
     Decimal(run_ga_module._fitness_to_str(float("nan")))
 
 
-def test_smoke_run_holdout_missing_without_fallback_raises(
+def test_smoke_run_holdout_missing_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """fallback flag なしで holdout が取れない → RuntimeError."""
+    """T087: holdout が DB から取れなければ常に RuntimeError (fallback 廃止)."""
     pair, stage_b_rows, holdout_rows = _prepare_smoke_inputs(
         fallback_holdout=True
     )
@@ -626,12 +668,9 @@ def test_smoke_run_holdout_missing_without_fallback_raises(
     monkeypatch.setattr(
         run_ga_module, "get_latest_run_number", lambda: 0
     )
-    # fixture fallback=True を override=False で無効化
-    overrides = {"stage_windows": {"allow_stage_c_fallback_slice": False}}
-    # load_config を経由するように argparse は通さず直接叩く
     from src.alpha_factory.config import load_config as _load
 
-    cfg = _load(CONFIG_PATH, overrides=overrides)
+    cfg = _load(CONFIG_PATH)
     with pytest.raises(RuntimeError, match="no holdout bars"):
         run_ga_module._load_lane_bars(
             cfg.dataset.instrument, cfg.dataset, cfg.stage_windows

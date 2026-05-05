@@ -147,14 +147,14 @@ class Tier1Lane(SwimLane):
         instrument: 通貨ペア名 (例: ``"EUR_JPY"``)。``lane_id`` の suffix
             (``lane_id.removeprefix("tier1_")``) と一致必須。
         bars_60d: Stage A (Fast Screen) 用 bars。
-        bars_18m: Stage B (WF-OOS Gate) 用 bars。
+        bars_stage_b: Stage B (WF-OOS Gate) 用 bars。
         bars_holdout: Stage C (Live Criteria + Stress) 用 holdout bars。
         meta: 通貨ペア meta 情報。``None`` は LaneManager 初期化で拒否される。
     """
 
     instrument: str = ""
     bars_60d: list[PriceBar] = field(default_factory=list)
-    bars_18m: list[PriceBar] = field(default_factory=list)
+    bars_stage_b: list[PriceBar] = field(default_factory=list)
     bars_holdout: list[PriceBar] = field(default_factory=list)
     meta: InstrumentMeta | None = None
     provenance: dict[str, tuple[str | None, str | None]] = field(
@@ -480,7 +480,7 @@ class LaneManager:
             ``(lane_n_unique_dates, wf_min_dates, lane_max_folds,
               wf_min_folds, preflight_underfilled)``
         """
-        lane_n_unique_dates = n_unique_dates(lane.bars_18m)
+        lane_n_unique_dates = n_unique_dates(lane.bars_stage_b)
         wf_min_dates = wf_min_unique_dates(
             self._stage_gate_config.wf_train_days,
             self._stage_gate_config.wf_embargo_days,
@@ -625,7 +625,7 @@ class LaneManager:
                     wf_min_dates,
                     lane_max_folds,
                     wf_min_folds,
-                    n_bars=len(lane.bars_18m),
+                    n_bars=len(lane.bars_stage_b),
                 )
                 # T081 step 1: preflight 個体は AB pair 収集対象外 (= 推定値で実
                 # backtest を走らせていない)、 但し counter で可視化
@@ -634,7 +634,7 @@ class LaneManager:
             else:
                 b_result = evaluate_stage_b(
                     genome,
-                    lane.bars_18m,
+                    lane.bars_stage_b,
                     lane.meta,
                     bt_cfg,
                     self._primitive_evaluator,
@@ -809,7 +809,7 @@ class LaneManager:
                     wf_min_dates,
                     lane_max_folds,
                     wf_min_folds,
-                    n_bars=len(lane.bars_18m),
+                    n_bars=len(lane.bars_stage_b),
                 )
                 # T081 step 1: preflight 個体は AB pair 収集対象外
                 ab_excluded_preflight_count += 1
@@ -821,7 +821,7 @@ class LaneManager:
                     metrics={
                         "stage": "B",
                         "genome_name": genome.name,
-                        "n_bars": len(lane.bars_18m),
+                        "n_bars": len(lane.bars_stage_b),
                         "wall_time_seconds": 0.0,
                         "payload": {
                             "worker_error_code": r.error.error_code,

@@ -101,7 +101,9 @@ from src.alpha_factory.schema_contract import (
     CASCADE_CONTRACT_VERSION,
     assert_run_report_v2,
 )
+from src.alpha_factory.stage_b_inconclusive import is_stage_b_inconclusive
 from src.alpha_factory.stage_gate import STAGE_GATE_VERSION
+from src.alpha_factory.stage_partition_guard import validate_stage_partition
 from src.alpha_factory.swim_lane import (
     GRADUATION_LANE_ID,
     GraduationLane,
@@ -428,15 +430,14 @@ def _load_lane_bars(
     dataset: DatasetConfig,
     stage_windows: StageWindowsConfig,
 ) -> LaneBarsBundle:
-    """DB から Stage A/B/C の 3 区間 bars + meta を取得する。
+    """DB から Stage A/B/C の 3 区間 bars + meta を取得する (T087)。
 
-    - Stage B bars = [dataset.start, dataset.end)
-    - Stage A bars = Stage B 末尾 ``stage_a_window_days * 1440`` 本
-    - Stage C holdout = [dataset.end, dataset.end + holdout_days)
-      欠損時 ``allow_stage_c_fallback_slice`` ならば Stage B 末尾 holdout 本数
-      で slice (test fixture 専用)。
+    - Stage A bars = ``[dataset.end - stage_a_window, dataset.end)``
+    - Stage B bars = ``[dataset.start, dataset.end - stage_a_window)``
+      (T087 で Stage A 期間を時系列上 disjoint に除外)
+    - Stage C holdout = ``[dataset.end, dataset.end + holdout_days)``
+      取得不能時は **fail-closed (RuntimeError)**。 fallback slice は廃止 (T087)。
     """
-    holdout_n_bars = stage_windows.stage_c_holdout_days * _BARS_PER_DAY
     stage_a_n_bars = stage_windows.stage_a_window_days * _BARS_PER_DAY
     with SessionLocal() as session:
         pair = session.scalars(
@@ -458,7 +459,7 @@ def _load_lane_bars(
                 f"no bars for {instrument} in "
                 f"[{dataset.start}, {dataset.end})"
             )
-        bars_stage_b = [_bar_row_to_price_bar(r, instrument) for r in rows_b]
+        bars_stage_b_full = [_bar_row_to_price_bar(r, instrument) for r in rows_b]
 
         holdout_end = dataset.end + timedelta(
             days=stage_windows.stage_c_holdout_days
@@ -473,32 +474,43 @@ def _load_lane_bars(
         bars_holdout = [_bar_row_to_price_bar(r, instrument) for r in rows_hold]
 
     if not bars_holdout:
-        if stage_windows.allow_stage_c_fallback_slice:
-            slice_n = (
-                holdout_n_bars
-                if holdout_n_bars <= len(bars_stage_b)
-                else len(bars_stage_b)
-            )
-            bars_holdout = bars_stage_b[-slice_n:]
-            logger.warning(
-                "run_ga.holdout_fallback_slice",
-                instrument=instrument,
-                n_bars=len(bars_holdout),
-                note="using Stage B tail as Stage C (test/fixture mode)",
-            )
-        else:
-            raise RuntimeError(
-                f"no holdout bars for {instrument} in "
-                f"[{dataset.end}, {holdout_end}); "
-                f"set stage_windows.allow_stage_c_fallback_slice=true "
-                f"ONLY for tests"
-            )
+        # T087: fallback slice (Stage B 末尾を holdout に再利用) は廃止 (partition
+        # guard の disjoint 検証と矛盾するため)。 test fixture は test-only helper で
+        # LaneBarsBundle を直接構築する経路に切り替えること。
+        raise RuntimeError(
+            f"no holdout bars for {instrument} in "
+            f"[{dataset.end}, {holdout_end}); "
+            f"holdout fetch failed and fallback slice is no longer supported "
+            f"(would violate stage partition disjoint contract; T087)"
+        )
 
-    bars_stage_a = (
-        bars_stage_b[-stage_a_n_bars:]
-        if stage_a_n_bars <= len(bars_stage_b)
-        else list(bars_stage_b)
+    # T087: Stage A 期間を bars_stage_b から時系列上 disjoint に除外する。
+    # `>=` 判定で disjoint 後の bars_stage_b が空になるケースも同時に検出。
+    if stage_a_n_bars >= len(bars_stage_b_full):
+        raise RuntimeError(
+            f"dataset too short for disjoint stage A/B: "
+            f"stage_a_n_bars={stage_a_n_bars} >= "
+            f"len(bars_stage_b_full)={len(bars_stage_b_full)} "
+            f"(instrument={instrument}, dataset=[{dataset.start}, {dataset.end})). "
+            f"Extend dataset or reduce stage_a_window_days."
+        )
+    bars_stage_a = bars_stage_b_full[-stage_a_n_bars:]
+    bars_stage_b = bars_stage_b_full[:-stage_a_n_bars]
+
+    logger.info(
+        "run_ga.lane_bars_loaded",
+        instrument=instrument,
+        stage_a_bar_first=bars_stage_a[0].bar_time.isoformat(),
+        stage_a_bar_last=bars_stage_a[-1].bar_time.isoformat(),
+        stage_a_count=len(bars_stage_a),
+        stage_b_bar_first=bars_stage_b[0].bar_time.isoformat(),
+        stage_b_bar_last=bars_stage_b[-1].bar_time.isoformat(),
+        stage_b_count=len(bars_stage_b),
+        holdout_bar_first=bars_holdout[0].bar_time.isoformat(),
+        holdout_bar_last=bars_holdout[-1].bar_time.isoformat(),
+        holdout_count=len(bars_holdout),
     )
+
     return LaneBarsBundle(
         meta=meta,
         bars_stage_a=bars_stage_a,
@@ -722,6 +734,26 @@ def _select_best(
 # ---------------------------------------------------------------------------
 
 
+def _coerce_n_fold_effective(value: object) -> int | None:
+    """T087: archive row の n_fold_effective を summary 用に整数 or None へ正規化。
+
+    is_stage_b_inconclusive と同じ型防御 (Integral 以外 / NaN / bool は None)
+    で、 summary 生成時の ``int(...)`` 失敗による report 落下を防ぐ。
+    """
+    import math
+    from numbers import Integral
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if not isinstance(value, Integral):
+        return None
+    return int(value)
+
+
 def _row_to_metrics_dict(row: Mapping[str, Any] | None) -> dict[str, Any]:
     if row is None:
         return {}
@@ -911,10 +943,21 @@ def _write_reports(
             "instrument": cfg.dataset.instrument,
             "start": cfg.dataset.start.isoformat(),
             "end": cfg.dataset.end.isoformat(),
-            "bars": len(bundle.bars_stage_b),
+            # T087: `bars` は disjoint 化前と同じ意味 (= dataset 全期間
+            # = bars_stage_a + bars_stage_b の合計) を据え置き、 後方互換維持。
+            "bars": len(bundle.bars_stage_a) + len(bundle.bars_stage_b),
+            "bars_dataset_total": len(bundle.bars_stage_a)
+            + len(bundle.bars_stage_b),
             "bars_stage_a": len(bundle.bars_stage_a),
             "bars_stage_b": len(bundle.bars_stage_b),
             "bars_holdout": len(bundle.bars_holdout),
+            "bars_stage_b_excludes_stage_a": True,
+            "stage_a_bar_first": bundle.bars_stage_a[0].bar_time.isoformat(),
+            "stage_a_bar_last": bundle.bars_stage_a[-1].bar_time.isoformat(),
+            "stage_b_bar_first": bundle.bars_stage_b[0].bar_time.isoformat(),
+            "stage_b_bar_last": bundle.bars_stage_b[-1].bar_time.isoformat(),
+            "holdout_bar_first": bundle.bars_holdout[0].bar_time.isoformat(),
+            "holdout_bar_last": bundle.bars_holdout[-1].bar_time.isoformat(),
         },
         "ga_config": {
             "population_size": cfg.ga.population_size,
@@ -974,6 +1017,17 @@ def _write_reports(
             ],
             "selection_score_schema": "v3_1_stage_b_priority",
             "metrics": best_metrics,
+        },
+        "stage_b": {
+            # T087: best 個体ぶんの n_fold_effective を summary level で参照可能に
+            # (downstream consumer / report 側の inconclusive 判定 SSOT)。
+            # is_stage_b_inconclusive と整合した型防御 (Integral 以外は None)。
+            "n_fold_effective": _coerce_n_fold_effective(
+                best_row.get("n_fold_effective") if best_row is not None else None
+            ),
+            "statistical_inconclusive": is_stage_b_inconclusive(
+                best_row.get("n_fold_effective") if best_row is not None else None
+            ),
         },
         "live_criteria": live_check,
         "population_size": len(final_population),
@@ -1309,6 +1363,20 @@ def main(argv: list[str] | None = None) -> int:
         cfg.dataset.instrument, cfg.dataset, cfg.stage_windows
     )
 
+    # T087: Stage Partition Integrity Guard (fail-closed)。
+    # aux_preflight より前に呼ぶ理由: bars 区間が壊れていれば aux 評価は意味がない。
+    # 違反時は StagePartitionInputError / StagePartitionLeakError で起動停止。
+    validate_stage_partition(
+        bundle.bars_stage_a,
+        bundle.bars_stage_b,
+        bundle.bars_holdout,
+    )
+    logger.info(
+        "run_ga.stage_partition_guard.passed",
+        instrument=cfg.dataset.instrument,
+        stage_gate_version=STAGE_GATE_VERSION,
+    )
+
     # T058 PR 5: archive に RunContext + enforcement_mode を注入
     # (詳細設計 行 1344-1349)。 既存 backward compat (run_context=None) は
     # 維持されるが、 production 経路では必ず RunContext を渡す。
@@ -1401,7 +1469,7 @@ def main(argv: list[str] | None = None) -> int:
         lane_id=lane_id,
         instrument=cfg.dataset.instrument,
         bars_60d=bundle.bars_stage_a,
-        bars_18m=bundle.bars_stage_b,
+        bars_stage_b=bundle.bars_stage_b,
         bars_holdout=bundle.bars_holdout,
         meta=bundle.meta,
     )

@@ -159,7 +159,7 @@ def compute_business_day_universe_from_bars(
 
     入力契約 (Codex Round 2 [Suggestion] 1 取込で明文化):
         bars は **対象 stage 評価窓の全 price bars** (= Stage A なら bars_60d、
-        Stage B なら bars_18m、 Stage C なら bars_holdout) を想定。
+        Stage B なら bars_stage_b、 Stage C なら bars_holdout) を想定。
         約定周辺 bars や equity_curve 由来 bars を渡すと、 空 block が universe から
         欠落して synthesis § 6.3 の WR neutral 0.5 規約が崩れる (= 集計が活動量依存で
         上振れする)。

@@ -89,6 +89,19 @@ post-run-review 由来の TODO は `--summary` 先頭に **`[r:{code}]`** prefix
 - Phase 4A Evaluation: 多角監査（focus-theme 別）を起動
 - 監査結果は `devnotes/{tmp_dir}/` に保存し、必要なら TODO 化
 
+### 4-1. 起動時 Stage Partition Integrity Guard (T087)
+
+`run_ga.py` 起動シーケンスでは `_load_lane_bars` 直後 / `aux_preflight` より前に
+`stage_partition_guard.validate_stage_partition` を呼び、 Stage A/B/Holdout の
+時系列上 disjoint 性を fail-closed で検証する。違反時は
+`StagePartitionInputError` (B-0) / `StagePartitionLeakError` (B-1) で起動停止する
+（escape hatch なし）。
+
+`bars_stage_b` は dataset から Stage A 期間を時系列上 disjoint に除外したもの。
+旧 `allow_stage_c_fallback_slice` (Stage B 末尾を holdout に再利用する fallback)
+は disjoint 検証と矛盾するため T087 で**廃止**。 holdout が DB から取得できない
+場合は常に RuntimeError。 詳細: [stage-gates.md](stage-gates.md#stage-ab-disjoint-契約-t087)。
+
 ### 5. 主要 CLI
 
 | コマンド | 用途 |

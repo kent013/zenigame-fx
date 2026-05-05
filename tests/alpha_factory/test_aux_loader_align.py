@@ -3,7 +3,7 @@
 検証項目:
     V2: look-ahead bias なし (4 ケース)
     V3: misalign vs 欠番分離 (aux_pair_bars)
-    V5: stage 別 alignment (bars_60d / bars_18m / bars_holdout)
+    V5: stage 別 alignment (bars_60d / bars_stage_b / bars_holdout)
     V7: numpy ndarray 互換 (dtype=float64)
     V14: AuxAlignmentCache key + invalidation
     V15: _normalize_bar_time 丸め衝突 fail-fast

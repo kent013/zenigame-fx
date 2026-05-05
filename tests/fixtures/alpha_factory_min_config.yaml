@@ -44,7 +44,6 @@ stage_gate:
 stage_windows:
   stage_a_window_days: 1
   stage_c_holdout_days: 1
-  allow_stage_c_fallback_slice: true
 cross_pair:
   mode: shadow
   aggregator_lambda: 0.5
