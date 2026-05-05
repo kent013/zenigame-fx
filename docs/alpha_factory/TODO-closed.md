@@ -90,6 +90,7 @@
 | T086 | B-phase2-step1.8-stage-c-cross-pair-dual-path | cross-pair | High | 2026-05-04 10:17 | - |
 | T087 | stage-ab-disjoint-and-holdout-guard | stage-gate | High | 2026-05-05 11:52 | - |
 | T088 | _indicators.py Numba JIT 化 | primitives | High | 2026-05-05 20:12 | - |
+| T089 | session_block_lookup_table | infrastructure | Medium | 2026-05-05 21:08 | - |
 
 ## Obsoleted
 
