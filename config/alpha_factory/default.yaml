@@ -115,9 +115,14 @@ stage_gate:
     # train/test を半分にして fold 成立を狙う (train=60+embargo=1+test=10=71)。
     # 注: Sharpe / positive_fold 閾値は不変。目的は「fold 成立」のみ (Codex 案 A)。
     # 構造的フィージビリティ契約 (T038 候補) は別 cycle で本格実装予定。
-    wf_train_days: 60
+    # cycle 2 (improve-cycle): WF 窓を新 partition (B 期間 disjoint) と整合化。
+    # 旧 60/10/10 は B≈97003 bars (n_unique_dates_b≈70) で compute_max_folds=2 (Stage B
+    # 偽陽性量産)。 new train=20/test=10/step=5 で max_folds≈8 (>= wf_min_safe_folds=5)。
+    # 閾値 (sharpe_min/positive_fold_min/dsr_min/fold_trade_count_min) は不変、
+    # 変えるのは fold 計算の幾何前提のみ (Principled Parametric)。
+    wf_train_days: 20
     wf_test_days: 10
-    wf_step_days: 10
+    wf_step_days: 5
     wf_embargo_days: 1
     # T042 Phase 0: trade-level スケール (per-fold trade_sharpe_raw との比較)。
     # Stage B は per-fold WF OOS の中央値を判定するため annualized でなく
@@ -131,6 +136,10 @@ stage_gate:
     dsr_min: 0.0                # monitor_only (Phase 4 で hard 化)
     # T044: pre-flight feasibility (LaneManager で max_folds < min なら全 lane 全個体 skip)
     wf_min_folds_required: 2
+    # cycle 2 (improve-cycle): 起動時 fail-closed 用 statistical safety floor。
+    # `wf_min_folds_required` (worker 短絡判定 graceful degrade) と役割分離。
+    # `compute_max_folds(...) < wf_min_safe_folds` で起動時 RuntimeError fail-closed。
+    wf_min_safe_folds: 5
     # T054: Stage B fold 専用 trade-level Sharpe sample-size guard。
     # @why: Stage A は 60-day window で trade_count_min_for_sharpe=30 を要求するが、
     # Stage B fold は wf_test_days=10 と短い期間で同じ 30 を要求すると

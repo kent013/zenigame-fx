@@ -1513,6 +1513,36 @@ def main(argv: list[str] | None = None) -> int:
         n_bars=len(bars_b_list),
     )
 
+    wf_min_safe_folds = cfg.stage_gate.wf_min_safe_folds
+    logger.info(
+        "stage_b_fold_guard.evaluating",
+        compute_max_folds=lane_max_folds,
+        wf_min_safe_folds=wf_min_safe_folds,
+        wf_min_folds_required=wf_min_folds,
+        wf_train_days=cfg.stage_gate.wf_train_days,
+        wf_test_days=cfg.stage_gate.wf_test_days,
+        wf_step_days=cfg.stage_gate.wf_step_days,
+        wf_embargo_days=cfg.stage_gate.wf_embargo_days,
+        n_unique_dates_b=lane_n_unique_dates,
+        n_bars_b=len(bars_b_list),
+        lane_id=lane_id,
+        instrument=cfg.dataset.instrument,
+    )
+    if lane_max_folds < wf_min_safe_folds:
+        raise RuntimeError(
+            f"Stage B fold guard failed: compute_max_folds={lane_max_folds} "
+            f"< wf_min_safe_folds={wf_min_safe_folds} "
+            f"(n_unique_dates_b={lane_n_unique_dates}, "
+            f"wf_train={cfg.stage_gate.wf_train_days}d, "
+            f"wf_test={cfg.stage_gate.wf_test_days}d, "
+            f"wf_step={cfg.stage_gate.wf_step_days}d, "
+            f"wf_embargo={cfg.stage_gate.wf_embargo_days}d, "
+            f"lane_id={lane_id}). "
+            f"Stage B 偽陽性回避のため fail-closed (cycle 2 improve-cycle)。 "
+            f"対応: WF 値 (wf_train/wf_test/wf_step) を短縮するか partition (B 期間) を拡張。"
+        )
+    logger.info("stage_b_fold_guard.passed", lane_id=lane_id)
+
     lane_ctx = LaneEvalContext(
         lane_id=lane_id,
         bars_a=tuple(bundle.bars_stage_a),

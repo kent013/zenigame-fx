@@ -409,6 +409,10 @@ class StageGateConfig:
     # stage_b_pre_flight_underfilled で fail-fast。insufficient_folds の後段検出ではなく
     # 構造的に弾く。default 2 は WF 評価として最低限のサンプル数。
     wf_min_folds_required: int = 2
+    # cycle 2 (improve-cycle): 起動時 fail-closed 用 statistical safety floor。
+    # `wf_min_folds_required` (worker 短絡判定 graceful degrade) と役割分離。
+    # `compute_max_folds(...) < wf_min_safe_folds` で起動時 RuntimeError fail-closed。
+    wf_min_safe_folds: int = 5
 
     # T057 Phase 2: aux data 必須化 flag (default False で互換性維持、
     # config / CLI で True に上書き可能)。True のとき preflight check で

@@ -292,6 +292,17 @@ class TestStageGateConfig:
         with pytest.raises(TypeError):
             cfg.live_criteria["sharpe_min"] = 999  # type: ignore[index]
 
+    def test_wf_min_safe_folds_default(self) -> None:
+        # cycle 2 (improve-cycle): 起動時 fail-closed 用 statistical safety floor
+        cfg = StageGateConfig()
+        assert cfg.wf_min_safe_folds == 5
+
+    def test_wf_min_safe_folds_distinct_from_min_folds_required(self) -> None:
+        # 役割分離: wf_min_folds_required (worker 短絡) vs wf_min_safe_folds (起動 fail-closed)
+        cfg = StageGateConfig(wf_min_folds_required=2, wf_min_safe_folds=10)
+        assert cfg.wf_min_folds_required == 2
+        assert cfg.wf_min_safe_folds == 10
+
 
 # ===========================================================================
 # StageResult
