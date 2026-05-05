@@ -1,11 +1,11 @@
 {
-  "run_id": "run_20260504_132300",
+  "run_id": "run_20260505_043320",
   "dataset_epoch_id": "epoch_20251001_20260401",
   "generation_count": 60,
   "ab_divergence": {
     "status": "ok",
-    "corr": "-0.07133981437256610505000240307",
-    "n_pairs": 3096
+    "corr": "-0.01888088537142558058622250206",
+    "n_pairs": 2929
   },
   "q_force_recommendation": {
     "new_q_force": "0.15",
@@ -64,7 +64,7 @@
     "inflow_summary_by_role": {}
   },
   "failure": {
-    "run_id": "run_20260504_132300",
+    "run_id": "run_20260505_043320",
     "run_aborted": false,
     "per_stage": []
   }

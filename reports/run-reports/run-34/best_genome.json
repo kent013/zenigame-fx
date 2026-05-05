@@ -1,33 +1,44 @@
 {
   "dataset_epoch_id": "epoch_20251001_20260401",
-  "name": "g54_i35",
+  "name": "g48_i70",
   "units": 10000,
   "clauses": [
     {
       "directional": [
         {
           "name": "P2",
-          "weight": 1.0223887598568653,
+          "weight": 0.8821469166924062,
           "params": {
-            "atr_n": 17
+            "atr_n": 8
           }
         },
         {
           "name": "P7",
-          "weight": 1.3451913313326473,
+          "weight": 0.7258172928680269,
           "params": {
-            "spx_n": 31,
-            "vix_threshold": 25.612280673268,
-            "vix_scale": 9.297338624399456,
-            "vix_staleness_days": 19.363946073314054,
-            "spx_staleness_bars": 419
+            "spx_n": 8,
+            "vix_threshold": 33.721595375858456,
+            "vix_scale": 2.760355345234533,
+            "vix_staleness_days": 3.98952242519239,
+            "spx_staleness_bars": 192
           }
         },
         {
-          "name": "F11",
-          "weight": 0.8895188618427188,
+          "name": "P12",
+          "weight": 0.7964313136054094,
           "params": {
-            "n": 58
+            "mom_n": 5,
+            "scale": 0.04004649980582889,
+            "staleness_bars": 319
+          }
+        },
+        {
+          "name": "P9",
+          "weight": 0.5601550627649174,
+          "params": {
+            "mom_n": 12,
+            "scale": 0.003901156441581075,
+            "staleness_bars": 63
           }
         }
       ],
@@ -36,13 +47,13 @@
     }
   ],
   "position": {
-    "entry_threshold": 0.5036953960839801,
-    "exit_threshold": -0.07859880300991269,
-    "max_pos": 3,
-    "time_stop_min": 283
+    "entry_threshold": 0.46371481823901517,
+    "exit_threshold": 0.16470407093391223,
+    "max_pos": 1,
+    "time_stop_min": 193
   },
   "risk": {
-    "stop_atr": 2.1914650141114964,
-    "take_atr": 1.4598466338098757
+    "stop_atr": 1.9659807341218267,
+    "take_atr": 0.5469134392885532
   }
 }
