@@ -280,6 +280,30 @@ def test_collect_stage_a_partial_fill() -> None:
     assert row["stage_c_pass"] is False
 
 
+def test_collect_stage_a_propagates_total_pnl_from_payload() -> None:
+    # cycle 1 回帰: Stage A row の total_pnl が _new_row 初期値 0.0 のまま固定され、
+    # sidecar (total_pnl_stage_a=50360.0) と archive (=0.0) が乖離していた問題の再発防止。
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(
+        g,
+        "tier1_EUR_JPY",
+        54,
+        _stage_a_result(total_pnl=50360.0),
+        instrument="EUR_JPY",
+    )
+    row = arc._rows[("tier1_EUR_JPY", 54, "g0_i0")]
+    assert row["total_pnl"] == pytest.approx(50360.0)
+
+
+def test_collect_stage_a_total_pnl_default_when_payload_missing() -> None:
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["total_pnl"] == pytest.approx(0.0)
+
+
 def test_collect_stage_a_n_nodes_computed() -> None:
     arc = _make_archive()
     g = _stub_genome(n_clauses=2)  # 2 clauses × (1 dir + 1 gate) = 4 nodes

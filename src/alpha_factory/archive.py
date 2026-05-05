@@ -449,6 +449,8 @@ class GenomeArchive:
         row["fitness_pen"] = _required_float(payload, "fitness_pen")
         row["stage_a_pass"] = bool(stage_result.passed)
         row["trade_count"] = _required_int(payload, "trade_count")
+        # T044 設計: Stage A で total_pnl を設定し Stage B は保持・Stage C で更新。
+        row["total_pnl"] = _required_float(payload, "total_pnl")
         # T-sharpe Phase 1A: payload key を "sharpe_raw" → "trade_sharpe_raw" にリネーム
         # 旧 archive 互換のため "sharpe" 列は v1 値で残す経路を維持しないが、
         # 既存 schema 順守のため None を入れる (Phase 2 で sharpe 列削除予定)
