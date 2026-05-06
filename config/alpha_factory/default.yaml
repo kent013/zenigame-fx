@@ -35,8 +35,8 @@ ga:
   generations: 15
   crossover_rate: 0.7
   mutation_rate: 0.3
-  # @cycle_10: 3→5 で selection 圧強化 (cycle 9 dead-end 後、 cycle 7 best fp 0.252 復帰 + 改善試行)
-  tournament_size: 5
+  # @cycle_10 試行: 3→5 で fp 0.011 (cycle 7 0.252 比 -96%、 多様性損失 dead-end)、 revert
+  tournament_size: 3
   elite_count: 2
   max_depth: 4
   # GA primitive 構文木の clause 数上限。 1 = single clause、2 以上で複合 clause 許容。
