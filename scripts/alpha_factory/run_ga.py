@@ -182,16 +182,19 @@ class IndividualCacheEntry:
     fold_robust: bool = False
 
     @property
-    def selection_score(self) -> tuple[int, float, int, int, int, int, int, int, float]:
-        """Lexicographic 9-tuple v3.2 (cycle 4 で 8→9 要素化):
-        ``(feasible, -violation, stage_b_pass, stage_c_feasible, C_pass, B_pass, A_pass, fold_robust, fitness_pen)``.
+    def selection_score(self) -> tuple[int, float, int, int, int, int, int, int, int, float]:
+        """Lexicographic 10-tuple v3.3 (cycle 5 で 9→10 要素化):
+        ``(feasible, -violation, stage_b_pass_and_feasible, stage_b_pass, stage_c_feasible, C_pass, B_pass, A_pass, fold_robust, fitness_pen)``.
 
-        cycle 4: ``fold_robust`` (8 要素目) を fitness_pen より上位に挿入。
-        GA tournament + elite 両方が ``_selection_key`` 経由で本 score を使うため、
-        探索圧を Stage B 閾値到達可能な fold robust 個体に向ける構造的介入。
+        cycle 5: ``stage_b_pass_and_feasible`` (3 要素目) を昇格。
+        Stage B pass かつ entry_count adequate (= feasible) 個体を最優先化し、
+        cycle 4 で観測された「Stage B pass だが trade_count<50 (entry_count_min 不達)」
+        個体支配を解消する (analyze-codex 推奨 D')。
 
-        T046: stage_b_pass を stage_c_feasible より前に置き「Stage B 整合 + 単期間 PnL/Sharpe 正」
-        の両立を構造的に保証。
+        cycle 4: ``fold_robust`` (9 要素目) を fitness_pen より上位に維持。
+
+        T046: stage_b_pass (4 要素目) を stage_c_feasible より前に置き
+        「Stage B 整合 + 単期間 PnL/Sharpe 正」の両立を構造的に保証。
 
         非有限値 (NaN/inf) は順序比較を破壊するため finite guard で正規化:
         - violation: 非有限なら ``+inf`` 扱い (= ``-inf`` を要素 2 に置く → 最下位)
@@ -201,9 +204,11 @@ class IndividualCacheEntry:
         v_norm = math.inf if not math.isfinite(v) else float(v)
         fp = self.fitness_pen
         fp_norm = -math.inf if not math.isfinite(fp) else float(fp)
+        stage_b_pass_and_feasible = bool(self.stage_b_pass) and bool(self.feasible)
         return (
             int(self.feasible),
             -v_norm,
+            int(stage_b_pass_and_feasible),  # cycle 5: NEW、 真の Stage B pass を最優先化
             int(self.stage_b_pass),  # T046: Stage B 整合 priority
             int(self.stage_c_feasible),
             int(self.stage_c_pass),
@@ -1034,16 +1039,20 @@ def _write_reports(
             "selection_score": [
                 int(best_entry.feasible),
                 -float(_safe_finite(best_entry.violation_magnitude)[0]),
+                int(bool(best_entry.stage_b_pass) and bool(best_entry.feasible)),  # cycle 5
                 int(best_entry.stage_b_pass),  # T046 v3.1
                 int(best_entry.stage_c_feasible),
                 int(best_entry.stage_c_pass),
                 int(best_entry.stage_b_pass),
                 int(best_entry.stage_a_pass),
-                int(best_entry.fold_robust),  # cycle 4: v3_2_fold_robust
+                int(best_entry.fold_robust),  # cycle 4: fold_robust
                 float(best_fitness_val),
             ],
-            "selection_score_schema": "v3_2_fold_robust",
-            "fold_robust": bool(best_entry.fold_robust),  # cycle 4 best 透明性
+            "selection_score_schema": "v3_3_stage_b_feasible_priority",
+            "fold_robust": bool(best_entry.fold_robust),
+            "stage_b_pass_and_feasible": bool(  # cycle 5
+                bool(best_entry.stage_b_pass) and bool(best_entry.feasible)
+            ),
             "metrics": best_metrics,
         },
         "stage_b": {

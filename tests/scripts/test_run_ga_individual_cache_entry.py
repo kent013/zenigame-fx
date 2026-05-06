@@ -17,13 +17,13 @@ def test_selection_score_9_tuple_default_fold_robust_false():
         stage_c_pass=False,
     )
     score = entry.selection_score
-    assert len(score) == 9
-    assert score[7] == 0  # fold_robust default False
-    assert score[8] == 0.5  # fitness_pen
+    assert len(score) == 10  # cycle 5: 10-tuple
+    assert score[8] == 0  # fold_robust default False (位置 9)
+    assert score[9] == 0.5  # fitness_pen (位置 10)
 
 
 def test_selection_score_9_tuple_fold_robust_true():
-    """fold_robust=True で 8 要素目が 1."""
+    """fold_robust=True で 9 要素目が 1 (cycle 5 で位置がシフト)."""
     entry = IndividualCacheEntry(
         generation=0,
         fitness_pen=0.5,
@@ -33,9 +33,48 @@ def test_selection_score_9_tuple_fold_robust_true():
         fold_robust=True,
     )
     score = entry.selection_score
-    assert len(score) == 9
-    assert score[7] == 1
-    assert score[8] == 0.5
+    assert len(score) == 10  # cycle 5: 10-tuple
+    assert score[8] == 1  # fold_robust 位置 9
+    assert score[9] == 0.5  # fitness_pen
+
+
+def test_selection_score_stage_b_pass_and_feasible_top_priority():
+    """cycle 5: stage_b_pass AND feasible が要素 3 に昇格、 stage_b_pass のみより上位."""
+    sb_and_feasible = IndividualCacheEntry(
+        generation=0,
+        fitness_pen=0.0,
+        stage_a_pass=True,
+        stage_b_pass=True,
+        stage_c_pass=False,
+        feasible=True,  # entry_count >= 50
+    )
+    sb_only_no_feasible = IndividualCacheEntry(
+        generation=0,
+        fitness_pen=0.5,  # higher
+        stage_a_pass=True,
+        stage_b_pass=True,
+        stage_c_pass=False,
+        feasible=False,  # entry_count < 50
+    )
+    # cycle 5: stage_b_pass_and_feasible=1 が要素 3 で勝つ (要素 1 feasible は 0 でも要素 3 で先勝)
+    # 注: feasible=False で 要素 1 が 0、 sb_and_feasible が 要素 1 = 1 で勝つ
+    assert sb_and_feasible.selection_score > sb_only_no_feasible.selection_score
+
+
+def test_selection_score_v3_3_top_3_elements_when_full_pass():
+    """cycle 5: feasible + stage_b_pass + AND の 3 要素が揃った個体が最優先."""
+    full_pass = IndividualCacheEntry(
+        generation=0,
+        fitness_pen=0.1,
+        stage_a_pass=True,
+        stage_b_pass=True,
+        stage_c_pass=False,
+        feasible=True,
+    )
+    score = full_pass.selection_score
+    assert score[0] == 1  # feasible
+    assert score[2] == 1  # stage_b_pass_and_feasible
+    assert score[3] == 1  # stage_b_pass
 
 
 def test_selection_score_lexicographic_fold_robust_priority():
@@ -119,7 +158,7 @@ def test_selection_score_legacy_4tuple_unchanged():
 
 
 def test_selection_score_finite_guard_fitness_pen_inf():
-    """fitness_pen が -inf でも 9 要素 tuple、 9 要素目が -inf."""
+    """fitness_pen が -inf でも 10 要素 tuple、 10 要素目が -inf (cycle 5)."""
     entry = IndividualCacheEntry(
         generation=0,
         fitness_pen=-math.inf,
@@ -128,5 +167,5 @@ def test_selection_score_finite_guard_fitness_pen_inf():
         stage_c_pass=False,
     )
     score = entry.selection_score
-    assert len(score) == 9
-    assert score[8] == -math.inf
+    assert len(score) == 10  # cycle 5: 10-tuple
+    assert score[9] == -math.inf  # fitness_pen 位置 10

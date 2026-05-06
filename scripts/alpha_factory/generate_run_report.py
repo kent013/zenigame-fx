@@ -769,7 +769,18 @@ def main(argv: list[str] | None = None) -> int:
     # archive Top-5 個体一覧 (Best とは別物)
     lines.append("## Archive Top-5 個体一覧")
     lines.append("")
-    if schema == "v3_2_fold_robust":
+    if schema == "v3_3_stage_b_feasible_priority":
+        note = (
+            "Best は "
+            "(feasible, -violation, stage_b_pass_and_feasible, stage_b_pass, "
+            "stage_c_feasible, stage_c_pass, stage_b_pass, stage_a_pass, "
+            "fold_robust, fitness_pen) "
+            "の辞書式 (v3.3_stage_b_feasible_priority, cycle 5 improve-cycle)。"
+            "stage_b_pass_and_feasible = (Stage B 通過 ∧ entry_count_min 達成) を"
+            "最優先要素 3 に昇格し、 cycle 4 で観測された「Stage B pass だが"
+            "trade_count<50 で feasible=0」 個体支配を解消。"
+        )
+    elif schema == "v3_2_fold_robust":
         note = (
             "Best は "
             "(feasible, -violation, stage_b_pass, stage_c_feasible, "

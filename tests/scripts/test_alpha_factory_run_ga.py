@@ -592,16 +592,17 @@ def test_smoke_run_holdout_ok(
     # best.fitness は Decimal 互換 (有限値)
     Decimal(summary["best"]["fitness"])
     assert isinstance(summary["best"]["fitness_finite"], bool)
-    # cycle 4: selection_score_schema v3_2_fold_robust (9 要素)
-    # 8 要素目 fold_robust_int (cycle 4 新規、 fitness_pen より上位)
-    assert summary["best"]["selection_score_schema"] == "v3_2_fold_robust"
-    assert len(summary["best"]["selection_score"]) == 9
-    # 1 要素目 feasible_int, 3 要素目 stage_b_pass_int, 4 要素目 stage_c_feasible_int
+    # cycle 5: selection_score_schema v3_3_stage_b_feasible_priority (10 要素)
+    # 3 要素目 stage_b_pass_and_feasible_int (cycle 5 新規、 最優先要素 3 に昇格)
+    # 9 要素目 fold_robust_int (cycle 4、 fitness_pen より上位)
+    assert summary["best"]["selection_score_schema"] == "v3_3_stage_b_feasible_priority"
+    assert len(summary["best"]["selection_score"]) == 10
+    # 1 要素目 feasible_int, 3 要素目 stage_b_pass_and_feasible_int, 4 要素目 stage_b_pass_int
     assert summary["best"]["selection_score"][0] in (0, 1)
-    assert summary["best"]["selection_score"][2] in (0, 1)
-    assert summary["best"]["selection_score"][3] in (0, 1)
-    # 8 要素目 fold_robust_int (cycle 4 新規)
-    assert summary["best"]["selection_score"][7] in (0, 1)
+    assert summary["best"]["selection_score"][2] in (0, 1)  # stage_b_pass_and_feasible
+    assert summary["best"]["selection_score"][3] in (0, 1)  # stage_b_pass
+    # 9 要素目 fold_robust_int (cycle 4)
+    assert summary["best"]["selection_score"][8] in (0, 1)
     # best.feasible / violation_magnitude / stage_c_feasible キーが存在
     assert isinstance(summary["best"]["feasible"], bool)
     assert isinstance(summary["best"]["violation_magnitude"], float)
