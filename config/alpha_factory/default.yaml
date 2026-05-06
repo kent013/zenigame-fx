@@ -129,7 +129,11 @@ stage_gate:
     # 閾値 (sharpe_min/positive_fold_min/dsr_min/fold_trade_count_min) は不変、
     # 変えるのは fold 計算の幾何前提のみ (Principled Parametric)。
     wf_train_days: 20
-    wf_test_days: 10
+    # @cycle_12: 10→14 で fold 評価期間延長 (trade-burst noise vs robust signal の区別精度向上)。
+    # 短期集中 trading 個体 (cycle 4 で出た Stage B pass 6 個体は全員 trade<50) が
+    # noise positive で fold pass している可能性を、 各 fold の評価期間を 1.4 倍にして
+    # 統計的に弾く。 fold 数は 11→8 に減るが wf_min_safe_folds=5 を満たす。
+    wf_test_days: 14
     wf_step_days: 5
     wf_embargo_days: 1
     # T042 Phase 0: trade-level スケール (per-fold trade_sharpe_raw との比較)。
