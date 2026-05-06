@@ -38,6 +38,10 @@ ga:
   tournament_size: 3
   elite_count: 2
   max_depth: 4
+  # GA primitive 構文木の clause 数上限。 1 = single clause、2 以上で複合 clause 許容。
+  # @baseline_for_20run: max_clause=2 (前回 1 → 2 へ拡張、 2026-05-06 ユーザー指示)。
+  # @ref: src/ga/random_gen.py / src/alpha_factory/config.py:141
+  max_clause: 2
   fitness_metric: sharpe
   # T052: GA 評価並列ワーカー数 (1 = sequential, 2 以上で multiprocessing.Pool)。
   # @why: GA 評価の wall-time 短縮 (副次目標)。L1 selection / L2 row-order
