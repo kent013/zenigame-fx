@@ -442,6 +442,16 @@ class StageGateConfig:
     # devnotes/20260506-1622-fx-improve-c4/detailed-design.md
     fold_robust_threshold: float = 0.4
 
+    # cycle 6 (improve-cycle): fitness_pen に trade_count adequacy penalty 追加。
+    # GA 探索を「entry_count_min (= 50) 以上の取引を行う」 方向にシフト。
+    # penalty = gamma * max(0, entry_count_min - trade_count) / entry_count_min
+    #        ∈ [0, gamma] (trade_count >= entry_count_min で 0)
+    # default 0.05 = 既存 alpha_a (size_norm penalty) と同オーダー
+    # H8 (Stage B + feasible 個体不在) への構造的介入、 selection_score の
+    # cycle 4/5 拡張と直交。
+    # 詳細: devnotes/20260506-2015-fx-improve-c6/detailed-design.md
+    stage_a_trade_count_penalty_gamma: float = 0.05
+
     # T054: Stage B fold 専用の trade-level Sharpe sample-size guard。
     # @why: Stage A は 60-day window で trade_count_min_for_sharpe=30 を要求
     # するが、Stage B fold は wf_test_days=10 と短い期間で同じ 30 trade
@@ -849,7 +859,23 @@ def evaluate_stage_a(
     else:
         assert size_norm_val is not None  # type narrowing
         fitness_raw = sharpe_raw
-        fitness_pen = fitness_raw - stage_config.stage_a_alpha * size_norm_val
+        # cycle 6: trade_count adequacy penalty を追加
+        # GA 探索を「entry_count_min 以上の取引」 方向にシフト
+        # H8 (Stage B + feasible 個体不在) への構造的介入
+        entry_count_min_lc = int(stage_config.live_criteria["trade_count_min"])
+        if trade_count < entry_count_min_lc:
+            trade_count_penalty = (
+                stage_config.stage_a_trade_count_penalty_gamma
+                * (entry_count_min_lc - trade_count)
+                / entry_count_min_lc
+            )
+        else:
+            trade_count_penalty = 0.0
+        fitness_pen = (
+            fitness_raw
+            - stage_config.stage_a_alpha * size_norm_val
+            - trade_count_penalty
+        )
         if fitness_pen <= stage_config.stage_a_threshold:
             reasons.append("below_threshold")
 
@@ -866,6 +892,7 @@ def evaluate_stage_a(
             "size_norm": size_norm_val,
             "fitness_pen": fitness_pen,
             "alpha_a": stage_config.stage_a_alpha,
+            "gamma_trade_count": stage_config.stage_a_trade_count_penalty_gamma,
             "threshold": stage_config.stage_a_threshold,
             "trade_count": trade_count,
             # T-sharpe Phase 1A: payload key を "sharpe_raw" → "trade_sharpe_raw"

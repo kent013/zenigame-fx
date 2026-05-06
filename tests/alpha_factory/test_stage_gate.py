@@ -485,10 +485,22 @@ class TestStageA:
         # CORE: fitness_pen は complex < simple (penalty 反映)
         assert pc["fitness_pen"] < ps["fitness_pen"]
 
-        # 数値整合: fitness_pen = fitness_raw - alpha * size_norm
+        # 数値整合: fitness_pen = fitness_raw - alpha * size_norm - gamma * trade_count_underrun
+        # cycle 6: trade_count adequacy penalty を追加
         alpha = stage_cfg.stage_a_alpha
-        expected_s = ps["fitness_raw"] - alpha * ps["size_norm"]
-        expected_c = pc["fitness_raw"] - alpha * pc["size_norm"]
+        gamma = stage_cfg.stage_a_trade_count_penalty_gamma
+        entry_min = int(stage_cfg.live_criteria["trade_count_min"])
+
+        def _expected_pen(p: dict) -> float:
+            tc = p["trade_count"]
+            tc_pen = (
+                gamma * (entry_min - tc) / entry_min
+                if tc < entry_min else 0.0
+            )
+            return p["fitness_raw"] - alpha * p["size_norm"] - tc_pen
+
+        expected_s = _expected_pen(ps)
+        expected_c = _expected_pen(pc)
         assert abs(ps["fitness_pen"] - expected_s) < 1e-9
         assert abs(pc["fitness_pen"] - expected_c) < 1e-9
 
