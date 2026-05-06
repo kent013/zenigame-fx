@@ -434,6 +434,14 @@ class StageGateConfig:
     # config から compute_metrics へ伝搬する canonical 値
     trade_count_min_for_sharpe: int = 30
 
+    # cycle 4 (improve-cycle): GA selection の fold_robust 判定閾値。
+    # IndividualCacheEntry.selection_score 8→9 要素化で fold robustness を
+    # fitness_pen より上位の lexicographic 要素として組み込む。
+    # default 0.4 = Stage B 通過閾値 (stage_b_positive_fold_min=0.6) の 67%、
+    # 中間ヘッドルーム (過厳格回避)。 詳細:
+    # devnotes/20260506-1622-fx-improve-c4/detailed-design.md
+    fold_robust_threshold: float = 0.4
+
     # T054: Stage B fold 専用の trade-level Sharpe sample-size guard。
     # @why: Stage A は 60-day window で trade_count_min_for_sharpe=30 を要求
     # するが、Stage B fold は wf_test_days=10 と短い期間で同じ 30 trade

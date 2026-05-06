@@ -769,7 +769,16 @@ def main(argv: list[str] | None = None) -> int:
     # archive Top-5 個体一覧 (Best とは別物)
     lines.append("## Archive Top-5 個体一覧")
     lines.append("")
-    if schema == "v3_1_stage_b_priority":
+    if schema == "v3_2_fold_robust":
+        note = (
+            "Best は "
+            "(feasible, -violation, stage_b_pass, stage_c_feasible, "
+            "stage_c_pass, stage_b_pass, stage_a_pass, fold_robust, fitness_pen) "
+            "の辞書式 (v3.2_fold_robust, cycle 4 improve-cycle)。"
+            "fold_robust = (positive_fold_ratio_effective >= fold_robust_threshold) で、"
+            "GA selection 圧を Stage B 閾値到達可能な fold robust 個体に向ける。"
+        )
+    elif schema == "v3_1_stage_b_priority":
         note = (
             "Best は "
             "(feasible, -violation, stage_b_pass, stage_c_feasible, "

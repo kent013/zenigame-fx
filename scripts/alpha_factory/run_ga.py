@@ -176,15 +176,22 @@ class IndividualCacheEntry:
     violation_magnitude: float = 0.0
     # T045
     stage_c_feasible: bool = True
+    # cycle 4 (improve-cycle): pfre >= fold_robust_threshold (default 0.4) を
+    # 満たすか。 selection_score 9-tuple で fitness_pen より上位の lex 要素。
+    # 詳細: devnotes/20260506-1622-fx-improve-c4/detailed-design.md
+    fold_robust: bool = False
 
     @property
-    def selection_score(self) -> tuple[int, float, int, int, int, int, int, float]:
-        """Lexicographic 8-tuple v3.1:
-        ``(feasible, -violation, stage_b_pass, stage_c_feasible, C_pass, B_pass, A_pass, fitness_pen)``.
+    def selection_score(self) -> tuple[int, float, int, int, int, int, int, int, float]:
+        """Lexicographic 9-tuple v3.2 (cycle 4 で 8→9 要素化):
+        ``(feasible, -violation, stage_b_pass, stage_c_feasible, C_pass, B_pass, A_pass, fold_robust, fitness_pen)``.
+
+        cycle 4: ``fold_robust`` (8 要素目) を fitness_pen より上位に挿入。
+        GA tournament + elite 両方が ``_selection_key`` 経由で本 score を使うため、
+        探索圧を Stage B 閾値到達可能な fold robust 個体に向ける構造的介入。
 
         T046: stage_b_pass を stage_c_feasible より前に置き「Stage B 整合 + 単期間 PnL/Sharpe 正」
-        の両立を構造的に保証。Run-21 で T045 単独 (v3) が Stage B passes を 834→0 に退行させた
-        副作用を解消する。
+        の両立を構造的に保証。
 
         非有限値 (NaN/inf) は順序比較を破壊するため finite guard で正規化:
         - violation: 非有限なら ``+inf`` 扱い (= ``-inf`` を要素 2 に置く → 最下位)
@@ -202,6 +209,7 @@ class IndividualCacheEntry:
             int(self.stage_c_pass),
             int(self.stage_b_pass),
             int(self.stage_a_pass),
+            int(self.fold_robust),  # cycle 4: fold_robust を fitness_pen より上位に
             fp_norm,
         )
 
@@ -647,6 +655,7 @@ def _update_cache(
     generation: int,
     feasibility_cfg: GAFeasibilityConfig,
     stage_c_feasibility_apply: bool = True,
+    fold_robust_threshold: float = 0.4,
 ) -> None:
     """archive の row から fitness_pen / stage pass / feasibility を取り出し cache 更新.
 
@@ -708,6 +717,17 @@ def _update_cache(
             )
         else:
             stage_c_feasible = True
+        # cycle 4: fold_robust 判定 (pfre >= fold_robust_threshold)
+        pfre_raw = row.get("positive_fold_ratio_effective")
+        try:
+            pfre_val = float(pfre_raw) if pfre_raw is not None else None
+        except (TypeError, ValueError):
+            pfre_val = None
+        fold_robust = bool(
+            pfre_val is not None
+            and math.isfinite(pfre_val)
+            and pfre_val >= fold_robust_threshold
+        )
         cache[g.name] = IndividualCacheEntry(
             generation=generation,
             fitness_pen=fp,
@@ -717,6 +737,7 @@ def _update_cache(
             feasible=feasible,
             violation_magnitude=violation,
             stage_c_feasible=stage_c_feasible,
+            fold_robust=fold_robust,
         )
 
 
@@ -1020,7 +1041,7 @@ def _write_reports(
                 int(best_entry.stage_a_pass),
                 float(best_fitness_val),
             ],
-            "selection_score_schema": "v3_1_stage_b_priority",
+            "selection_score_schema": "v3_2_fold_robust",
             "metrics": best_metrics,
         },
         "stage_b": {
@@ -1668,6 +1689,7 @@ def main(argv: list[str] | None = None) -> int:
                 current_generation,
                 cfg.ga.feasibility,
                 stage_c_feasibility_apply=cfg.stage_gate.stage_c_feasibility_apply,
+                fold_robust_threshold=cfg.stage_gate.fold_robust_threshold,
             )
 
             best_fp = max(
