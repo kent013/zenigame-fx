@@ -435,13 +435,13 @@ class StageGateConfig:
     trade_count_min_for_sharpe: int = 30
 
     # cycle 4 (improve-cycle): GA selection の fold_robust 判定閾値。
-    # cycle 7-8 evolution:
+    # cycle 7-9 evolution:
     # - 0.4 (cycle 4): Stage B pass 6 (trade<50)、 best fp 0.199
-    # - 0.55 (cycle 7): Stage B pass 0、 best fp 0.252 (+27%)
-    # - 0.5 (cycle 8): 中間値で両者 balance を探る
-    # 詳細: devnotes/20260506-1622-fx-improve-c4/ + 20260506-2155-fx-improve-c7/
-    #       + 20260506-2336-fx-improve-c8/
-    fold_robust_threshold: float = 0.5
+    # - 0.55 (cycle 7): Stage B pass 0、 best fp 0.252 (+27%、 sweet spot)
+    # - 0.5 (cycle 8): 中間値で両者下落 (best fp 0.160、 Stage B pass 1)
+    # - 0.55 (cycle 9): sweet spot に戻す + max_clause 2→3 で探索空間拡張
+    # 詳細: devnotes/20260506-1622-fx-improve-c4/ + 20260507-0110-fx-improve-c9/
+    fold_robust_threshold: float = 0.55
 
     # cycle 6 (improve-cycle): fitness_pen に trade_count adequacy penalty 追加。
     # GA 探索を「entry_count_min (= 50) 以上の取引を行う」 方向にシフト。
