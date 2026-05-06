@@ -75,6 +75,10 @@ from src.alpha_factory.diagnostics_sidecar import (
     sidecar_relative_path,
     write_stage_a_provenance,
 )
+from src.alpha_factory.diagnostics_stage_a_top_fold import (
+    stage_a_top_fold_relative_path,
+    write_stage_a_top_fold,
+)
 from src.alpha_factory.epoch_manager import EpochWindow, make_epoch_id
 from src.alpha_factory.observability import (
     build_default_archive_churn_metric,
@@ -864,6 +868,7 @@ def _write_reports(
     now: datetime,
     run_context: RunContext,
     diagnostics_sidecar_path: Path | None = None,
+    top_fold_sidecar_path: Path | None = None,
     peak_rss_per_generation: list[dict[str, float]] | None = None,
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1060,6 +1065,14 @@ def _write_reports(
             )
         except ValueError:
             summary["diagnostics_sidecar"] = str(diagnostics_sidecar_path)
+    # cycle 3: Stage A top-fold robustness sidecar も同じ契約で配線
+    if top_fold_sidecar_path is not None:
+        try:
+            summary["diagnostics_stage_a_top_fold"] = str(
+                top_fold_sidecar_path.relative_to(REPO_ROOT)
+            )
+        except ValueError:
+            summary["diagnostics_stage_a_top_fold"] = str(top_fold_sidecar_path)
     # T058 PR 5: passive validation (LOG_ONLY default で warning のみ、
     # FAIL_CLOSED で必須 field 欠落 raise)
     assert_run_report_v2(summary, mode=cfg.schema_contract.to_mode())
@@ -1731,6 +1744,20 @@ def main(argv: list[str] | None = None) -> int:
             mode=cfg.schema_contract.to_mode(),
         )
 
+    # cycle 3 (improve-cycle): Stage A 上位 20% fold robustness sidecar 追加。
+    # archive Parquet を入力に、 generation 別 集計を生成し、
+    # reports/run-reports/run-{N}/diagnostics/stage_a_top_fold_robustness.parquet に出力。
+    # fail-open 一貫化 (read+build+write は write_stage_a_top_fold 内部、 例外は関数内で warning + None)。
+    # 詳細: devnotes/20260506-1345-fx-improve-c3/detailed-design.md § C1
+    top_fold_path_written: Path | None = None
+    if not args.no_report and archive_path is not None and archive_path.exists():
+        top_fold_path_written = write_stage_a_top_fold(
+            archive_path,
+            REPO_ROOT / stage_a_top_fold_relative_path(run_number),
+            run_id=run_id,
+            dataset_epoch_id=run_context.dataset_epoch_id,
+        )
+
     if not args.no_report:
         _write_reports(
             run_dir=run_dir,
@@ -1751,6 +1778,7 @@ def main(argv: list[str] | None = None) -> int:
             now=now,
             run_context=run_context,
             diagnostics_sidecar_path=sidecar_path_written,
+            top_fold_sidecar_path=top_fold_path_written,
             peak_rss_per_generation=peak_rss_per_generation,
         )
     else:
