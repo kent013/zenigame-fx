@@ -129,9 +129,12 @@ stage_gate:
     # 閾値 (sharpe_min/positive_fold_min/dsr_min/fold_trade_count_min) は不変、
     # 変えるのは fold 計算の幾何前提のみ (Principled Parametric)。
     wf_train_days: 20
-    # @cycle_12: 10→14 で Stage B pass 6→33 (5.5x)、 g47_i2 で唯一の positive PnL Stage B pass。
-    # @cycle_13: 14→18 で更に robust 化、 fold 期間 1.8 倍化、 noise 個体さらに排除を試行。
-    wf_test_days: 18
+    # @cycle_12-14: wf_test_days sweep
+    # 10 (orig): Stage B pass 6
+    # 14 (cycle12): Stage B pass 33 (5.5x)、 best fp 0.122
+    # 18 (cycle13): Stage B pass 88 (2.7x)、 best fp 0.220
+    # 24 (cycle14): trend 確認、 RUN time 大幅増加リスク
+    wf_test_days: 24
     wf_step_days: 5
     wf_embargo_days: 1
     # T042 Phase 0: trade-level スケール (per-fold trade_sharpe_raw との比較)。
