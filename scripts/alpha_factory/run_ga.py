@@ -1039,9 +1039,11 @@ def _write_reports(
                 int(best_entry.stage_c_pass),
                 int(best_entry.stage_b_pass),
                 int(best_entry.stage_a_pass),
+                int(best_entry.fold_robust),  # cycle 4: v3_2_fold_robust
                 float(best_fitness_val),
             ],
             "selection_score_schema": "v3_2_fold_robust",
+            "fold_robust": bool(best_entry.fold_robust),  # cycle 4 best 透明性
             "metrics": best_metrics,
         },
         "stage_b": {
