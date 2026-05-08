@@ -86,8 +86,19 @@ stage_gate:
   stage_a:
     threshold: 0.0          # trade-level (calibrate-gate 管理)
   stage_b:
-    median_oos_sharpe_min: 0.05   # trade-level (T042 で 0.20 → 0.05 に再校正)
+    median_oos_sharpe_min: 0.025  # trade-level (T091 で 0.05 → 0.025 に noise-floor 整合化)
 ```
+
+### T091 noise-floor 整合化の根拠 (Lo 2002 SE 公式 heuristic)
+
+- per-fold Sharpe SE ≈ √((1 + 0.5×SR²)/N)、 N=stage_b_fold_trade_count_min=10 で SE ≈ 0.32
+- 10-fold median SE ≈ 0.32/√10 ≈ 0.10 (独立 fold 仮定)
+- 真値 SR=0.05 個体の median 推定値 >=0.025 確率: z=(0.025-0.05)/0.10=-0.25 → P=Φ(0.25)≈0.60
+- 0.05 維持時の検出力: 50% (median == true value 期待)
+- → 0.025 で「真値 0.05 個体の検出力 50% → 60% への保守的拡張」 (Lo 近似 heuristic)
+- 緩和ではなく noise-floor 整合化 (Stage B 内部閾値、 live_criteria.sharpe_min は不変)
+
+詳細: `devnotes/20260508-1203-stage-b-gate-redesign/conceptual-design.md` (v2 APPROVED at Codex Round 3)
 
 ## replay スクリプト
 
@@ -105,3 +116,4 @@ uv run python scripts/alpha_factory/replay_sharpe_rescale.py \
 ## 変更履歴
 
 - 2026-04-26: T042 Phase 0 初期実装。Codex Round 2 §3-1 で換算式合意（Lo 2002）。stage_b.median_oos_sharpe_min を v1 bar-level 想定 0.20 → trade-level 経験値 0.05 に再校正。Stage C lc.sharpe を annualized 比較に切替。
+- 2026-05-08: T091 cycle_phase1 (Stage B gate redesign Phase 1)。 stage_b.median_oos_sharpe_min を 0.05 → 0.025 に noise-floor 整合化 (Lo 2002 SE 公式 heuristic、 真値 SR=0.05 検出力 50%→60%)。 緩和ではなく検出力整合化 (Stage B 内部閾値、 live_criteria.sharpe_min は不変)。 詳細: devnotes/20260508-1203-stage-b-gate-redesign/。

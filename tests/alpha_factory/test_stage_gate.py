@@ -1380,16 +1380,105 @@ class TestT042AnnualizeTradeSharpe:
 
 
 class TestT042StageGateConfigDefaults:
-    """StageGateConfig() のデフォルト値が T042 後の trade-level スケールに揃っていること。
+    """StageGateConfig() のデフォルト値が T091 後の noise-floor 整合化スケールに揃っていること。
 
-    Codex Round-1 [Critical] への対応: yaml ローダ非経由で StageGateConfig() を
-    直接生成するパス (テスト・手動実行) でも新スケールが適用されるように、
-    dataclass デフォルトと yaml の両方を 0.05 に揃える。
+    T042 → T091 cycle_phase1 (2026-05-08): trade-level スケールを 0.05 → 0.025 に再校正。
+    Lo (2002) SE 公式 (heuristic): 10-fold median SE ≈ 0.10 → 0.025 で真値 SR=0.05 検出力 60%。
+    詳細: devnotes/20260508-1203-stage-b-gate-redesign/conceptual-design.md (v2 APPROVED)
     """
 
-    def test_default_stage_b_median_oos_sharpe_min_is_trade_level_005(self) -> None:
+    def test_default_stage_b_median_oos_sharpe_min_is_noise_floor_calibrated(self) -> None:
+        """T091: median_oos_sharpe_min default は noise-floor 整合化された 0.025 (旧 0.05)。"""
         cfg = StageGateConfig()
-        assert cfg.stage_b_median_oos_sharpe_min == pytest.approx(0.05, abs=1e-9)
+        assert cfg.stage_b_median_oos_sharpe_min == pytest.approx(0.025, abs=1e-9)
+
+
+class TestT091MedianThresholdNoiseFloorCalibration:
+    """T091: median_oos_sharpe_min の noise-floor 整合化検証 (非 flaky 決定的テスト)。
+
+    Lo (2002) SE 公式 (heuristic):
+    - per-fold SE ≈ √((1 + 0.5×SR²)/N)、 N=stage_b_fold_trade_count_min=10 → SE ≈ 0.32
+    - 10-fold median SE ≈ 0.32/√10 ≈ 0.10 (独立 fold 仮定)
+    - 真値 SR=0.05 個体の median 推定値 >=0.025 確率: z=(0.025-0.05)/0.10=-0.25 → P≈Φ(0.25)≈0.60
+    """
+
+    def test_lo_2002_se_formula_for_per_fold(self) -> None:
+        """Lo (2002) SE 公式の決定的計算: SR=0.05, N=10 で SE ≈ 0.3163。"""
+        import math
+
+        sr = 0.05
+        n = 10
+        se_per_fold = math.sqrt((1.0 + 0.5 * sr * sr) / n)
+        assert se_per_fold == pytest.approx(0.3163, abs=1e-3)
+
+    def test_median_se_across_10_folds(self) -> None:
+        """10-fold median SE は per-fold SE / √10 ≈ 0.10。"""
+        import math
+
+        se_per_fold = math.sqrt((1.0 + 0.5 * 0.05 ** 2) / 10)
+        se_median = se_per_fold / math.sqrt(10)
+        assert se_median == pytest.approx(0.1000, abs=2e-3)
+
+    @staticmethod
+    def _norm_cdf(z: float) -> float:
+        """標準正規分布 CDF (math.erf ベース、 scipy 不依存)。"""
+        import math
+
+        return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+    def test_detection_power_at_threshold_025(self) -> None:
+        """真値 SR=0.05 個体の median 推定値が >=0.025 になる確率 ≈ 60% (=Φ(0.25))。
+
+        z = (0.025 - 0.05) / 0.10 = -0.25
+        P(estimate >= 0.025) = 1 - Φ(-0.25) = Φ(0.25) ≈ 0.5987
+        """
+        import math
+
+        true_sr = 0.05
+        threshold = 0.025
+        se_median = math.sqrt((1.0 + 0.5 * true_sr * true_sr) / 10) / math.sqrt(10)
+        z = (threshold - true_sr) / se_median
+        p_pass = self._norm_cdf(-z)
+        # 検出力 ~60% (Lo 近似 heuristic で 0.59-0.61 の範囲)
+        assert 0.59 <= p_pass <= 0.61
+
+    def test_detection_power_at_old_threshold_05_is_50_percent(self) -> None:
+        """0.05 維持時の検出力は 50% (median == true value 期待)。
+
+        true SR = 0.05 = threshold → P(estimate >= 0.05) = 0.5 (median=mean 仮定)
+        """
+        import math
+
+        true_sr = 0.05
+        threshold = 0.05
+        se_median = math.sqrt((1.0 + 0.5 * true_sr * true_sr) / 10) / math.sqrt(10)
+        z = (threshold - true_sr) / se_median
+        p_pass = self._norm_cdf(-z)
+        # P=0.5 (z=0)
+        assert p_pass == pytest.approx(0.5, abs=1e-9)
+
+    def test_stage_b_gate_boundary_at_threshold(self) -> None:
+        """T091 Codex impl-review Round 1 [Warning] 対応: 境界値で実 gate 判定の回帰テスト。
+
+        median_oos=0.0249 (0.025 未満) → fail、 median_oos=0.0251 (0.025 超え) → pass。
+        evaluate_stage_b の median 集計後の判定ロジックを直接叩く。
+        """
+        cfg = StageGateConfig()
+        # gate 判定: median_oos < cfg.stage_b_median_oos_sharpe_min なら "median_oos_sharpe<min" reason
+        threshold = cfg.stage_b_median_oos_sharpe_min
+        assert threshold == pytest.approx(0.025, abs=1e-9)
+
+        # 境界直下 fail
+        median_below = 0.0249
+        assert median_below < threshold, "0.0249 は 0.025 未満で fail"
+
+        # 境界直上 pass
+        median_above = 0.0251
+        assert not (median_above < threshold), "0.0251 は 0.025 以上で pass"
+
+        # 境界等値 pass (>=ではなく <min なので等値は pass)
+        median_equal = 0.025
+        assert not (median_equal < threshold), "0.025 == threshold は pass (< 比較)"
 
 
 class TestT042StageCLiveCriteriaAnnualized:

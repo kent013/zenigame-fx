@@ -397,11 +397,13 @@ class StageGateConfig:
     wf_test_days: int = 20
     wf_step_days: int = 20
     wf_embargo_days: int = 1
-    # T042 Phase 0: trade-level スケール (per-fold trade_sharpe_raw との比較)。
-    # 旧 0.20 は v1 bar-level 想定の legacy 値。Run 14-16 archive replay
-    # (reports/sharpe-rescale/) で trade-level 分布が 0.05〜0.19 中央域だったため
-    # 0.05 へ再校正した。詳細: docs/alpha_factory/sharpe-rescale.md
-    stage_b_median_oos_sharpe_min: float = 0.05
+    # T042 Phase 0 → T091 cycle_phase1 (2026-05-08): trade-level スケール。
+    # 旧 0.20 (bar-level 想定) → 0.05 (Run 14-16 replay 校正) → 0.025 (noise-floor 整合化)。
+    # Lo (2002) SE 公式 (heuristic): per-fold SE ≈ √((1+0.5×SR²)/N)、 N=10 で SE ≈ 0.32、
+    # 10-fold median SE ≈ 0.10。 0.025 で真値 SR=0.05 個体の検出力 60% (=Φ(0.25)) を確保。
+    # = 緩和ではなく noise-floor 整合化 (Stage B 内部閾値、 live_criteria.sharpe_min は不変)。
+    # 詳細: devnotes/20260508-1203-stage-b-gate-redesign/conceptual-design.md (v2 APPROVED)
+    stage_b_median_oos_sharpe_min: float = 0.025
     stage_b_positive_fold_min: float = 0.60
     stage_b_dsr_min: float = 0.0  # monitor only (Phase 4 で hard 化)
     # T044: pre-flight feasibility minimum
