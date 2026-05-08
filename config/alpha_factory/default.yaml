@@ -143,9 +143,17 @@ stage_gate:
     # trade-level 値を使う (Stage A threshold と同じスケール)。
     # 旧 0.20 は v1 bar-level 想定の legacy 値で、Run 14-16 replay
     # (reports/sharpe-rescale/) では trade-level median 0.05〜0.19。
-    # 0.05 で 50%程度 fold が pass する想定で出発、calibrate-gate では
-    # 制御していないため Phase 1 の per-fold 分布測定に基づき再校正予定。
-    median_oos_sharpe_min: 0.05  # trade-level (T042 再校正)
+    # @T091 cycle_phase1 (2026-05-08): 0.05 → 0.025 (Stage B gate redesign Phase 1)。
+    # Lo (2002) "The Statistics of Sharpe Ratios" SE 公式に基づく検出力 heuristic:
+    #   per-fold SE ≈ √((1 + 0.5×SR²)/N), N=stage_b_fold_trade_count_min=10 → SE ≈ 0.32
+    #   10-fold median SE ≈ 0.32/√10 ≈ 0.10 (Lo 近似 / 独立 fold 仮定)
+    #   真値 SR=0.05 個体の median 推定値 >=0.025 確率: z=(0.025-0.05)/0.10=-0.25 → P≈Φ(0.25)≈0.60
+    #   = 「真値 0.05 個体の検出力 50% → 60% への保守的拡張」(Lo 近似 heuristic)
+    # 緩和ではなく noise-floor 整合化 (禁止事項 4 抵触なし):
+    #   - Stage B 内部閾値 (live_criteria.sharpe_min は不変)
+    #   - run-52 archive 直読で「mission 適格 7 個体は median_oos_sharpe<0.05 で blocked」 verified
+    # 詳細: devnotes/20260508-1203-stage-b-gate-redesign/conceptual-design.md (v2 APPROVED)
+    median_oos_sharpe_min: 0.025  # trade-level (T091 noise-floor 整合化)
     positive_fold_min: 0.60
     dsr_min: 0.0                # monitor_only (Phase 4 で hard 化)
     # T044: pre-flight feasibility (LaneManager で max_folds < min なら全 lane 全個体 skip)
