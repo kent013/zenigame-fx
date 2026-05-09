@@ -8,8 +8,18 @@
 dataset:
   instrument: EUR_JPY
   # ISO 8601 (UTC) — バックテスト対象期間
-  start: "2025-10-01T00:00:00Z"
-  end: "2026-04-01T00:00:00Z"
+  # @cycle_4 (2026-05-09): dataset 範囲見直しで Stage C holdout 60日を構造的に確保。
+  # dataset.end を DB 終端 (2026-04-21) から 60日強遡る位置に設定し、
+  # smoke-mode opt-in (--allow-holdout-short + ZENIGAME_FX_SMOKE_TEST=1) なしで
+  # stage_partition_guard B-2 が pass する設計に修復。 同時に dataset.start は
+  # preflight extended_start (= start - 18ヶ月) が DB min (2023-04-23) より十分後ろになる
+  # 位置に設定 (extended_start=2023-10-09)。 Stage B IS=8.7ヶ月 / fold=46、 holdout span=61日。
+  # 設計: Stage A=60日 (2025-12-21〜2026-02-19) / Stage B IS=2025-04-01〜2025-12-21 (約 8.7 ヶ月) /
+  # Stage C holdout=2026-02-19〜2026-04-21 (約 61 日)。 preflight pair coverage 推定 ≒ 85%
+  # (DB EUR_JPY/EUR_USD/USD_JPY 全 1.10M+ rows、 50% 閾値余裕でクリア見込み)。
+  # @ref: devnotes/20260509-1628-fx-improve/improvement-plan.md / detailed-design.md C1
+  start: "2025-04-01T00:00:00Z"
+  end: "2026-02-19T00:00:00Z"
 
 backtest:
   initial_cash: "1000000"
