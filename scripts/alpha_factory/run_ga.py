@@ -372,6 +372,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "production では config strict_aux_required=true を維持し本 flag は外す。"
         ),
     )
+    # T091 cycle_phase1 段階 3 (2026-05-09): holdout 長不整合 escape hatch
+    p.add_argument(
+        "--allow-holdout-short",
+        action="store_true",
+        help=(
+            "stage_partition_guard の holdout 長検証 (config holdout_days vs "
+            "実態 calendar span) で fail-closed せず WARN log のみで継続する "
+            "(smoke test 専用、 二重 opt-in 必須: 本 flag AND env "
+            "ZENIGAME_FX_SMOKE_TEST=1 の両方指定時のみ有効)。 production では "
+            "本 flag を外し dataset 期間を延長すること。"
+        ),
+    )
     args = p.parse_args(argv)
     # alias 統合 (両方指定時は同値でなければエラー)
     if args.max_workers is None and args.workers_alias is not None:
@@ -1476,15 +1488,35 @@ def main(argv: list[str] | None = None) -> int:
     # T087: Stage Partition Integrity Guard (fail-closed)。
     # aux_preflight より前に呼ぶ理由: bars 区間が壊れていれば aux 評価は意味がない。
     # 違反時は StagePartitionInputError / StagePartitionLeakError で起動停止。
+    # T091 cycle_phase1 段階 3 (2026-05-09): B-2 holdout 長検証 + 二重 opt-in escape hatch。
+    # holdout_short_override = (CLI --allow-holdout-short) AND (env ZENIGAME_FX_SMOKE_TEST=1)
+    # 両方 set でない場合 holdout 長違反は fail-closed (production 誤発動防止)。
+    smoke_test_mode = os.environ.get("ZENIGAME_FX_SMOKE_TEST") == "1"
+    cli_allow_short = bool(getattr(args, "allow_holdout_short", False))
+    if cli_allow_short and not smoke_test_mode:
+        raise SystemExit(
+            "--allow-holdout-short requires ZENIGAME_FX_SMOKE_TEST=1 env var. "
+            "This double-opt-in prevents accidental production override."
+        )
+    holdout_short_override = cli_allow_short and smoke_test_mode
+    if holdout_short_override:
+        logger.warning(
+            "run_ga.holdout_short_override_enabled",
+            note="smoke test mode: holdout 長違反は WARN のみで継続する",
+        )
     validate_stage_partition(
         bundle.bars_stage_a,
         bundle.bars_stage_b,
         bundle.bars_holdout,
+        expected_holdout_days=cfg.stage_gate.stage_c_holdout_days,
+        allow_holdout_short=holdout_short_override,
     )
     logger.info(
         "run_ga.stage_partition_guard.passed",
         instrument=cfg.dataset.instrument,
         stage_gate_version=STAGE_GATE_VERSION,
+        expected_holdout_days=cfg.stage_gate.stage_c_holdout_days,
+        holdout_short_override=holdout_short_override,
     )
 
     # T058 PR 5: archive に RunContext + enforcement_mode を注入

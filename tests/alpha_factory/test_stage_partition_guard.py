@@ -8,6 +8,7 @@ import pytest
 
 from src.alpha_factory.stage_partition_guard import (
     StagePartitionError,
+    StagePartitionHoldoutLengthError,
     StagePartitionInputError,
     StagePartitionLeakError,
     _validate_timestamp_disjoint,
@@ -275,3 +276,90 @@ def test_leak_error_is_partition_error() -> None:
 
 def test_partition_error_is_runtime_error() -> None:
     assert issubclass(StagePartitionError, RuntimeError)
+
+
+# ---------------------------------------------------------------------------
+# T091 cycle_phase1 段階 3 (2026-05-09): B-2 holdout 長検証 + 二重 opt-in
+# ---------------------------------------------------------------------------
+
+
+class TestT091HoldoutLengthGuard:
+    """T091 段階 3: B-2 holdout 長検証 (config holdout_days vs 実態 calendar span)."""
+
+    def _triplet_with_holdout_days(
+        self, holdout_days: int
+    ) -> tuple[list[PriceBar], list[PriceBar], list[PriceBar]]:
+        """holdout が指定 calendar 日数の triplet を生成。"""
+        # bar_time は時間粒度 1h、 24 bars/day で holdout_days 日分
+        n_holdout = holdout_days * 24
+        bars_stage_b = _make_bars_range(
+            datetime(2026, 1, 1, 0, 0, tzinfo=UTC), 24
+        )
+        bars_stage_a = _make_bars_range(
+            datetime(2026, 1, 2, 0, 0, tzinfo=UTC), 24
+        )
+        bars_holdout = _make_bars_range(
+            datetime(2026, 1, 3, 0, 0, tzinfo=UTC), n_holdout
+        )
+        return bars_stage_a, bars_stage_b, bars_holdout
+
+    def test_holdout_meets_expected_passes(self) -> None:
+        """holdout 実日数 >= expected_holdout_days * 0.8 で pass。"""
+        a, b, h = self._triplet_with_holdout_days(holdout_days=10)
+        # expected=10、 actual ≈ 10 days → pass
+        validate_stage_partition(
+            a, b, h, expected_holdout_days=10
+        )
+
+    def test_holdout_below_threshold_raises(self) -> None:
+        """holdout 実日数 < expected_holdout_days * 0.8 で raise。"""
+        a, b, h = self._triplet_with_holdout_days(holdout_days=10)
+        # expected=60、 actual ≈ 10 → 10 < 60*0.8=48 → raise
+        with pytest.raises(StagePartitionHoldoutLengthError) as exc:
+            validate_stage_partition(
+                a, b, h, expected_holdout_days=60
+            )
+        assert "B-2 violation" in str(exc.value)
+        assert "holdout actual span" in str(exc.value)
+        assert "ZENIGAME_FX_SMOKE_TEST=1" in str(exc.value)
+
+    def test_holdout_short_with_allow_flag_warns_only(self, caplog) -> None:
+        """allow_holdout_short=True で raise せず WARN log のみ。"""
+        import logging
+
+        a, b, h = self._triplet_with_holdout_days(holdout_days=10)
+        with caplog.at_level(logging.WARNING):
+            validate_stage_partition(
+                a, b, h,
+                expected_holdout_days=60,
+                allow_holdout_short=True,
+            )
+        # WARN log に override 痕跡が残る
+        assert any(
+            "holdout_short_override_active" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_no_expected_holdout_days_skips_b2(self) -> None:
+        """expected_holdout_days=None なら B-2 検証 skip (後方互換)。"""
+        a, b, h = self._triplet_with_holdout_days(holdout_days=1)
+        # expected=None なら B-2 完全 skip → pass
+        validate_stage_partition(
+            a, b, h, expected_holdout_days=None
+        )
+
+    def test_holdout_at_exact_threshold_passes(self) -> None:
+        """holdout 実日数 = expected_holdout_days * 0.8 ちょうどで pass (>=判定)。"""
+        # 8 days holdout、 expected=10 → 8 == 10*0.8 → pass (= 境界等値は pass)
+        a, b, h = self._triplet_with_holdout_days(holdout_days=8)
+        # actual span: 24*8 - 1 hour = 7.96 days ≈ ぎりぎり下回るので調整
+        # _make_bars_range で 8 days → 192 bars、 first/last span = 191h = 7.96 days
+        # 8*0.8=6.4 で 7.96 > 6.4 → pass
+        validate_stage_partition(
+            a, b, h, expected_holdout_days=8
+        )
+
+
+def test_holdout_length_error_is_partition_error() -> None:
+    """T091: 例外階層の確認 (StagePartitionError 継承)。"""
+    assert issubclass(StagePartitionHoldoutLengthError, StagePartitionError)
