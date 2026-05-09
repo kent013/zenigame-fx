@@ -21,6 +21,7 @@ from src.domain.price import PriceBar
 
 __all__ = [
     "StagePartitionError",
+    "StagePartitionHoldoutLengthError",
     "StagePartitionInputError",
     "StagePartitionLeakError",
     "validate_stage_partition",
@@ -37,6 +38,15 @@ class StagePartitionInputError(StagePartitionError):
 
 class StagePartitionLeakError(StagePartitionError):
     """B-1 partition 整合性違反 (chronological order / timestamp disjoint)."""
+
+
+class StagePartitionHoldoutLengthError(StagePartitionError):
+    """B-2 holdout 長違反 (config holdout_days vs 実態 calendar span 不整合).
+
+    T091 cycle_phase1 段階 3 (2026-05-09): Stage C holdout の構造的不足を起動時
+    fail-closed で検出。 二重 opt-in (`--allow-holdout-short` CLI flag AND
+    `ZENIGAME_FX_SMOKE_TEST=1` env var) で smoke test 経路は WARN のみで通す。
+    """
 
 
 def _validate_inputs(
@@ -135,10 +145,47 @@ def _validate_timestamp_disjoint(
             )
 
 
+def _validate_holdout_length(
+    bars_holdout: list[PriceBar],
+    expected_days: int,
+    *,
+    tolerance: float = 0.8,
+) -> None:
+    """B-2 holdout 長検証 (T091 cycle_phase1 段階 3、 2026-05-09).
+
+    bars_holdout の最初/最後の bar_time から実 calendar span を計算し、
+    expected_days * tolerance (default 80%) 未満なら fail。 weekend/holiday
+    考慮は単純化 (FX は 24x5 trading)、 buffer 20% で吸収。
+
+    Args:
+        bars_holdout: Stage C 評価用 bars (空であってはならない、 _validate_inputs で既に保証)。
+        expected_days: config stage_c.holdout_days で要求される calendar 日数。
+        tolerance: 実日数 / expected の最低比率 (default 0.8 = 80%)。
+
+    Raises:
+        StagePartitionHoldoutLengthError: 実日数 < expected_days * tolerance のとき。
+    """
+    span = bars_holdout[-1].bar_time - bars_holdout[0].bar_time
+    actual_days = span.total_seconds() / 86400.0
+    threshold = expected_days * tolerance
+    if actual_days < threshold:
+        raise StagePartitionHoldoutLengthError(
+            f"B-2 violation: holdout actual span {actual_days:.1f} days "
+            f"< expected {expected_days} days * {tolerance:.0%} = {threshold:.1f} days "
+            f"(holdout_first={bars_holdout[0].bar_time}, "
+            f"holdout_last={bars_holdout[-1].bar_time}). "
+            f"Use --allow-holdout-short CLI flag AND ZENIGAME_FX_SMOKE_TEST=1 env var "
+            f"for smoke tests, or extend dataset for production RUN."
+        )
+
+
 def validate_stage_partition(
     bars_stage_a: list[PriceBar],
     bars_stage_b: list[PriceBar],
     bars_holdout: list[PriceBar],
+    *,
+    expected_holdout_days: int | None = None,
+    allow_holdout_short: bool = False,
 ) -> None:
     """Stage A↔B↔Holdout の partition integrity を起動時に検証する fail-closed guard.
 
@@ -146,18 +193,38 @@ def validate_stage_partition(
         1. :func:`_validate_inputs` (B-0 input healthcheck)
         2. :func:`_validate_chronological_partition` (B-1 cond. 1-3)
         3. :func:`_validate_timestamp_disjoint` (B-1 cond. 4-6)
+        4. :func:`_validate_holdout_length` (B-2 holdout 長検証、 T091 段階 3)
 
-    違反時は対応する例外型を raise し escape hatch なしで起動を停止する。
+    違反時は対応する例外型を raise し escape hatch なしで起動を停止する
+    (B-2 のみ ``allow_holdout_short=True`` で WARN のみで通す escape hatch あり)。
 
     Args:
         bars_stage_a: Stage A 評価用 bars (末尾固定 / 本 TODO 前提)。
         bars_stage_b: Stage B fold + IS monitor 用 bars (Stage A 期間を除外)。
         bars_holdout: Stage C 評価用 bars (post dataset.end)。
+        expected_holdout_days: config stage_c.holdout_days (T091 段階 3、
+            None の場合 B-2 検証 skip = 後方互換)。
+        allow_holdout_short: 二重 opt-in escape hatch (T091 段階 3、
+            CLI `--allow-holdout-short` AND env `ZENIGAME_FX_SMOKE_TEST=1` で
+            run_ga.py 側が True を渡す)。 True でも WARN log は残す。
 
     Raises:
         StagePartitionInputError: B-0 入力健全性違反。
         StagePartitionLeakError: B-1 partition 整合性違反。
+        StagePartitionHoldoutLengthError: B-2 holdout 長違反 (allow_holdout_short=False 時のみ)。
     """
     _validate_inputs(bars_stage_a, bars_stage_b, bars_holdout)
     _validate_chronological_partition(bars_stage_a, bars_stage_b, bars_holdout)
     _validate_timestamp_disjoint(bars_stage_a, bars_stage_b, bars_holdout)
+    if expected_holdout_days is not None:
+        try:
+            _validate_holdout_length(bars_holdout, expected_holdout_days)
+        except StagePartitionHoldoutLengthError as e:
+            if allow_holdout_short:
+                import logging
+
+                logging.warning(
+                    "stage_partition_guard.holdout_short_override_active: %s", e
+                )
+                return
+            raise
