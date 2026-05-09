@@ -166,7 +166,7 @@ def _make_archive() -> GenomeArchive:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_has_47_columns() -> None:
+def test_schema_has_51_columns() -> None:
     # T-sharpe Phase 1A: trade_sharpe_raw + sharpe_calc_version (28→30)
     # T035: n_fold_effective + positive_fold_ratio_effective + stage_b_reason_codes (30→33)
     # T043: mission_score (33→34)
@@ -175,7 +175,9 @@ def test_schema_has_47_columns() -> None:
     # T054: stage_b_unavailable_reason_counts (42→43)
     # T058: schema v2 4 field (genome_entry_schema_version / dataset_epoch_id
     #       / archive_role / source_stage) (43→47)
-    assert len(GENOMES_SCHEMA.names) == 47
+    # T091 cycle_phase1 段階 2: trade_count_stage_a / trade_count_stage_b /
+    #       trade_count_full_dataset / median_oos_sharpe (47→51)
+    assert len(GENOMES_SCHEMA.names) == 51
     expected = {
         "run_id", "run_number", "generation", "individual_name",
         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
@@ -201,6 +203,9 @@ def test_schema_has_47_columns() -> None:
         # T058: schema v2 必須 4 field
         "genome_entry_schema_version", "dataset_epoch_id",
         "archive_role", "source_stage",
+        # T091 cycle_phase1 段階 2: trade_count スコープ整合 + Layer 1 検証用
+        "trade_count_stage_a", "trade_count_stage_b",
+        "trade_count_full_dataset", "median_oos_sharpe",
     }
     assert set(GENOMES_SCHEMA.names) == expected
 
@@ -405,6 +410,103 @@ def test_collect_stage_b_no_oos_sharpes_yields_none() -> None:
     arc.collect_stage_b(g, "lane", 0, _stage_b_result(oos_sharpes=()))
     row = arc._rows[("lane", 0, "g0_i0")]
     assert row["fold_sign_ratio"] is None
+
+
+# ---------------------------------------------------------------------------
+# T091 cycle_phase1 段階 2: trade_count スコープ整合化 + Layer 1 検証用列
+# ---------------------------------------------------------------------------
+
+
+def test_t091_collect_stage_a_writes_trade_count_stage_a() -> None:
+    """T091 段階 2: collect_stage_a で trade_count_stage_a 列に同値書き込み。"""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(),
+                         instrument="USD_JPY")
+    row = arc._rows[("lane", 0, "g0_i0")]
+    # trade_count (既存) と trade_count_stage_a (新) は同値
+    assert row["trade_count"] == 25
+    assert row["trade_count_stage_a"] == 25
+
+
+def test_t091_collect_stage_b_writes_trade_count_stage_b_and_full_dataset() -> None:
+    """T091 段階 2: collect_stage_b で trade_count_stage_b (= is_full_trade_count) +
+    trade_count_full_dataset (= stage_a + stage_b) 書き込み。"""
+    arc = _make_archive()
+    g = _stub_genome()
+    # Stage A 25 trades
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(),
+                         instrument="USD_JPY")
+    # Stage B 全期間 1 pass = 200 trades
+    arc.collect_stage_b(g, "lane", 0, _stage_b_result())
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["trade_count_stage_a"] == 25
+    assert row["trade_count_stage_b"] == 200
+    # 合算 = selection feasibility 用
+    assert row["trade_count_full_dataset"] == 225
+
+
+def test_t091_collect_stage_b_writes_median_oos_sharpe() -> None:
+    """T091 段階 2: collect_stage_b で median_oos_sharpe 列書き込み (Layer 1 検証用)。"""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(),
+                         instrument="USD_JPY")
+    arc.collect_stage_b(g, "lane", 0, _stage_b_result())
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["median_oos_sharpe"] == pytest.approx(0.1)
+
+
+def test_t091_collect_stage_b_does_not_overwrite_stage_a_trade_count() -> None:
+    """T091 段階 2 (Codex Round 3 [Critical] 対応): collect_stage_b 後も
+    既存 row["trade_count"] (Stage A 値固定 / T044 契約) は変更されない。"""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(),
+                         instrument="USD_JPY")
+    # Stage A trade_count = 25
+    arc.collect_stage_b(g, "lane", 0, _stage_b_result())
+    row = arc._rows[("lane", 0, "g0_i0")]
+    # T044 契約: trade_count は Stage A 値のまま
+    assert row["trade_count"] == 25
+    # Stage B trade_count は新列 trade_count_stage_b にのみ書き込み
+    assert row["trade_count_stage_b"] == 200
+
+
+def test_t091_archive_legacy_compat_when_stage_b_payload_lacks_is_full() -> None:
+    """T091 段階 2: payload に is_full_trade_count なしなら trade_count_stage_b は None、
+    trade_count_full_dataset も None で fallback。"""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(),
+                         instrument="USD_JPY")
+    # is_full_trade_count を payload から外す
+    arc.collect_stage_b(
+        g, "lane", 0,
+        _stage_b_result(is_full_trade_count=None),
+    )
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["trade_count_stage_a"] == 25
+    assert row["trade_count_stage_b"] is None
+    assert row["trade_count_full_dataset"] is None
+
+
+def test_t091_archive_template_initializes_new_columns_to_none() -> None:
+    """T091 段階 2: GENOMES_SCHEMA / row template で新列が None 初期化される。"""
+    from src.alpha_factory.archive import (
+        GENOMES_SCHEMA,
+        _create_row_template,
+    )
+    template = _create_row_template()
+    for col in (
+        "trade_count_stage_a",
+        "trade_count_stage_b",
+        "trade_count_full_dataset",
+        "median_oos_sharpe",
+    ):
+        assert col in template, f"{col} missing from row template"
+        assert template[col] is None
+        assert col in GENOMES_SCHEMA.names, f"{col} missing from schema"
 
 
 # ---------------------------------------------------------------------------
@@ -914,6 +1016,10 @@ def test_schema_nullable_attributes() -> None:
         # T058: archive_role (T066 で書込) / source_stage (T063-T064 で書込) は
         # null 許容。 genome_entry_schema_version / dataset_epoch_id は non-null。
         "archive_role", "source_stage",
+        # T091 cycle_phase1 段階 2: trade_count スコープ整合 + Layer 1 検証
+        # (Stage A/B 各 collect で書込、 旧 archive 互換のため nullable=True)
+        "trade_count_stage_a", "trade_count_stage_b",
+        "trade_count_full_dataset", "median_oos_sharpe",
     }
     for f in GENOMES_SCHEMA:
         if f.name in nullable_cols:

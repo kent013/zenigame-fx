@@ -465,3 +465,106 @@ def test_update_cache_stage_c_feasibility_disabled_keeps_true() -> None:
         cache, [_G()], _A(), "lane", 0, cfg, stage_c_feasibility_apply=False
     )
     assert cache["g0_i0"].stage_c_feasible is True
+
+
+# ---------------------------------------------------------------------------
+# T091 cycle_phase1 段階 2: _update_cache の trade_count_full_dataset 切替
+# (Codex impl-review Round 1 [Warning] 対応: 直接テスト追加)
+# ---------------------------------------------------------------------------
+
+
+class TestT091UpdateCacheFullDataset:
+    """T091 段階 2: _update_cache の trade_count_full_dataset 優先 / fallback 検証。"""
+
+    @staticmethod
+    def _archive_with(row: dict[str, Any]) -> Any:
+        class _A:
+            def get_row_snapshot(
+                self, lane_id: str, generation: int, name: str
+            ) -> dict[str, Any]:
+                return row
+
+        return _A()
+
+    @staticmethod
+    def _g():
+        class _G:
+            name = "g0_i0"
+
+        return _G()
+
+    def test_uses_full_dataset_when_present(self) -> None:
+        """新列 trade_count_full_dataset があれば feasibility はそれで判定。"""
+        cfg = GAFeasibilityConfig(apply_from_generation=0, entry_count_min=50)
+        archive = self._archive_with({
+            "fitness_pen": 0.5,
+            "trade_count": 30,  # Stage A: 不足
+            "trade_count_full_dataset": 100,  # full: 充足
+            "stage_a_pass": True,
+            "stage_b_pass": False,
+            "stage_c_pass": False,
+        })
+        cache: dict[str, IndividualCacheEntry] = {}
+        _update_cache(cache, [self._g()], archive, "lane", 0, cfg)
+        # trade_count_full_dataset=100 >= 50 → feasible
+        assert cache["g0_i0"].feasible is True
+        assert cache["g0_i0"].violation_magnitude == 0.0
+        assert cache["g0_i0"].trade_count_full_dataset == 100
+
+    def test_falls_back_to_trade_count_when_full_dataset_missing(self) -> None:
+        """旧 archive (trade_count_full_dataset なし) は trade_count で判定。"""
+        cfg = GAFeasibilityConfig(apply_from_generation=0, entry_count_min=50)
+        archive = self._archive_with({
+            "fitness_pen": 0.5,
+            "trade_count": 30,  # Stage A: 不足
+            # trade_count_full_dataset 欠落
+            "stage_a_pass": True,
+            "stage_b_pass": False,
+            "stage_c_pass": False,
+        })
+        cache: dict[str, IndividualCacheEntry] = {}
+        _update_cache(cache, [self._g()], archive, "lane", 0, cfg)
+        # fallback: trade_count=30 < 50 → infeasible
+        assert cache["g0_i0"].feasible is False
+        assert cache["g0_i0"].violation_magnitude == 20.0
+        # 欠損なら entry の trade_count_full_dataset も None
+        assert cache["g0_i0"].trade_count_full_dataset is None
+
+    def test_falls_back_when_full_dataset_malformed(self) -> None:
+        """trade_count_full_dataset が NaN / 負数 / bool なら trade_count fallback。"""
+        cfg = GAFeasibilityConfig(apply_from_generation=0, entry_count_min=50)
+        archive = self._archive_with({
+            "fitness_pen": 0.5,
+            "trade_count": 100,
+            "trade_count_full_dataset": float("nan"),  # malformed
+            "stage_a_pass": True,
+            "stage_b_pass": False,
+            "stage_c_pass": False,
+        })
+        cache: dict[str, IndividualCacheEntry] = {}
+        _update_cache(cache, [self._g()], archive, "lane", 0, cfg)
+        # NaN → _coerce_optional_int で None → trade_count fallback (100>=50)
+        assert cache["g0_i0"].feasible is True
+        assert cache["g0_i0"].trade_count_full_dataset is None
+
+    def test_zero_full_dataset_preserved_as_zero(self) -> None:
+        """T091 Codex Round 1 [Warning] 対応: 0 件と欠損を区別。
+
+        trade_count_full_dataset=0 はそのまま 0 として保持 (None に潰さない)、
+        feasibility は entry_min に対し 0 < 50 で infeasible。
+        """
+        cfg = GAFeasibilityConfig(apply_from_generation=0, entry_count_min=50)
+        archive = self._archive_with({
+            "fitness_pen": 0.5,
+            "trade_count": 0,
+            "trade_count_full_dataset": 0,  # explicit 0
+            "stage_a_pass": True,
+            "stage_b_pass": False,
+            "stage_c_pass": False,
+        })
+        cache: dict[str, IndividualCacheEntry] = {}
+        _update_cache(cache, [self._g()], archive, "lane", 0, cfg)
+        # 0 < 50 → infeasible
+        assert cache["g0_i0"].feasible is False
+        # 0 はそのまま 0 (None に潰さない)
+        assert cache["g0_i0"].trade_count_full_dataset == 0

@@ -169,3 +169,107 @@ def test_selection_score_finite_guard_fitness_pen_inf():
     score = entry.selection_score
     assert len(score) == 10  # cycle 5: 10-tuple
     assert score[9] == -math.inf  # fitness_pen 位置 10
+
+
+# ---------------------------------------------------------------------------
+# T091 cycle_phase1 段階 2: _coerce_optional_int helper + trade_count_full_dataset
+# ---------------------------------------------------------------------------
+
+
+class TestT091CoerceOptionalInt:
+    """T091 段階 2: _coerce_optional_int helper の入力正規化。"""
+
+    def test_returns_none_for_none(self) -> None:
+        from scripts.alpha_factory.run_ga import _coerce_optional_int
+
+        assert _coerce_optional_int(None) is None
+
+    def test_returns_none_for_nan(self) -> None:
+        from scripts.alpha_factory.run_ga import _coerce_optional_int
+
+        assert _coerce_optional_int(float("nan")) is None
+
+    def test_returns_none_for_inf(self) -> None:
+        from scripts.alpha_factory.run_ga import _coerce_optional_int
+
+        assert _coerce_optional_int(float("inf")) is None
+        assert _coerce_optional_int(float("-inf")) is None
+
+    def test_returns_none_for_list_dict_tuple(self) -> None:
+        from scripts.alpha_factory.run_ga import _coerce_optional_int
+
+        assert _coerce_optional_int([1, 2]) is None
+        assert _coerce_optional_int((1,)) is None
+        assert _coerce_optional_int({"k": 1}) is None
+        assert _coerce_optional_int("100") is None  # has __len__
+
+    def test_returns_none_for_python_bool(self) -> None:
+        from scripts.alpha_factory.run_ga import _coerce_optional_int
+
+        assert _coerce_optional_int(True) is None
+        assert _coerce_optional_int(False) is None
+
+    def test_returns_none_for_numpy_bool(self) -> None:
+        import numpy as np
+
+        from scripts.alpha_factory.run_ga import _coerce_optional_int
+
+        assert _coerce_optional_int(np.bool_(True)) is None
+        assert _coerce_optional_int(np.bool_(False)) is None
+
+    def test_returns_none_for_non_integer_float(self) -> None:
+        from scripts.alpha_factory.run_ga import _coerce_optional_int
+
+        assert _coerce_optional_int(100.5) is None
+        assert _coerce_optional_int(0.1) is None
+
+    def test_returns_none_for_negative(self) -> None:
+        from scripts.alpha_factory.run_ga import _coerce_optional_int
+
+        assert _coerce_optional_int(-1) is None
+        assert _coerce_optional_int(-100.0) is None
+
+    def test_returns_int_for_positive_int(self) -> None:
+        from scripts.alpha_factory.run_ga import _coerce_optional_int
+
+        assert _coerce_optional_int(0) == 0
+        assert _coerce_optional_int(100) == 100
+        assert _coerce_optional_int(2**30) == 2**30
+
+    def test_returns_int_for_integer_valued_float(self) -> None:
+        from scripts.alpha_factory.run_ga import _coerce_optional_int
+
+        assert _coerce_optional_int(100.0) == 100
+        assert _coerce_optional_int(0.0) == 0
+
+    def test_returns_int_for_numpy_int64(self) -> None:
+        import numpy as np
+
+        from scripts.alpha_factory.run_ga import _coerce_optional_int
+
+        assert _coerce_optional_int(np.int64(100)) == 100
+
+
+class TestT091IndividualCacheEntryFullDataset:
+    """T091 段階 2: IndividualCacheEntry に trade_count_full_dataset field 追加。"""
+
+    def test_default_none(self) -> None:
+        entry = IndividualCacheEntry(
+            generation=0,
+            fitness_pen=0.5,
+            stage_a_pass=True,
+            stage_b_pass=False,
+            stage_c_pass=False,
+        )
+        assert entry.trade_count_full_dataset is None
+
+    def test_explicit_value(self) -> None:
+        entry = IndividualCacheEntry(
+            generation=0,
+            fitness_pen=0.5,
+            stage_a_pass=True,
+            stage_b_pass=False,
+            stage_c_pass=False,
+            trade_count_full_dataset=200,
+        )
+        assert entry.trade_count_full_dataset == 200

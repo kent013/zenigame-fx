@@ -180,6 +180,11 @@ class IndividualCacheEntry:
     # 満たすか。 selection_score 9-tuple で fitness_pen より上位の lex 要素。
     # 詳細: devnotes/20260506-1622-fx-improve-c4/detailed-design.md
     fold_robust: bool = False
+    # T091 cycle_phase1 段階 2 (2026-05-09): trade_count_full_dataset を
+    # selection feasibility 用に保持。 archive の同名列を _update_cache で
+    # 読み込み、 None なら trade_count (Stage A 60d) を fallback。
+    # 詳細: devnotes/20260508-1203-stage-b-gate-redesign/detailed-design.md
+    trade_count_full_dataset: int | None = None
 
     @property
     def selection_score(self) -> tuple[int, float, int, int, int, int, int, int, int, float]:
@@ -652,6 +657,53 @@ def _breed_next_gen(
 # ---------------------------------------------------------------------------
 
 
+def _coerce_optional_int(value: Any) -> int | None:
+    """row dict 値を non-negative int に正規化する (T091 段階 2、 2026-05-09).
+
+    棄却条件 (None 返す):
+    - None / NaN / pd.NA
+    - list / tuple / dict / array (hasattr __len__)
+    - bool / np.bool_ (整数値偽装)
+    - 非有限値 (inf, -inf)
+    - 非整数 float (例: 100.5)
+    - 負数 (trade_count は非負前提)
+
+    許容: int, np.int64, 整数値の float (例: 100.0)。
+    """
+    if value is None:
+        return None
+    try:
+        if hasattr(value, "__len__"):
+            return None
+    except (TypeError, ValueError):
+        return None
+    try:
+        if value != value:  # NaN
+            return None
+    except (TypeError, ValueError):
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        import numpy as _np
+
+        if isinstance(value, _np.bool_):
+            return None
+    except ImportError:
+        pass
+    try:
+        f = float(value)
+        if not math.isfinite(f):
+            return None
+        if not f.is_integer():
+            return None
+        if f < 0:
+            return None
+        return int(f)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _update_cache(
     cache: dict[str, IndividualCacheEntry],
     population: list[Genome],
@@ -668,6 +720,9 @@ def _update_cache(
     実評価。archive 不在 (評価失敗) は明確に infeasible として violation を最大化。
     T045: ``stage_c_feasibility_apply=True`` で archive 行の total_pnl>0 ∧ trade_sharpe_raw>0
     を満たす個体に ``stage_c_feasible=True`` をセット (selection_score v3)。
+    T091 段階 2 (2026-05-09): selection feasibility を Stage A 60d trade_count から
+    trade_count_full_dataset (Stage A unique + Stage B unique) に切替。 旧 archive
+    (新列なし) は trade_count fallback で後方互換維持。
     """
     apply = generation >= feasibility_cfg.apply_from_generation
     entry_min = feasibility_cfg.entry_count_min
@@ -690,14 +745,20 @@ def _update_cache(
             fp = float(fp_raw) if fp_raw is not None else -math.inf
         except (TypeError, ValueError):
             fp = -math.inf
-        tc_raw = row.get("trade_count")
-        try:
-            trade_count = int(tc_raw) if tc_raw is not None else 0
-        except (TypeError, ValueError):
-            trade_count = 0
+        # T091 段階 2: trade_count_full_dataset (Stage A unique + Stage B unique) を
+        # selection feasibility に使用。 None / 旧 archive なら trade_count
+        # (Stage A 60d) を fallback。
+        tc_full = _coerce_optional_int(row.get("trade_count_full_dataset"))
+        tc_legacy = _coerce_optional_int(row.get("trade_count"))
+        if tc_full is not None:
+            trade_count_for_feasibility = tc_full
+        elif tc_legacy is not None:
+            trade_count_for_feasibility = tc_legacy
+        else:
+            trade_count_for_feasibility = 0
         if apply:
-            feasible = trade_count >= entry_min
-            violation = max(0.0, float(entry_min - trade_count))
+            feasible = trade_count_for_feasibility >= entry_min
+            violation = max(0.0, float(entry_min - trade_count_for_feasibility))
         else:
             feasible = True
             violation = 0.0
@@ -743,6 +804,10 @@ def _update_cache(
             violation_magnitude=violation,
             stage_c_feasible=stage_c_feasible,
             fold_robust=fold_robust,
+            # T091 段階 2 (Codex Round 1 [Warning] 対応): 0 と None の意味混同回避。
+            # tc_full が None なら欠損 (旧 archive or 計算失敗)、 0 件なら 0 を保持。
+            # replay/report で「欠損 vs 0 件」 を区別可能。
+            trade_count_full_dataset=tc_full,
         )
 
 
