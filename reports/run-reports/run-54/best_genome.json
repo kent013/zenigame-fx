@@ -1,0 +1,31 @@
+{
+  "dataset_epoch_id": "epoch_20251001_20260401",
+  "name": "g52_i27",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F13",
+          "weight": 1.39023821549011,
+          "params": {
+            "w": 53,
+            "lag": 8
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.6674173720901946
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.38603406244912075,
+    "exit_threshold": -0.1404731473185933,
+    "max_pos": 5,
+    "time_stop_min": 141
+  },
+  "risk": {
+    "stop_atr": 0.1,
+    "take_atr": 0.1
+  }
+}
