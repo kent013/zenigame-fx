@@ -92,6 +92,7 @@
 | T088 | _indicators.py Numba JIT 化 | primitives | High | 2026-05-05 20:12 | - |
 | T089 | session_block_lookup_table | infrastructure | Medium | 2026-05-05 21:08 | - |
 | T090 | _bars_cache._compute 軽量化 | primitives | Medium | 2026-05-05 22:15 | - |
+| T091 | Stage B gate redesign Phase 1 | stage-gate | High | 2026-05-09 10:12 | - |
 
 ## Obsoleted
 
