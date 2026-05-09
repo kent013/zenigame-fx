@@ -1,0 +1,78 @@
+{
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "name": "g33_i27",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F6",
+          "weight": 0.6504345183377359,
+          "params": {
+            "session": 0,
+            "k": 2.6747733501972446,
+            "atr_n": 7
+          }
+        },
+        {
+          "name": "P8",
+          "weight": 1.2595715158052565,
+          "params": {
+            "mom_n": 21,
+            "scale": 0.07167335115327686,
+            "staleness_bars": 307
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.441261589302918
+    },
+    {
+      "directional": [
+        {
+          "name": "F1",
+          "weight": 1.199689063458158,
+          "params": {
+            "fast_n": 24,
+            "slow_n": 22,
+            "atr_n": 23
+          }
+        },
+        {
+          "name": "F14",
+          "weight": 0.9363389529805852,
+          "params": {
+            "fast_n": 25,
+            "slow_n": 64,
+            "rv_n": 34,
+            "scale": 4.756967849137756,
+            "k_scale": 1.3790239263598036
+          }
+        },
+        {
+          "name": "P7",
+          "weight": 1.0627722885904505,
+          "params": {
+            "spx_n": 18,
+            "vix_threshold": 27.655572111211928,
+            "vix_scale": 1.5375431370953054,
+            "vix_staleness_days": 15.23763295501102,
+            "spx_staleness_bars": 189
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.4098212593432424
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.3513243573877419,
+    "exit_threshold": 0.1424329579516755,
+    "max_pos": 3,
+    "time_stop_min": 168
+  },
+  "risk": {
+    "stop_atr": 1.7660043025096883,
+    "take_atr": 2.4886455050769007
+  }
+}
