@@ -122,6 +122,20 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
         pa.field("n_fold_effective", pa.int64(), nullable=True),
         pa.field("positive_fold_ratio_effective", pa.float64(), nullable=True),
         pa.field("stage_b_reason_codes", pa.string(), nullable=True),
+        # T091 cycle_phase1 段階 2 (2026-05-09): trade_count スコープ整合化と
+        # Layer 1 検証用 archive 列拡張。 詳細:
+        # devnotes/20260508-1203-stage-b-gate-redesign/detailed-design.md
+        # - trade_count_stage_a: Stage A 60日 backtest unique entry count
+        #   (= 既存 trade_count と同等、 explicit 命名で読みやすさ向上)
+        # - trade_count_stage_b: Stage B 全期間 (~67日) 1 pass の unique entry count
+        #   (fold 合算は禁止、 重複カウント回避)
+        # - trade_count_full_dataset: stage_a + stage_b の合算 (selection feasibility 用)
+        # - median_oos_sharpe: Stage B per-fold OOS Sharpe の median (T091 段階 1
+        #   検証用、 archive replay で gate 効果を直接 verify 可能化)
+        pa.field("trade_count_stage_a", pa.int32(), nullable=True),
+        pa.field("trade_count_stage_b", pa.int32(), nullable=True),
+        pa.field("trade_count_full_dataset", pa.int32(), nullable=True),
+        pa.field("median_oos_sharpe", pa.float64(), nullable=True),
         # T054: Stage B fold unavailable の排他的 reason 別カウント。
         # JSON 文字列として永続化 (FoldUnavailableReason value → count)。
         # 不変条件: 全 reason の合計 == n_fold_unavailable。
@@ -218,6 +232,11 @@ def _create_row_template() -> dict[str, Any]:
         "stage_b_reason_codes": None,
         # T054: Stage B fold unavailable reason 別カウント (JSON 文字列)
         "stage_b_unavailable_reason_counts": None,
+        # T091 cycle_phase1 段階 2: trade_count スコープ整合化 + Layer 1 検証
+        "trade_count_stage_a": None,
+        "trade_count_stage_b": None,
+        "trade_count_full_dataset": None,
+        "median_oos_sharpe": None,
         # T043: mission_score (Stage C 評価時のみ書き込み、それ以外は None)
         "mission_score": None,
         # T036: FSP — post-RUN updater が一括書き戻し、template は null 初期化のみ
@@ -449,6 +468,9 @@ class GenomeArchive:
         row["fitness_pen"] = _required_float(payload, "fitness_pen")
         row["stage_a_pass"] = bool(stage_result.passed)
         row["trade_count"] = _required_int(payload, "trade_count")
+        # T091 cycle_phase1 段階 2: trade_count を explicit 命名で別列にも書く
+        # (T044 「Stage A 値固定」 契約の明示化、 全列名で読み手の混乱を防ぐ)
+        row["trade_count_stage_a"] = row["trade_count"]
         # T044 設計: Stage A で total_pnl を設定し Stage B は保持・Stage C で更新。
         row["total_pnl"] = _required_float(payload, "total_pnl")
         # T-sharpe Phase 1A: payload key を "sharpe_raw" → "trade_sharpe_raw" にリネーム
@@ -537,6 +559,24 @@ class GenomeArchive:
         # Stage A 値を保持する (Stage B の is_full_total_pnl は別途観測したい
         # 場合は将来 stage 別列で持つ。Phase 0 では Stage A 値で固定)。
         # bootstrap_ci_lower/upper / sortino / calmar は本 TODO スコープ外
+        # T091 cycle_phase1 段階 2 (2026-05-09): trade_count スコープ整合化 +
+        # Layer 1 検証用列の埋め込み。
+        # - trade_count_stage_b = is_full_trade_count (Stage B 全期間 1 pass の
+        #   unique entry count、 既存実装の payload を archive 列に転記)
+        # - trade_count_full_dataset = trade_count_stage_a + trade_count_stage_b
+        #   (selection feasibility 用、 Stage A unique + Stage B unique で時系列
+        #   disjoint guard 済 = 重複なし)
+        # - median_oos_sharpe = Stage B per-fold OOS Sharpe の median
+        #   (cycle 2 で発見した「archive 不在」 問題への対応、 Layer 1 検証用)
+        is_tc = _opt_int(payload, "is_full_trade_count")
+        if is_tc is not None:
+            row["trade_count_stage_b"] = is_tc
+            tca = row.get("trade_count_stage_a")
+            if tca is not None:
+                row["trade_count_full_dataset"] = int(tca) + int(is_tc)
+        median_oos = _opt_float(payload, "median_oos_sharpe")
+        if median_oos is not None:
+            row["median_oos_sharpe"] = median_oos
         self._mark_stage(row, "B")
 
     def collect_stage_c(
