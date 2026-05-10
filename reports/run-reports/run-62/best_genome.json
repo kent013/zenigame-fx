@@ -1,0 +1,82 @@
+{
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "name": "g60_i37",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "P2",
+          "weight": 1.8471221423291186,
+          "params": {
+            "atr_n": 17
+          }
+        },
+        {
+          "name": "F12",
+          "weight": 1.2238959004583005,
+          "params": {
+            "n": 21,
+            "window": 389,
+            "k_scale": 2.0755331976799116
+          }
+        },
+        {
+          "name": "P4",
+          "weight": 0.519127813649784,
+          "params": {
+            "window_min": 52.82174621649273,
+            "scale_min": 14.14461567292478
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "M2",
+          "weight": -0.37465794628170107,
+          "params": {
+            "session": 1,
+            "soft_edge_min": 34.27396130660071
+          }
+        }
+      ],
+      "weight": 0.5570921479079082
+    },
+    {
+      "directional": [
+        {
+          "name": "F14",
+          "weight": 1.2811295429953526,
+          "params": {
+            "fast_n": 10,
+            "slow_n": 53,
+            "rv_n": 29,
+            "scale": 3.121954845448138,
+            "k_scale": 4.413433024258872
+          }
+        },
+        {
+          "name": "F12",
+          "weight": 1.262278615067395,
+          "params": {
+            "n": 23,
+            "window": 478,
+            "k_scale": 3.4630927118560977
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.0904622590917814
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.16775179820849892,
+    "exit_threshold": -0.060601485275438224,
+    "max_pos": 3,
+    "time_stop_min": 308
+  },
+  "risk": {
+    "stop_atr": 1.227854116440048,
+    "take_atr": 2.3189567197247465
+  }
+}
