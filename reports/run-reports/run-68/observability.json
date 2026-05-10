@@ -1,0 +1,71 @@
+{
+  "run_id": "run_20260510_183709",
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "generation_count": 60,
+  "ab_divergence": {
+    "status": "ok",
+    "corr": "0.2191400090393479957986888310",
+    "n_pairs": 1800
+  },
+  "q_force_recommendation": {
+    "new_q_force": "0.15",
+    "delta": "0",
+    "reason": "insufficient_data",
+    "clamped_at_max": false,
+    "clamped_at_min": false,
+    "consecutive_divergent_runs": 0
+  },
+  "archive_churn": {
+    "status": "insufficient_runs",
+    "churn_rate": "0",
+    "n_total_admissions": 0,
+    "n_total_evictions": 0,
+    "n_runs_used": 1
+  },
+  "bypass_ratio": {
+    "bypass_ratio": "0",
+    "n_admitted_by_role": {
+      "mission_pass": 0,
+      "progress_pass": 0,
+      "score_bypass": 0
+    },
+    "n_total_admissions": 0
+  },
+  "session_entropy": {
+    "status": "empty_archive",
+    "shannon_entropy": "0",
+    "relative_entropy": "0",
+    "n_unique_patterns": 0,
+    "n_archive_members": 0,
+    "n_runs_aggregated": 0
+  },
+  "feasible_ratio": {
+    "feasible_ratio_ema": "0",
+    "fsm_state": "push",
+    "n_feasible_individuals": 0,
+    "n_total_individuals": 0
+  },
+  "selection": {
+    "front1_cardinality": 0,
+    "feasible_ratio": "0",
+    "mean_constraint_violation": "0",
+    "generation": 0
+  },
+  "inflow_consistency": {
+    "warmstart_share_target": "0",
+    "warmstart_share_actual": "0",
+    "share_drift": "0",
+    "within_tolerance": true,
+    "relaxation_steps_count": 0,
+    "per_source_run_violations": 0,
+    "ca_inflow_actual": 0,
+    "da_inflow_actual": 0,
+    "bypass_inflow_actual": 0,
+    "inflow_summary_by_role": {}
+  },
+  "failure": {
+    "run_id": "run_20260510_183709",
+    "run_aborted": false,
+    "per_stage": []
+  }
+}
