@@ -1,0 +1,58 @@
+{
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "name": "g59_i44",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F14",
+          "weight": 1.7012882970460232,
+          "params": {
+            "fast_n": 27,
+            "slow_n": 63,
+            "rv_n": 41,
+            "scale": 1.80933575412769,
+            "k_scale": 2.344230398222798
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.13287346912316
+    },
+    {
+      "directional": [
+        {
+          "name": "P2",
+          "weight": 1.0814945984924802,
+          "params": {
+            "atr_n": 19
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "M1",
+          "weight": 0.4082714971684225,
+          "params": {
+            "n": 27,
+            "threshold_rel": 0.01625204725741754,
+            "scale_rel": 0.008812399580298412,
+            "prefer_high": 0
+          }
+        }
+      ],
+      "weight": 0.891998506466874
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.45901714615199196,
+    "exit_threshold": -0.045595321764081584,
+    "max_pos": 7,
+    "time_stop_min": 183
+  },
+  "risk": {
+    "stop_atr": 1.4158774881120253,
+    "take_atr": 2.535727066662263
+  }
+}
