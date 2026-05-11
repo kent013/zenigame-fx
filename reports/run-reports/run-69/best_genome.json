@@ -1,0 +1,92 @@
+{
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "name": "g46_i68",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F10",
+          "weight": 0.3616664995499729,
+          "params": {
+            "n": 30
+          }
+        },
+        {
+          "name": "F6",
+          "weight": 1.3608394539034703,
+          "params": {
+            "session": 1,
+            "k": 0.5706852433485827,
+            "atr_n": 28
+          }
+        },
+        {
+          "name": "F5",
+          "weight": 0.5358769533670611,
+          "params": {
+            "short_n": 5,
+            "long_n": 110,
+            "k": 8.355008128353179
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "M2",
+          "weight": 1.3941730036126365,
+          "params": {
+            "session": 1,
+            "soft_edge_min": 4.2270759531507025
+          }
+        }
+      ],
+      "weight": 1.293392408199457
+    },
+    {
+      "directional": [
+        {
+          "name": "F4",
+          "weight": 1.3800913920338251,
+          "params": {
+            "n": 14,
+            "scale": 29.00433798707331
+          }
+        },
+        {
+          "name": "F5",
+          "weight": 0.7921557078146897,
+          "params": {
+            "short_n": 18,
+            "long_n": 93,
+            "k": 1.2202853319468003
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "P11",
+          "weight": 0.16010039615917648,
+          "params": {
+            "dxy_n": 81,
+            "vix_threshold": 11.877464152027736,
+            "vix_scale": 5.035880075861392,
+            "vix_staleness_days": 7.108993632464739,
+            "dxy_staleness_bars": 132
+          }
+        }
+      ],
+      "weight": 1.4151927030493052
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.480453352729434,
+    "exit_threshold": 0.0989200567651183,
+    "max_pos": 5,
+    "time_stop_min": 143
+  },
+  "risk": {
+    "stop_atr": 2.75044321080985,
+    "take_atr": 3.119071885876904
+  }
+}
