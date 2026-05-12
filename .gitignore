@@ -19,6 +19,7 @@ pgdata/
 tmp/
 devnotes/**/tmp/
 paper-logs/
+worktrees/
 reports/backtests/
 reports/walk-forwards/
 reports/ensembles/
