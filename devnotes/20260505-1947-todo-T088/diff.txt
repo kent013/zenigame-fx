@@ -1,0 +1,500 @@
+diff --git a/reports/calibrate-gate/history.jsonl b/reports/calibrate-gate/history.jsonl
+index 7fb6b91..08aa2c1 100644
+--- a/reports/calibrate-gate/history.jsonl
++++ b/reports/calibrate-gate/history.jsonl
+@@ -47,3 +47,12 @@
+ {"run_id": "tinysk", "applied_at": "2026-04-28T00:57:49.050041+00:00", "n_rows_total": 5, "n_rows_used": 5, "aggregation_mode": "all_generations", "aggregation_window": 5, "actual_pass_rate": 0.0, "target_pass_rate": 0.15, "tol": 0.05, "prev_threshold": 0.0, "new_threshold": 0.0, "delta": 0.0, "decision": "skip_sample_size", "var_fitness_pen": null, "clamped_by_delta": false, "clamped_by_floor_or_ceiling": false, "stage_b_pass_count": 0, "stage_c_pass_count": 0, "live_criteria_gap": {"sharpe": 1.0, "total_pnl": 50000.0, "max_dd": 0.0, "trade_count_min": 50.0, "trade_count_max": 0.0}, "schema_version": 1, "base_config_hash": null, "full_config_hash": null, "dataset_span": null, "instrument": null, "stage_gate_version": null, "applied_from_run_id": "tinysk"}
+ {"run_id": "run_20260504_032451", "applied_at": "2026-05-04T04:23:10.011401+00:00", "n_rows_total": 640, "n_rows_used": 200, "aggregation_mode": "last_k_generations", "aggregation_window": 5, "actual_pass_rate": 0.0, "target_pass_rate": 0.15, "tol": 0.05, "prev_threshold": 0.0, "new_threshold": -0.0172, "delta": -0.0172, "decision": "loosen", "var_fitness_pen": 0.009927277704535617, "clamped_by_delta": false, "clamped_by_floor_or_ceiling": false, "stage_b_pass_count": 0, "stage_c_pass_count": 0, "live_criteria_gap": {"sharpe": 0.9988656657503326, "total_pnl": 50000.0, "max_dd": 0.0, "trade_count_min": 0.0, "trade_count_max": 0.0}, "calibrate_history_schema_version": 2, "dataset_epoch_id": "epoch_legacy", "schema_version": 2, "base_config_hash": "6bc69d7fdfd8c218838443801479c40dff3c8e67161a13b99d2a806d66866d02", "full_config_hash": "92854f622064700e4cc019a4ac5d8c53672b41d6758a19c4206694fd88c0b990", "dataset_span": ["2025-10-01 00:00:00+00:00", "2026-04-01 00:00:00+00:00"], "instrument": "EUR_JPY", "stage_gate_version": "v3_stage_b_fold_min_trade_count", "applied_from_run_id": "run_20260504_032451"}
+ {"run_id": "run_20260504_043138", "applied_at": "2026-05-04T05:58:04.629717+00:00", "n_rows_total": 640, "n_rows_used": 200, "aggregation_mode": "last_k_generations", "aggregation_window": 5, "actual_pass_rate": 0.41, "target_pass_rate": 0.15, "tol": 0.05, "prev_threshold": -0.0172, "new_threshold": 0.0128, "delta": 0.03, "decision": "tighten", "var_fitness_pen": 0.02329888513595153, "clamped_by_delta": true, "clamped_by_floor_or_ceiling": false, "stage_b_pass_count": 0, "stage_c_pass_count": 0, "live_criteria_gap": {"sharpe": 0.8400924585516818, "total_pnl": 50000.0, "max_dd": 0.0, "trade_count_min": 0.0, "trade_count_max": 0.0}, "calibrate_history_schema_version": 2, "dataset_epoch_id": "epoch_legacy", "schema_version": 2, "base_config_hash": "6bc69d7fdfd8c218838443801479c40dff3c8e67161a13b99d2a806d66866d02", "full_config_hash": "683c610760bf37b4ec9de690213106d008798237a19a1fc126c33a2f234b45c5", "dataset_span": ["2025-10-01 00:00:00+00:00", "2026-04-01 00:00:00+00:00"], "instrument": "EUR_JPY", "stage_gate_version": "v3_stage_b_fold_min_trade_count", "applied_from_run_id": "run_20260504_043138"}
++{"run_id": "smoke", "applied_at": "2026-05-05T10:58:41.952158+00:00", "n_rows_total": 100, "n_rows_used": 100, "aggregation_mode": "all_generations", "aggregation_window": 5, "actual_pass_rate": 0.02, "target_pass_rate": 0.15, "tol": 0.05, "prev_threshold": 0.0, "new_threshold": 0.03, "delta": 0.03, "decision": "loosen", "var_fitness_pen": 850.1683501683503, "clamped_by_delta": true, "clamped_by_floor_or_ceiling": false, "stage_b_pass_count": 0, "stage_c_pass_count": 0, "live_criteria_gap": {"sharpe": 1.0, "total_pnl": 50000.0, "max_dd": 0.0, "trade_count_min": 50.0, "trade_count_max": 0.0}, "calibrate_history_schema_version": 2, "dataset_epoch_id": "epoch_legacy", "schema_version": 2, "base_config_hash": null, "full_config_hash": null, "dataset_span": null, "instrument": null, "stage_gate_version": null, "applied_from_run_id": "smoke"}
++{"run_id": "loosen", "applied_at": "2026-05-05T10:58:41.960119+00:00", "n_rows_total": 100, "n_rows_used": 100, "aggregation_mode": "all_generations", "aggregation_window": 5, "actual_pass_rate": 0.0, "target_pass_rate": 0.5, "tol": 0.05, "prev_threshold": 10.0, "new_threshold": 9.97, "delta": -0.02999999999999936, "decision": "loosen", "var_fitness_pen": 850.1683501683503, "clamped_by_delta": true, "clamped_by_floor_or_ceiling": false, "stage_b_pass_count": 0, "stage_c_pass_count": 0, "live_criteria_gap": {"sharpe": 1.0, "total_pnl": 50000.0, "max_dd": 0.0, "trade_count_min": 50.0, "trade_count_max": 0.0}, "calibrate_history_schema_version": 2, "dataset_epoch_id": "epoch_legacy", "schema_version": 2, "base_config_hash": null, "full_config_hash": null, "dataset_span": null, "instrument": null, "stage_gate_version": null, "applied_from_run_id": "loosen"}
++{"run_id": "run_new", "applied_at": "2026-05-05T10:58:42.036446+00:00", "n_rows_total": 100, "n_rows_used": 100, "aggregation_mode": "all_generations", "aggregation_window": 5, "actual_pass_rate": 0.5, "target_pass_rate": 0.5, "tol": 0.05, "prev_threshold": 0.0, "new_threshold": 0.0, "delta": 0.0, "decision": "in_band", "var_fitness_pen": null, "clamped_by_delta": false, "clamped_by_floor_or_ceiling": false, "stage_b_pass_count": 0, "stage_c_pass_count": 0, "live_criteria_gap": {"sharpe": 1.0, "total_pnl": 50000.0, "max_dd": 0.0, "trade_count_min": 50.0, "trade_count_max": 0.0}, "calibrate_history_schema_version": 2, "dataset_epoch_id": "epoch_legacy", "schema_version": 2, "base_config_hash": null, "full_config_hash": null, "dataset_span": null, "instrument": null, "stage_gate_version": null, "applied_from_run_id": "run_new"}
++{"run_id": "tiny", "applied_at": "2026-05-05T10:58:42.040486+00:00", "n_rows_total": 5, "n_rows_used": 5, "aggregation_mode": "all_generations", "aggregation_window": 5, "actual_pass_rate": 0.0, "target_pass_rate": 0.15, "tol": 0.05, "prev_threshold": 0.0, "new_threshold": 0.0, "delta": 0.0, "decision": "skip_sample_size", "var_fitness_pen": null, "clamped_by_delta": false, "clamped_by_floor_or_ceiling": false, "stage_b_pass_count": 0, "stage_c_pass_count": 0, "live_criteria_gap": {"sharpe": 1.0, "total_pnl": 50000.0, "max_dd": 0.0, "trade_count_min": 50.0, "trade_count_max": 0.0}, "calibrate_history_schema_version": 2, "dataset_epoch_id": "epoch_legacy", "schema_version": 2, "base_config_hash": null, "full_config_hash": null, "dataset_span": null, "instrument": null, "stage_gate_version": null, "applied_from_run_id": "tiny"}
++{"run_id": "u", "applied_at": "2026-05-05T10:58:42.047286+00:00", "n_rows_total": 100, "n_rows_used": 100, "aggregation_mode": "all_generations", "aggregation_window": 5, "actual_pass_rate": 0.0, "target_pass_rate": 0.5, "tol": 0.05, "prev_threshold": 0.0, "new_threshold": 0.0, "delta": 0.0, "decision": "loosen", "var_fitness_pen": 850.1683501683503, "clamped_by_delta": false, "clamped_by_floor_or_ceiling": false, "stage_b_pass_count": 0, "stage_c_pass_count": 0, "live_criteria_gap": {"sharpe": 1.0, "total_pnl": 50000.0, "max_dd": 0.0, "trade_count_min": 50.0, "trade_count_max": 0.0}, "calibrate_history_schema_version": 2, "dataset_epoch_id": "epoch_legacy", "schema_version": 2, "base_config_hash": null, "full_config_hash": null, "dataset_span": null, "instrument": null, "stage_gate_version": null, "applied_from_run_id": "u"}
++{"run_id": "gwm", "applied_at": "2026-05-05T10:58:42.051029+00:00", "n_rows_total": 100, "n_rows_used": 100, "aggregation_mode": "generation_weighted_mean", "aggregation_window": 5, "actual_pass_rate": 0.5, "target_pass_rate": 0.5, "tol": 0.05, "prev_threshold": 0.0, "new_threshold": 0.0, "delta": 0.0, "decision": "in_band", "var_fitness_pen": null, "clamped_by_delta": false, "clamped_by_floor_or_ceiling": false, "stage_b_pass_count": 0, "stage_c_pass_count": 0, "live_criteria_gap": {"sharpe": 1.0, "total_pnl": 50000.0, "max_dd": 0.0, "trade_count_min": 50.0, "trade_count_max": 0.0}, "calibrate_history_schema_version": 2, "dataset_epoch_id": "epoch_legacy", "schema_version": 2, "base_config_hash": null, "full_config_hash": null, "dataset_span": null, "instrument": null, "stage_gate_version": null, "applied_from_run_id": "gwm"}
++{"run_id": "dryapp", "applied_at": "2026-05-05T10:58:42.055878+00:00", "n_rows_total": 100, "n_rows_used": 100, "aggregation_mode": "all_generations", "aggregation_window": 5, "actual_pass_rate": 0.0, "target_pass_rate": 0.5, "tol": 0.05, "prev_threshold": 10.0, "new_threshold": 9.97, "delta": -0.02999999999999936, "decision": "loosen", "var_fitness_pen": 850.1683501683503, "clamped_by_delta": true, "clamped_by_floor_or_ceiling": false, "stage_b_pass_count": 0, "stage_c_pass_count": 0, "live_criteria_gap": {"sharpe": 1.0, "total_pnl": 50000.0, "max_dd": 0.0, "trade_count_min": 50.0, "trade_count_max": 0.0}, "calibrate_history_schema_version": 2, "dataset_epoch_id": "epoch_legacy", "schema_version": 2, "base_config_hash": null, "full_config_hash": null, "dataset_span": null, "instrument": null, "stage_gate_version": null, "applied_from_run_id": "dryapp"}
++{"run_id": "ib", "applied_at": "2026-05-05T10:58:42.060616+00:00", "n_rows_total": 100, "n_rows_used": 100, "aggregation_mode": "all_generations", "aggregation_window": 5, "actual_pass_rate": 0.15, "target_pass_rate": 0.15, "tol": 0.05, "prev_threshold": 0.0, "new_threshold": 0.0, "delta": 0.0, "decision": "in_band", "var_fitness_pen": null, "clamped_by_delta": false, "clamped_by_floor_or_ceiling": false, "stage_b_pass_count": 0, "stage_c_pass_count": 0, "live_criteria_gap": {"sharpe": 1.0, "total_pnl": 50000.0, "max_dd": 0.0, "trade_count_min": 50.0, "trade_count_max": 0.0}, "calibrate_history_schema_version": 2, "dataset_epoch_id": "epoch_legacy", "schema_version": 2, "base_config_hash": null, "full_config_hash": null, "dataset_span": null, "instrument": null, "stage_gate_version": null, "applied_from_run_id": "ib"}
++{"run_id": "tinysk", "applied_at": "2026-05-05T10:58:42.065407+00:00", "n_rows_total": 5, "n_rows_used": 5, "aggregation_mode": "all_generations", "aggregation_window": 5, "actual_pass_rate": 0.0, "target_pass_rate": 0.15, "tol": 0.05, "prev_threshold": 0.0, "new_threshold": 0.0, "delta": 0.0, "decision": "skip_sample_size", "var_fitness_pen": null, "clamped_by_delta": false, "clamped_by_floor_or_ceiling": false, "stage_b_pass_count": 0, "stage_c_pass_count": 0, "live_criteria_gap": {"sharpe": 1.0, "total_pnl": 50000.0, "max_dd": 0.0, "trade_count_min": 50.0, "trade_count_max": 0.0}, "calibrate_history_schema_version": 2, "dataset_epoch_id": "epoch_legacy", "schema_version": 2, "base_config_hash": null, "full_config_hash": null, "dataset_span": null, "instrument": null, "stage_gate_version": null, "applied_from_run_id": "tinysk"}
+diff --git a/src/alpha_factory/primitives/_indicators.py b/src/alpha_factory/primitives/_indicators.py
+index 6353b75..fac3729 100644
+--- a/src/alpha_factory/primitives/_indicators.py
++++ b/src/alpha_factory/primitives/_indicators.py
+@@ -19,8 +19,7 @@ look-ahead bias 回避:
+ 
+ from __future__ import annotations
+ 
+-from collections import deque
+-
++import numba
+ import numpy as np
+ 
+ _EPS = 1e-10
+@@ -114,42 +113,85 @@ def rolling_std(values: np.ndarray, n: int, ddof: int = 0) -> np.ndarray:
+ 
+ 
+ def rolling_max(values: np.ndarray, n: int) -> np.ndarray:
+-    """Monotonic deque による O(N) rolling max。warmup (i<n-1) は NaN。"""
++    """Monotonic deque による O(N) rolling max。warmup (i<n-1) は NaN。
++
++    Numba JIT 化 (T088 cycle 1 profile-optimize): collections.deque を fixed-size
++    int64 circular buffer (head/tail インデックス) に置換。 現行 comparator
++    (`<=` で右から drop) をそのまま再現、 数値出力は現行と numerically identical。
++    """
+     if n <= 0:
+         raise ValueError(f"n must be >= 1, got {n}")
+     values = np.asarray(values, dtype=np.float64)
+-    length = len(values)
++    return _rolling_max_jit(values, n)
++
++
++@numba.njit(cache=True, fastmath=False)
++def _rolling_max_jit(values: np.ndarray, n: int) -> np.ndarray:
++    length = values.shape[0]
+     out = np.full(length, np.nan, dtype=np.float64)
+-    dq: deque[int] = deque()
++    # circular buffer: 最大 n 個保持 (window 外を drop するので n より長くならない)
++    dq = np.empty(n, dtype=np.int64)
++    head = 0  # buffer の先頭 index (front)
++    tail = 0  # buffer の末尾 index (back exclusive)
++    size = 0
+     for i in range(length):
+-        # ウィンドウ外になった index を左から drop
+-        while dq and dq[0] <= i - n:
+-            dq.popleft()
+-        # 小さい値を右から drop (strict: >= なら drop; 等値は残しておく)
+-        while dq and values[dq[-1]] <= values[i]:
+-            dq.pop()
+-        dq.append(i)
++        # window 外を front から drop
++        while size > 0 and dq[head] <= i - n:
++            head = (head + 1) % n
++            size -= 1
++        # 小さい値を back から drop (strict: <= で drop = 等値も drop = 現行と一致)
++        while size > 0:
++            back_idx = (tail - 1 + n) % n
++            if values[dq[back_idx]] <= values[i]:
++                tail = back_idx
++                size -= 1
++            else:
++                break
++        # back に追加
++        dq[tail] = i
++        tail = (tail + 1) % n
++        size += 1
+         if i >= n - 1:
+-            out[i] = values[dq[0]]
++            out[i] = values[dq[head]]
+     return out
+ 
+ 
+ def rolling_min(values: np.ndarray, n: int) -> np.ndarray:
+-    """Monotonic deque による O(N) rolling min。warmup (i<n-1) は NaN。"""
++    """Monotonic deque による O(N) rolling min。warmup (i<n-1) は NaN。
++
++    Numba JIT 化 (T088 cycle 1 profile-optimize): rolling_max と完全対称、
++    comparator が `>=` で右から drop の違いのみ。
++    """
+     if n <= 0:
+         raise ValueError(f"n must be >= 1, got {n}")
+     values = np.asarray(values, dtype=np.float64)
+-    length = len(values)
++    return _rolling_min_jit(values, n)
++
++
++@numba.njit(cache=True, fastmath=False)
++def _rolling_min_jit(values: np.ndarray, n: int) -> np.ndarray:
++    length = values.shape[0]
+     out = np.full(length, np.nan, dtype=np.float64)
+-    dq: deque[int] = deque()
++    dq = np.empty(n, dtype=np.int64)
++    head = 0
++    tail = 0
++    size = 0
+     for i in range(length):
+-        while dq and dq[0] <= i - n:
+-            dq.popleft()
+-        while dq and values[dq[-1]] >= values[i]:
+-            dq.pop()
+-        dq.append(i)
++        while size > 0 and dq[head] <= i - n:
++            head = (head + 1) % n
++            size -= 1
++        while size > 0:
++            back_idx = (tail - 1 + n) % n
++            if values[dq[back_idx]] >= values[i]:  # rolling_max と違い >=
++                tail = back_idx
++                size -= 1
++            else:
++                break
++        dq[tail] = i
++        tail = (tail + 1) % n
++        size += 1
+         if i >= n - 1:
+-            out[i] = values[dq[0]]
++            out[i] = values[dq[head]]
+     return out
+ 
+ 
+@@ -216,7 +258,10 @@ def _wilder_smooth(values: np.ndarray, n: int) -> np.ndarray:
+ 
+     values の先頭 n 個の平均を seed とし、以降 recurrence。
+     入力 NaN は 0 扱いしない（呼び出し側で除外する契約）。
+-    warmup: out[i<n-1] = NaN。
++    warmup: out[i<n-1] = NaN。途中 NaN は前値維持 (現行契約)。
++
++    T088 cycle 1 profile-optimize: recurrence loop のみ Numba JIT 化、 seed は
++    現行 np.nanmean/mean を維持して exact parity を保証 (Codex Round 1 指摘)。
+     """
+     if n <= 0:
+         raise ValueError(f"n must be >= 1, got {n}")
+@@ -225,20 +270,43 @@ def _wilder_smooth(values: np.ndarray, n: int) -> np.ndarray:
+     out = np.full(length, np.nan, dtype=np.float64)
+     if length < n:
+         return out
++    # seed: 現行と完全に同一の演算順序で計算 (exact parity 保証)
+     # NaN を含む場合、先頭 n に NaN が混じっていたら seed が NaN に伝播する
+-    seed = float(np.nanmean(values[:n])) if np.any(np.isnan(values[:n])) else float(values[:n].mean())
++    seed = (
++        float(np.nanmean(values[:n]))
++        if np.any(np.isnan(values[:n]))
++        else float(values[:n].mean())
++    )
++    if not np.isfinite(seed):
++        # 全 NaN 等で seed = NaN → out は全区間 NaN のまま return (現行と整合)
++        return out
+     out[n - 1] = seed
++    # recurrence loop のみ Numba JIT 化 (途中 NaN 前値維持の semantics 維持)
++    _wilder_smooth_recurrence_jit(values, out, n, seed)
++    return out
++
++
++@numba.njit(cache=True, fastmath=False)
++def _wilder_smooth_recurrence_jit(
++    values: np.ndarray,
++    out: np.ndarray,
++    n: int,
++    seed: float,
++) -> None:
++    """In-place: out[n:length] を recurrence で埋める。 out[n-1]=seed は呼び出し側で設定済。"""
++    length = values.shape[0]
+     prev = seed
++    n_minus_1 = float(n - 1)
++    n_float = float(n)
+     for i in range(n, length):
+         v = values[i]
+-        if np.isnan(v):
+-            # NaN 入力は前値を維持（Wilder は自己回帰）
++        if v == v:  # not NaN (NaN != NaN)
++            cur = (prev * n_minus_1 + v) / n_float
++            out[i] = cur
++            prev = cur
++        else:
++            # 途中 NaN は前値維持 (現行契約、 adx() の NaN parity)
+             out[i] = prev
+-            continue
+-        cur = (prev * (n - 1) + v) / n
+-        out[i] = cur
+-        prev = cur
+-    return out
+ 
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/tests/alpha_factory/primitives/test_indicators.py b/tests/alpha_factory/primitives/test_indicators.py
+index 0ae6191..31061cb 100644
+--- a/tests/alpha_factory/primitives/test_indicators.py
++++ b/tests/alpha_factory/primitives/test_indicators.py
+@@ -318,3 +318,294 @@ class TestLogReturns:
+         r = log_returns_from_close(c)
+         assert np.isnan(r[1])
+         assert np.isnan(r[2])
++
++
++# ---------------------------------------------------------------------------
++# T088: Numba JIT 化 parity tests (rolling_max / rolling_min / _wilder_smooth)
++# ---------------------------------------------------------------------------
++
++
++def _rolling_max_oracle(values: np.ndarray, n: int) -> np.ndarray:
++    """test 内 self-contained oracle: 現行 deque 版 rolling_max と同じロジック。
++
++    T088 の Numba JIT 化版が numerically identical であることを保証するため、
++    test 内で独立に同じ comparator (`<=` で右から drop) を再現する。
++    """
++    from collections import deque
++
++    if n <= 0:
++        raise ValueError(f"n must be >= 1, got {n}")
++    values = np.asarray(values, dtype=np.float64)
++    length = len(values)
++    out = np.full(length, np.nan, dtype=np.float64)
++    dq: deque[int] = deque()
++    for i in range(length):
++        while dq and dq[0] <= i - n:
++            dq.popleft()
++        while dq and values[dq[-1]] <= values[i]:
++            dq.pop()
++        dq.append(i)
++        if i >= n - 1:
++            out[i] = values[dq[0]]
++    return out
++
++
++def _rolling_min_oracle(values: np.ndarray, n: int) -> np.ndarray:
++    """test 内 self-contained oracle: 現行 deque 版 rolling_min と同じロジック。"""
++    from collections import deque
++
++    if n <= 0:
++        raise ValueError(f"n must be >= 1, got {n}")
++    values = np.asarray(values, dtype=np.float64)
++    length = len(values)
++    out = np.full(length, np.nan, dtype=np.float64)
++    dq: deque[int] = deque()
++    for i in range(length):
++        while dq and dq[0] <= i - n:
++            dq.popleft()
++        while dq and values[dq[-1]] >= values[i]:
++            dq.pop()
++        dq.append(i)
++        if i >= n - 1:
++            out[i] = values[dq[0]]
++    return out
++
++
++def _wilder_smooth_oracle(values: np.ndarray, n: int) -> np.ndarray:
++    """test 内 self-contained oracle: 現行 plain Python 版 _wilder_smooth と同じロジック。
++
++    NaN 契約 (seed = nanmean if NaN含む else mean、 途中 NaN は前値維持) を再現。
++    """
++    if n <= 0:
++        raise ValueError(f"n must be >= 1, got {n}")
++    values = np.asarray(values, dtype=np.float64)
++    length = len(values)
++    out = np.full(length, np.nan, dtype=np.float64)
++    if length < n:
++        return out
++    seed = (
++        float(np.nanmean(values[:n]))
++        if np.any(np.isnan(values[:n]))
++        else float(values[:n].mean())
++    )
++    if not np.isfinite(seed):
++        return out
++    out[n - 1] = seed
++    prev = seed
++    for i in range(n, length):
++        v = values[i]
++        if np.isnan(v):
++            out[i] = prev
++            continue
++        cur = (prev * (n - 1) + v) / n
++        out[i] = cur
++        prev = cur
++    return out
++
++
++def _assert_arrays_identical_with_nan(
++    actual: np.ndarray, expected: np.ndarray
++) -> None:
++    """NaN 同位置一致 + 有限値は厳密一致 (assert_array_equal) を確認。"""
++    assert actual.shape == expected.shape
++    nan_mask_actual = np.isnan(actual)
++    nan_mask_expected = np.isnan(expected)
++    np.testing.assert_array_equal(nan_mask_actual, nan_mask_expected)
++    finite = ~nan_mask_actual
++    np.testing.assert_array_equal(actual[finite], expected[finite])
++
++
++class TestRollingMaxNumbaParity:
++    """T088: rolling_max Numba JIT 化版が現行 deque 実装と numerically identical。"""
++
++    def test_normal_input(self):
++        rng = np.random.default_rng(42)
++        v = rng.normal(size=200)
++        for n in (3, 5, 14, 50):
++            actual = rolling_max(v, n)
++            expected = _rolling_max_oracle(v, n)
++            _assert_arrays_identical_with_nan(actual, expected)
++
++    def test_n_equals_one(self):
++        v = np.array([3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0])
++        actual = rolling_max(v, 1)
++        expected = _rolling_max_oracle(v, 1)
++        _assert_arrays_identical_with_nan(actual, expected)
++        # n=1 では各点が自分自身
++        np.testing.assert_array_equal(actual, v)
++
++    def test_repeated_values(self):
++        # 重複値が連続: comparator strict (`<=` で drop = 等値も drop) 確認
++        v = np.array([2.0, 2.0, 2.0, 2.0, 2.0, 1.0, 3.0, 3.0, 3.0])
++        for n in (1, 2, 3, 5):
++            actual = rolling_max(v, n)
++            expected = _rolling_max_oracle(v, n)
++            _assert_arrays_identical_with_nan(actual, expected)
++
++    def test_length_less_than_n(self):
++        v = np.array([1.0, 2.0])
++        actual = rolling_max(v, 5)
++        expected = _rolling_max_oracle(v, 5)
++        _assert_arrays_identical_with_nan(actual, expected)
++        # length < n でも warmup NaN 条件で出力すべて NaN
++        assert np.all(np.isnan(actual))
++
++
++class TestRollingMinNumbaParity:
++    """T088: rolling_min Numba JIT 化版が現行 deque 実装と numerically identical。"""
++
++    def test_normal_input(self):
++        rng = np.random.default_rng(7)
++        v = rng.normal(size=200)
++        for n in (3, 5, 14, 50):
++            actual = rolling_min(v, n)
++            expected = _rolling_min_oracle(v, n)
++            _assert_arrays_identical_with_nan(actual, expected)
++
++    def test_n_equals_one(self):
++        v = np.array([3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0])
++        actual = rolling_min(v, 1)
++        expected = _rolling_min_oracle(v, 1)
++        _assert_arrays_identical_with_nan(actual, expected)
++        np.testing.assert_array_equal(actual, v)
++
++    def test_repeated_values(self):
++        v = np.array([2.0, 2.0, 2.0, 2.0, 2.0, 1.0, 3.0, 3.0, 3.0])
++        for n in (1, 2, 3, 5):
++            actual = rolling_min(v, n)
++            expected = _rolling_min_oracle(v, n)
++            _assert_arrays_identical_with_nan(actual, expected)
++
++    def test_length_less_than_n(self):
++        v = np.array([1.0, 2.0])
++        actual = rolling_min(v, 5)
++        expected = _rolling_min_oracle(v, 5)
++        _assert_arrays_identical_with_nan(actual, expected)
++        assert np.all(np.isnan(actual))
++
++
++class TestWilderSmoothNumbaParity:
++    """T088: _wilder_smooth Numba JIT 化版が現行 plain Python 実装と numerically identical。
++
++    seed 計算は Python 側維持 (nanmean/mean)、 recurrence loop のみ JIT 化。
++    NaN 同位置一致 + 有限値は assert_array_equal で bit-identical 確認。
++    """
++
++    def test_all_finite(self):
++        # case (a): 全 finite 入力
++        from src.alpha_factory.primitives._indicators import _wilder_smooth
++
++        rng = np.random.default_rng(123)
++        v = rng.normal(size=200)
++        for n in (3, 5, 14, 30):
++            actual = _wilder_smooth(v, n)
++            expected = _wilder_smooth_oracle(v, n)
++            _assert_arrays_identical_with_nan(actual, expected)
++
++    def test_leading_nan_in_seed(self):
++        # case (b): 先頭 n 個に NaN 1 個 (seed が nanmean で計算される)
++        from src.alpha_factory.primitives._indicators import _wilder_smooth
++
++        v = np.array([1.0, np.nan, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
++        for n in (3, 5):
++            actual = _wilder_smooth(v, n)
++            expected = _wilder_smooth_oracle(v, n)
++            _assert_arrays_identical_with_nan(actual, expected)
++
++    def test_mid_nan(self):
++        # case (c): 途中に NaN 1 個 (前値維持の semantics 確認)
++        from src.alpha_factory.primitives._indicators import _wilder_smooth
++
++        v = np.array([1.0, 2.0, 3.0, 4.0, np.nan, 6.0, 7.0, 8.0, 9.0, 10.0])
++        for n in (3, 5):
++            actual = _wilder_smooth(v, n)
++            expected = _wilder_smooth_oracle(v, n)
++            _assert_arrays_identical_with_nan(actual, expected)
++
++    def test_all_nan(self):
++        # case (d): 全 NaN (seed = NaN → 全区間 NaN)
++        from src.alpha_factory.primitives._indicators import _wilder_smooth
++
++        v = np.full(20, np.nan, dtype=np.float64)
++        for n in (3, 5, 10):
++            actual = _wilder_smooth(v, n)
++            expected = _wilder_smooth_oracle(v, n)
++            _assert_arrays_identical_with_nan(actual, expected)
++            assert np.all(np.isnan(actual))
++
++    def test_length_less_than_n(self):
++        # case (e): length < n
++        from src.alpha_factory.primitives._indicators import _wilder_smooth
++
++        v = np.array([1.0, 2.0, 3.0])
++        actual = _wilder_smooth(v, 10)
++        expected = _wilder_smooth_oracle(v, 10)
++        _assert_arrays_identical_with_nan(actual, expected)
++        assert np.all(np.isnan(actual))
++
++
++class TestAdxViaWilderSmoothNumbaParity:
++    """T088: adx() 全体が _wilder_smooth Numba 化後も現行と numerically identical。"""
++
++    def test_adx_atr_parity_with_oracle_wilder(self):
++        """adx() の出力 (adx, +DI, -DI) が、 _wilder_smooth oracle 版で計算した
++        参照実装と完全一致することを確認。 _wilder_smooth は adx 内の atr/+DI/-DI
++        計算経路で 3 回呼ばれる。
++        """
++        rng = np.random.default_rng(2026)
++        size = 150
++        # OHLC 系列を擬似生成
++        close = 100.0 + np.cumsum(rng.normal(scale=0.5, size=size))
++        high = close + np.abs(rng.normal(scale=0.3, size=size))
++        low = close - np.abs(rng.normal(scale=0.3, size=size))
++
++        n = 14
++        adx_actual, plus_di_actual, minus_di_actual = adx(high, low, close, n)
++
++        # 参照実装: adx() 内のロジックを oracle wilder で再現
++        from src.alpha_factory.primitives._indicators import true_range
++
++        up_move = high[1:] - high[:-1]
++        down_move = low[:-1] - low[1:]
++        plus_dm = np.where(
++            (up_move > down_move) & (up_move > 0), up_move, 0.0
++        )
++        minus_dm = np.where(
++            (down_move > up_move) & (down_move > 0), down_move, 0.0
++        )
++        plus_dm_full = np.concatenate([[0.0], plus_dm])
++        minus_dm_full = np.concatenate([[0.0], minus_dm])
++        tr = true_range(high, low, close)
++        sm_tr = _wilder_smooth_oracle(tr, n)
++        sm_plus = _wilder_smooth_oracle(plus_dm_full, n)
++        sm_minus = _wilder_smooth_oracle(minus_dm_full, n)
++        with np.errstate(divide="ignore", invalid="ignore"):
++            plus_di_expected = np.where(
++                sm_tr > 0, 100.0 * sm_plus / sm_tr, 0.0
++            )
++            minus_di_expected = np.where(
++                sm_tr > 0, 100.0 * sm_minus / sm_tr, 0.0
++            )
++        plus_di_expected = np.where(
++            np.isnan(sm_tr), np.nan, plus_di_expected
++        )
++        minus_di_expected = np.where(
++            np.isnan(sm_tr), np.nan, minus_di_expected
++        )
++        di_sum = plus_di_expected + minus_di_expected
++        with np.errstate(divide="ignore", invalid="ignore"):
++            dx = np.where(
++                di_sum > 0,
++                100.0 * np.abs(plus_di_expected - minus_di_expected) / di_sum,
++                0.0,
++            )
++        dx = np.where(
++            np.isnan(plus_di_expected) | np.isnan(minus_di_expected),
++            np.nan,
++            dx,
++        )
++        adx_expected = _wilder_smooth_oracle(dx, n)
++
++        _assert_arrays_identical_with_nan(adx_actual, adx_expected)
++        _assert_arrays_identical_with_nan(plus_di_actual, plus_di_expected)
++        _assert_arrays_identical_with_nan(minus_di_actual, minus_di_expected)
