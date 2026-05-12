@@ -1,0 +1,30 @@
+{
+  "dataset_epoch_id": "epoch_20251001_20260401",
+  "name": "g27_i3",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F10",
+          "weight": 1.6224050817464961,
+          "params": {
+            "n": 37
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.0520417288785873
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.32872163728580023,
+    "exit_threshold": 0.1589577132006029,
+    "max_pos": 2,
+    "time_stop_min": 113
+  },
+  "risk": {
+    "stop_atr": 1.6712085937704977,
+    "take_atr": 2.113852177725027
+  }
+}

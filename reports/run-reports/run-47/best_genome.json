@@ -1,0 +1,104 @@
+{
+  "dataset_epoch_id": "epoch_20251001_20260401",
+  "name": "g52_i42",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F6",
+          "weight": 1.7399594683252273,
+          "params": {
+            "session": 0,
+            "k": 1.8669874847740857,
+            "atr_n": 16
+          }
+        },
+        {
+          "name": "F12",
+          "weight": 0.646947158862952,
+          "params": {
+            "n": 12,
+            "window": 157,
+            "k_scale": 1.9265641885573201
+          }
+        },
+        {
+          "name": "F4",
+          "weight": 1.3264771911380089,
+          "params": {
+            "n": 25,
+            "scale": 14.237156940356876
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "M1",
+          "weight": 1.2319954046604957,
+          "params": {
+            "n": 7,
+            "threshold_rel": 0.015095200804284805,
+            "scale_rel": 0.0077526236322616095,
+            "prefer_high": 0
+          }
+        }
+      ],
+      "weight": 0.7603303645277659
+    },
+    {
+      "directional": [
+        {
+          "name": "F6",
+          "weight": 1.4501022027983583,
+          "params": {
+            "session": 0,
+            "k": 1.3076117511439616,
+            "atr_n": 12
+          }
+        },
+        {
+          "name": "F1",
+          "weight": 1.0522614849465803,
+          "params": {
+            "fast_n": 21,
+            "slow_n": 96,
+            "atr_n": 9
+          }
+        },
+        {
+          "name": "P4",
+          "weight": 0.8832284893002712,
+          "params": {
+            "window_min": 88.61531371285069,
+            "scale_min": 9.468844355661952
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "P11",
+          "weight": -0.9932077855331287,
+          "params": {
+            "dxy_n": 69,
+            "vix_threshold": 30.648950214048504,
+            "vix_scale": 8.712239692627213,
+            "vix_staleness_days": 6.819354781090193,
+            "dxy_staleness_bars": 183
+          }
+        }
+      ],
+      "weight": 1.047325984469117
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.47384167978121755,
+    "exit_threshold": 0.24601277977007713,
+    "max_pos": 4,
+    "time_stop_min": 225
+  },
+  "risk": {
+    "stop_atr": 0.5275202320425647,
+    "take_atr": 1.8463905929406659
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "name": "g57_i57",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F7",
+          "weight": 1.1953879984214582,
+          "params": {
+            "n": 19,
+            "scale": 27.783795698379354
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "M5",
+          "weight": -1.2491109931971338,
+          "params": {
+            "threshold": 38.36497637933981,
+            "scale": 12.514841143563899
+          }
+        }
+      ],
+      "weight": 0.5658958800746393
+    },
+    {
+      "directional": [
+        {
+          "name": "F12",
+          "weight": 0.8167989228747843,
+          "params": {
+            "n": 17,
+            "window": 126,
+            "k_scale": 2.831453905452205
+          }
+        },
+        {
+          "name": "P3",
+          "weight": 0.9444358869182241,
+          "params": {
+            "n": 7,
+            "scale": 0.018024140290640263
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.5899166082447393
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.3407195696899125,
+    "exit_threshold": 0.15301562954533557,
+    "max_pos": 3,
+    "time_stop_min": 81
+  },
+  "risk": {
+    "stop_atr": 1.87509747943947,
+    "take_atr": 2.264598404808013
+  }
+}

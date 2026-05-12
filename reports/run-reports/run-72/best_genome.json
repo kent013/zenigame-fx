@@ -1,0 +1,99 @@
+{
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "name": "g53_i67",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F8",
+          "weight": 1.2494725700985896,
+          "params": {
+            "n": 51,
+            "k": 2.635331426597012
+          }
+        },
+        {
+          "name": "F6",
+          "weight": 1.4364686961724715,
+          "params": {
+            "session": 0,
+            "k": 2.559347059541443,
+            "atr_n": 28
+          }
+        },
+        {
+          "name": "F14",
+          "weight": 0.9669962700850864,
+          "params": {
+            "fast_n": 28,
+            "slow_n": 84,
+            "rv_n": 53,
+            "scale": 3.7521005569690447,
+            "k_scale": 2.3583016312709804
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "M2",
+          "weight": -0.5545852626055117,
+          "params": {
+            "session": 1,
+            "soft_edge_min": 46.64187336994148
+          }
+        }
+      ],
+      "weight": 0.6493635448762247
+    },
+    {
+      "directional": [
+        {
+          "name": "F8",
+          "weight": 1.2042304292217751,
+          "params": {
+            "n": 51,
+            "k": 2.635331426597012
+          }
+        },
+        {
+          "name": "F6",
+          "weight": 1.4240502597124944,
+          "params": {
+            "session": 0,
+            "k": 2.559347059541443,
+            "atr_n": 28
+          }
+        },
+        {
+          "name": "P2",
+          "weight": 1.0152672774847094,
+          "params": {
+            "atr_n": 24
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "M2",
+          "weight": -0.5545852626055117,
+          "params": {
+            "session": 1,
+            "soft_edge_min": 44.24159493412868
+          }
+        }
+      ],
+      "weight": 0.6493635448762247
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.4122693857285046,
+    "exit_threshold": -0.00035546349572643157,
+    "max_pos": 5,
+    "time_stop_min": 98
+  },
+  "risk": {
+    "stop_atr": 0.31408948243454116,
+    "take_atr": 0.1
+  }
+}

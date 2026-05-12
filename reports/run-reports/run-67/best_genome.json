@@ -1,0 +1,41 @@
+{
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "name": "g58_i71",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F14",
+          "weight": 1.330559947961185,
+          "params": {
+            "fast_n": 11,
+            "slow_n": 38,
+            "rv_n": 53,
+            "scale": 1.180519643469696,
+            "k_scale": 4.278382467903004
+          }
+        },
+        {
+          "name": "P2",
+          "weight": 0.9002964349626384,
+          "params": {
+            "atr_n": 23
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.9885602725903716
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.42185237045150836,
+    "exit_threshold": -0.035312106529407264,
+    "max_pos": 7,
+    "time_stop_min": 258
+  },
+  "risk": {
+    "stop_atr": 0.3964893944672058,
+    "take_atr": 5.1263087213231096
+  }
+}

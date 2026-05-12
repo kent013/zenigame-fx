@@ -1,0 +1,93 @@
+{
+  "dataset_epoch_id": "epoch_20251001_20260401",
+  "name": "g44_i89",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F6",
+          "weight": 0.9166158373242274,
+          "params": {
+            "session": 0,
+            "k": 1.1767508129871147,
+            "atr_n": 16
+          }
+        },
+        {
+          "name": "F12",
+          "weight": 0.6812527938391129,
+          "params": {
+            "n": 17,
+            "window": 145,
+            "k_scale": 2.906534379238685
+          }
+        },
+        {
+          "name": "F4",
+          "weight": 1.3261697198334388,
+          "params": {
+            "n": 28,
+            "scale": 21.943433777637264
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.7603303645277659
+    },
+    {
+      "directional": [
+        {
+          "name": "F14",
+          "weight": 1.3055031410922107,
+          "params": {
+            "fast_n": 21,
+            "slow_n": 40,
+            "rv_n": 37,
+            "scale": 3.354388046208971,
+            "k_scale": 4.3559909561769325
+          }
+        },
+        {
+          "name": "F1",
+          "weight": 1.2441577799695154,
+          "params": {
+            "fast_n": 14,
+            "slow_n": 80,
+            "atr_n": 14
+          }
+        },
+        {
+          "name": "F12",
+          "weight": 0.7418196514019777,
+          "params": {
+            "n": 22,
+            "window": 439,
+            "k_scale": 1.8660911944492335
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "M5",
+          "weight": -1.114563272974403,
+          "params": {
+            "threshold": 27.729744571136056,
+            "scale": 1.5835938236962943
+          }
+        }
+      ],
+      "weight": 0.5444948873763554
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.38899206400821795,
+    "exit_threshold": 0.04258608069937797,
+    "max_pos": 5,
+    "time_stop_min": 225
+  },
+  "risk": {
+    "stop_atr": 1.467935736359284,
+    "take_atr": 2.261724311544032
+  }
+}

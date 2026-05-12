@@ -1,0 +1,94 @@
+{
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "name": "g60_i45",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F6",
+          "weight": 1.056152529567515,
+          "params": {
+            "session": 0,
+            "k": 2.391465843748391,
+            "atr_n": 11
+          }
+        },
+        {
+          "name": "F7",
+          "weight": 0.7124069349919582,
+          "params": {
+            "n": 8,
+            "scale": 14.491424259948936
+          }
+        },
+        {
+          "name": "P7",
+          "weight": 1.1296786432184416,
+          "params": {
+            "spx_n": 21,
+            "vix_threshold": 31.467388819520814,
+            "vix_scale": 7.2901040582201775,
+            "vix_staleness_days": 7.5754891275755565,
+            "spx_staleness_bars": 196
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.0048925694789208
+    },
+    {
+      "directional": [
+        {
+          "name": "P12",
+          "weight": 1.011518467547746,
+          "params": {
+            "mom_n": 27,
+            "scale": 0.09830020695323952,
+            "staleness_bars": 310
+          }
+        },
+        {
+          "name": "F4",
+          "weight": 1.2111864967525015,
+          "params": {
+            "n": 23,
+            "scale": 25.79862209488699
+          }
+        },
+        {
+          "name": "F9",
+          "weight": 0.5551805722168883,
+          "params": {
+            "n": 18,
+            "scale": 11.976387795787618
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "P11",
+          "weight": 1.156626752676138,
+          "params": {
+            "dxy_n": 118,
+            "vix_threshold": 37.913620970173575,
+            "vix_scale": 7.8711522829496205,
+            "vix_staleness_days": 12.889529235660175,
+            "dxy_staleness_bars": 349
+          }
+        }
+      ],
+      "weight": 0.809406912328323
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.4088734062116323,
+    "exit_threshold": -0.44687066579184387,
+    "max_pos": 5,
+    "time_stop_min": 447
+  },
+  "risk": {
+    "stop_atr": 0.21841809444267768,
+    "take_atr": 4.3085091253945915
+  }
+}
