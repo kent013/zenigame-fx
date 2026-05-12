@@ -390,6 +390,7 @@ archive Parquet schema に `stage_b_unavailable_reason_counts` (JSON 文字列�
 | `insufficient_folds` | `n_fold == 1` |
 | `median_oos_sharpe<min` | median_oos_sharpe < `stage_b_median_oos_sharpe_min` |
 | `positive_fold_ratio<min` | positive_ratio < `stage_b_positive_fold_min` |
+| `n_fold_below_safe_floor` | `n_fold_effective < wf_min_safe_folds` (T092: 個体評価層 statistical safety floor; Run 60 型 artifact 排除) |
 | `all_folds_unavailable` | 全 fold で no-trade による sharpe=None |
 | `stage_b_window_underfilled` | LaneManager が Stage B 評価前に observed_dates < (train+embargo+test) を検出し skip-path 適用 |
 

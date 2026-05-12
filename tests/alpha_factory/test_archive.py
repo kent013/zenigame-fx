@@ -1208,6 +1208,101 @@ def test_collect_stage_b_writes_none_reason_codes_when_passed() -> None:
     assert rows[0]["stage_b_reason_codes"] is None
 
 
+def test_t092_n_fold_below_safe_floor_reason_persists_to_archive() -> None:
+    """T092: n_fold_below_safe_floor reason が archive parquet 列まで伝搬する.
+
+    Codex impl-review Round 1 [Warning] 「stage_b_reason_codes が単一 reason 優先保存仕様だと
+    新 reason が落ちる懸念」への直接的回答。 archive.py:541 は ";".join(rc) で全 reason を
+    結合保存するため、 guard が他 reason と併発しても全部が parquet 列に書かれることを契約として担保する。
+    """
+    from src.alpha_factory.archive import GenomeArchive
+    from src.alpha_factory.stage_gate import StageResult
+
+    arc = GenomeArchive(run_id="test_run_t092", run_number=1)
+    g = _stub_genome("g0_i0")
+    sr = StageResult(
+        stage="B",
+        passed=False,
+        metrics={
+            "stage": "B",
+            "genome_name": "g0_i0",
+            "n_bars": 100,
+            "wall_time_seconds": 0.1,
+            "payload": {
+                "n_fold": 4,
+                "n_fold_unavailable": 0,
+                "n_fold_effective": 4,
+                "oos_sharpes": (0.3, 0.4, 0.5, 0.6),
+                "median_oos_sharpe": 0.45,
+                "positive_fold_ratio": 1.0,
+                "positive_fold_ratio_effective": 1.0,
+                "dsr": None,
+                "is_full_sharpe": 0.5,
+                "is_full_total_pnl": 12000.0,
+                "is_full_trade_count": 200,
+            },
+        },
+        reason_codes=("n_fold_below_safe_floor",),
+    )
+    arc.collect_stage_b(
+        g, lane_id="lane1", generation=0, stage_result=sr, instrument="EUR_JPY"
+    )
+    rows = list(arc._rows.values())
+    assert rows[0]["stage_b_pass"] is False
+    assert rows[0]["stage_b_reason_codes"] == "n_fold_below_safe_floor"
+    assert rows[0]["n_fold_effective"] == 4
+
+
+def test_t092_n_fold_below_safe_floor_coexists_with_other_reasons_in_archive() -> None:
+    """T092: guard reason が他 reason (insufficient_folds / all_folds_unavailable) と
+    併記されても ";" 区切りで全部 archive 列に残ることを契約担保する."""
+    from src.alpha_factory.archive import GenomeArchive
+    from src.alpha_factory.stage_gate import StageResult
+
+    arc = GenomeArchive(run_id="test_run_t092_co", run_number=1)
+    g = _stub_genome("g0_i0")
+    sr = StageResult(
+        stage="B",
+        passed=False,
+        metrics={
+            "stage": "B",
+            "genome_name": "g0_i0",
+            "n_bars": 100,
+            "wall_time_seconds": 0.1,
+            "payload": {
+                "n_fold": 3,
+                "n_fold_unavailable": 3,
+                "n_fold_effective": 0,
+                "oos_sharpes": (0.0, 0.0, 0.0),
+                "median_oos_sharpe": 0.0,
+                "positive_fold_ratio": 0.0,
+                "positive_fold_ratio_effective": None,
+                "dsr": None,
+                "is_full_sharpe": None,
+                "is_full_total_pnl": None,
+                "is_full_trade_count": None,
+            },
+        },
+        reason_codes=(
+            "median_oos_sharpe<min",
+            "positive_fold_ratio<min",
+            "n_fold_below_safe_floor",
+            "all_folds_unavailable",
+        ),
+    )
+    arc.collect_stage_b(
+        g, lane_id="lane1", generation=0, stage_result=sr, instrument="EUR_JPY"
+    )
+    rows = list(arc._rows.values())
+    serialized = rows[0]["stage_b_reason_codes"]
+    assert serialized is not None
+    parts = set(serialized.split(";"))
+    assert "n_fold_below_safe_floor" in parts
+    assert "median_oos_sharpe<min" in parts
+    assert "positive_fold_ratio<min" in parts
+    assert "all_folds_unavailable" in parts
+
+
 # ---------------------------------------------------------------------------
 # T058: schema v2 contract — 4 field 追加 + flush lint 連動
 # ---------------------------------------------------------------------------

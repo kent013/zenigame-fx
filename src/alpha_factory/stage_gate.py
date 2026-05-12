@@ -1225,6 +1225,13 @@ def evaluate_stage_b(
         if positive_ratio < stage_config.stage_b_positive_fold_min:
             reasons.append("positive_fold_ratio<min")
 
+    # T092: `wf_min_safe_folds` は statistical safety floor (個体評価層)、
+    # `wf_min_folds_required` は worker 短絡判定 graceful degrade で役割が異なる。
+    # 後者が満たされても前者を下回る effective fold 数は WF 評価として信頼不足のため、
+    # ここで Stage B fail にして archive selection で best 浮上経路を塞ぐ (Run 60 artifact 対策)。
+    if n_fold_effective < stage_config.wf_min_safe_folds:
+        reasons.append("n_fold_below_safe_floor")
+
     # 全 fold metric_unavailable のときは別 reason で監査性を上げる
     if n_fold > 0 and n_fold_unavailable == n_fold:
         reasons.append("all_folds_unavailable")
