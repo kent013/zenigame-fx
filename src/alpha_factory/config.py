@@ -538,6 +538,14 @@ def _build_stage_gate(
         "stage_b_fold_trade_count_min": int(
             b_raw.get("fold_trade_count_min", 10)
         ),
+        # T099 cycle 22: Stage B gate opt-in mode + profit_safe_pfr params
+        "stage_b_gate_kind": str(b_raw.get("gate_kind", "legacy")),
+        "profit_safe_pfr_threshold": float(
+            b_raw.get("profit_safe_pfr_threshold", 0.4)
+        ),
+        "profit_safe_pfr_min_n_fold": int(
+            b_raw.get("profit_safe_pfr_min_n_fold", 20)
+        ),
         "stage_c_holdout_days": int(c_raw.get("holdout_days", 60)),
         "spread_stress_multiplier": float(
             c_raw.get("spread_stress_multiplier", 1.5)

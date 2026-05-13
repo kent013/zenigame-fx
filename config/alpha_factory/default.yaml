@@ -183,6 +183,20 @@ stage_gate:
     # **緩和ではなく「機能していた当時 (run_20260426_145502 median 167) の
     # 挙動を意図的に再現する設計判断」** (詳細設計 仮説 B-X 案 3)。
     fold_trade_count_min: 10
+    # T099 cycle 22 (improve-cycle 2026-05-13): Stage B gate opt-in mode。
+    # - legacy (default): 現行 sign-based (median_oos_sharpe + positive_fold_ratio AND)
+    # - profit_safe_pfr: 4 条件 AND 強化
+    #   1. positive_fold_ratio_effective >= profit_safe_pfr_threshold (0.4)
+    #   2. median_oos_total_pnl >= 0 (実利益保証、effective fold のみで median)
+    #   3. sum_oos_total_pnl >= 0 (aggregate 赤字防止)
+    #   4. n_fold_effective >= profit_safe_pfr_min_n_fold (20)
+    # 根拠: archive 実測 Spearman ρ(median_oos_sharpe → trade_sharpe_stage_c)=-0.361
+    # (curve-fit 逆予測)、Run 74 で Stage B 通過 96 個体全例赤字。
+    # CLI override 可: --stage-b-gate-kind {legacy, profit_safe_pfr}。
+    # 詳細: devnotes/20260513-2007-fx-improve/detailed-design.md (Codex Round 3 APPROVED)
+    gate_kind: legacy             # default 行動完全不変、 1 RUN smoke は CLI で profit_safe_pfr に切替
+    profit_safe_pfr_threshold: 0.4  # positive_fold_ratio_effective 最小要件
+    profit_safe_pfr_min_n_fold: 20  # n_fold_effective 最小要件 (Codex MODIFY: 解釈安定化)
   stage_c:
     holdout_days: 60
     spread_stress_multiplier: 1.5

@@ -153,6 +153,23 @@ yaml を chore commit で reset しても history が新しければ history 値
 
 ---
 
+## T099 cycle 22: Stage B gate `profit_safe_pfr` opt-in (2026-05-13 improve-cycle)
+
+`StageGateConfig.stage_b_gate_kind: Literal["legacy", "profit_safe_pfr"]` で Stage B gate を切替可能化:
+
+- `legacy` (default): 現行 `median_oos_sharpe + positive_fold_ratio` AND
+- `profit_safe_pfr`: 4 条件 AND (`pfr_eff>=0.4` ∧ `median_oos_total_pnl>=0` ∧ `sum_oos_total_pnl>=0` ∧ `n_fold_effective>=20`) + `oos_total_pnl_unavailable` fail-closed
+
+CLI override: `scripts/alpha_factory/run_ga.py --stage-b-gate-kind profit_safe_pfr`。
+
+起動時に `stage_gate.stage_b_gate_kind kind=X profit_safe_pfr_threshold=0.4 profit_safe_pfr_min_n_fold=20` log を出力する。`compute_base_config_hash` に 3 field 反映されているため、gate kind 切替時に過去 history record の calibrate-gate threshold が誤適用されない。
+
+根拠: archive 実測 Spearman ρ(median_oos_sharpe → trade_sharpe_stage_c)=-0.361 (curve-fit 逆予測)、Run 74 で Stage B 通過 96 個体全例赤字。
+
+詳細: `docs/alpha_factory/stage-gates.md` § "T099 cycle 22: Stage B gate profit_safe_pfr opt-in" / `devnotes/20260513-2007-fx-improve/detailed-design.md` (Codex Round 3 APPROVED)。
+
+---
+
 ## .claude/ 設定の現状
 
 `.claude/skills/` 配下は以下の三層構成:

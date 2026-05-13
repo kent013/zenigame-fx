@@ -542,6 +542,12 @@ def main(argv: list[str] | None = None) -> int:
             "positive_fold_ratio<min",
             # T044: pre-flight feasibility skip-path
             "stage_b_pre_flight_underfilled",
+            # T099 cycle 22 (profit_safe_pfr opt-in mode): 新規 reason codes
+            "positive_fold_ratio_effective<min",
+            "median_oos_total_pnl<min",
+            "sum_oos_total_pnl<min",
+            "n_fold_effective_below_profit_safe_min",
+            "oos_total_pnl_unavailable",
         )
         # Primary reason: ;-split の先頭のみで集計、合計 = failures
         primary_counts: dict[str, int] = {c: 0 for c in known_codes}

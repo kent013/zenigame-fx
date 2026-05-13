@@ -180,7 +180,9 @@ def test_schema_has_58_columns() -> None:
     # PR2 (persistence_score_shadow): Stage B 持続性予測 shadow score (51→52)
     # PR3 (canonical / mission_inf_gap shadow): Stage B IS + Stage C base 各
     #     3 列 (gate_pass / inf_gap / signed_margin) = 6 列 (52→58)
-    assert len(GENOMES_SCHEMA.names) == 58
+    # T099 cycle 22 (profit_safe_pfr observability): median_oos_total_pnl /
+    #     sum_oos_total_pnl / stage_b_gate_kind の 3 列追加 (58→61)
+    assert len(GENOMES_SCHEMA.names) == 61
     expected = {
         "run_id", "run_number", "generation", "individual_name",
         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
@@ -217,6 +219,8 @@ def test_schema_has_58_columns() -> None:
         "mission_signed_margin_b_shadow",
         "canonical_gate_pass_c_shadow", "mission_inf_gap_c_shadow",
         "mission_signed_margin_c_shadow",
+        # T099 cycle 22: profit_safe_pfr observability 3 列
+        "median_oos_total_pnl", "sum_oos_total_pnl", "stage_b_gate_kind",
     }
     assert set(GENOMES_SCHEMA.names) == expected
 
@@ -1039,6 +1043,8 @@ def test_schema_nullable_attributes() -> None:
         "mission_signed_margin_b_shadow",
         "canonical_gate_pass_c_shadow", "mission_inf_gap_c_shadow",
         "mission_signed_margin_c_shadow",
+        # T099 cycle 22: profit_safe_pfr observability (collect_stage_b で書込、 nullable=True)
+        "median_oos_total_pnl", "sum_oos_total_pnl", "stage_b_gate_kind",
     }
     for f in GENOMES_SCHEMA:
         if f.name in nullable_cols:

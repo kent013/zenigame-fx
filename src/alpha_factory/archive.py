@@ -137,6 +137,17 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
         pa.field("trade_count_stage_b", pa.int32(), nullable=True),
         pa.field("trade_count_full_dataset", pa.int32(), nullable=True),
         pa.field("median_oos_sharpe", pa.float64(), nullable=True),
+        # T099 cycle 22 (improve-cycle 2026-05-13): profit_safe_pfr observability。
+        # legacy mode でも payload に算出値を載せるため archive にも書き込む
+        # (= 観測列、 selection 影響なし)。
+        # - median_oos_total_pnl: Stage B per-fold OOS total_pnl の median
+        #   (effective fold のみで集計、 非有限 PnL は除外)
+        # - sum_oos_total_pnl: 同上 sum (aggregate 赤字検知用)
+        # - stage_b_gate_kind: 当 Stage B 評価時の gate mode ("legacy" / "profit_safe_pfr")
+        # 詳細: devnotes/20260513-2007-fx-improve/detailed-design.md
+        pa.field("median_oos_total_pnl", pa.float64(), nullable=True),
+        pa.field("sum_oos_total_pnl", pa.float64(), nullable=True),
+        pa.field("stage_b_gate_kind", pa.string(), nullable=True),
         # PR2: Stage B 持続性予測 shadow score (selection 影響なし、 audit only)。
         # 計算式: clip(0.7 * positive_fold_ratio_effective + 0.3 * fold_sign_ratio, 0, 1)。
         # archive 実測 Spearman で Stage C 持続性を正予測する 2 metric の加重合成。
@@ -256,6 +267,10 @@ def _create_row_template() -> dict[str, Any]:
         "trade_count_stage_b": None,
         "trade_count_full_dataset": None,
         "median_oos_sharpe": None,
+        # T099 cycle 22: profit_safe_pfr observability (collect_stage_b で書込)
+        "median_oos_total_pnl": None,
+        "sum_oos_total_pnl": None,
+        "stage_b_gate_kind": None,
         # PR2: Stage B 持続性予測 shadow score (collect_stage_b で計算・書込)
         "persistence_score_shadow": None,
         # PR3: canonical_metrics / mission_inf_gap shadow 列 (collect_stage_b/c
@@ -693,6 +708,17 @@ class GenomeArchive:
         median_oos = _opt_float(payload, "median_oos_sharpe")
         if median_oos is not None:
             row["median_oos_sharpe"] = median_oos
+        # T099 cycle 22: profit_safe_pfr observability。
+        # legacy / profit_safe_pfr 両 mode で payload に必ず載っているので転記のみ。
+        median_oos_total_pnl = _opt_float(payload, "median_oos_total_pnl")
+        if median_oos_total_pnl is not None:
+            row["median_oos_total_pnl"] = median_oos_total_pnl
+        sum_oos_total_pnl = _opt_float(payload, "sum_oos_total_pnl")
+        if sum_oos_total_pnl is not None:
+            row["sum_oos_total_pnl"] = sum_oos_total_pnl
+        gate_kind = payload.get("stage_b_gate_kind")
+        if isinstance(gate_kind, str):
+            row["stage_b_gate_kind"] = gate_kind
         # PR2: persistence_score_shadow を計算・書込 (selection 影響なし、 audit only)。
         # row["positive_fold_ratio_effective"] / row["fold_sign_ratio"] は本 collect_stage_b
         # の上流で既に書き込み済 (= _populate_stage_b_observability で書込)。

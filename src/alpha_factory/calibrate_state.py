@@ -82,6 +82,11 @@ def compute_base_config_hash(cfg: AlphaFactoryConfig) -> str:
                 cfg.stage_gate.stage_b_median_oos_sharpe_min
             ),
             "stage_b_positive_fold_min": cfg.stage_gate.stage_b_positive_fold_min,
+            # T099 cycle 22: Stage B gate opt-in mode は cross-run scope key 構成要素
+            # (= gate kind 切替で過去 history record が誤適用されないように hash 反映)
+            "stage_b_gate_kind": cfg.stage_gate.stage_b_gate_kind,
+            "profit_safe_pfr_threshold": cfg.stage_gate.profit_safe_pfr_threshold,
+            "profit_safe_pfr_min_n_fold": cfg.stage_gate.profit_safe_pfr_min_n_fold,
             "stage_b_dsr_min": cfg.stage_gate.stage_b_dsr_min,
             "wf_min_folds_required": cfg.stage_gate.wf_min_folds_required,
             "stage_b_fold_trade_count_min": (

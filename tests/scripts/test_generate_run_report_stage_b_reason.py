@@ -173,3 +173,87 @@ def test_stage_b_reason_pre_flight_underfilled() -> None:
     )
     assert primary["stage_b_pre_flight_underfilled"] == 1
     assert primary["other"] == 0
+
+
+def test_stage_b_reason_t099_profit_safe_pfr_codes_in_known() -> None:
+    """T099 cycle 22: profit_safe_pfr opt-in mode の新 reason 5 個が known_codes に含まれる。
+
+    実装側 (scripts/alpha_factory/generate_run_report.py) で追加した:
+      - positive_fold_ratio_effective<min
+      - median_oos_total_pnl<min
+      - sum_oos_total_pnl<min
+      - n_fold_effective_below_profit_safe_min
+      - oos_total_pnl_unavailable
+
+    が known_codes に含まれて other に吸われないことを契約として固定。
+    """
+    # known_codes 引数なし版 (default を更新する責務は無いが、 generate_run_report.py
+    # 側で 5 個が known_codes に含まれていることを実装直接読み取りで確認する)。
+
+    # generate_run_report.py を import して known_codes リテラルを抽出するのは難しいため、
+    # ソース文字列で 5 codes 含有を確認 (実装と既知 reason codes の契約検証)。
+    import pathlib
+    src_path = pathlib.Path("scripts/alpha_factory/generate_run_report.py")
+    src = src_path.read_text(encoding="utf-8")
+    for code in (
+        "positive_fold_ratio_effective<min",
+        "median_oos_total_pnl<min",
+        "sum_oos_total_pnl<min",
+        "n_fold_effective_below_profit_safe_min",
+        "oos_total_pnl_unavailable",
+    ):
+        assert code in src, (
+            f"T099 reason code {code!r} not found in generate_run_report.py "
+            f"known_codes (= other に吸われ運用上見えなくなる risk)"
+        )
+
+
+def test_stage_b_reason_t099_codes_route_to_known_when_in_tuple() -> None:
+    """T099: known_codes に含めて呼ぶと正しく集計される (route 確認)。"""
+    rows = [
+        {
+            "stage_a_pass": True,
+            "stage_b_pass": False,
+            "stage_b_reason_codes": "median_oos_total_pnl<min;sum_oos_total_pnl<min",
+        },
+        {
+            "stage_a_pass": True,
+            "stage_b_pass": False,
+            "stage_b_reason_codes": "positive_fold_ratio_effective<min",
+        },
+        {
+            "stage_a_pass": True,
+            "stage_b_pass": False,
+            "stage_b_reason_codes": "n_fold_effective_below_profit_safe_min",
+        },
+        {
+            "stage_a_pass": True,
+            "stage_b_pass": False,
+            "stage_b_reason_codes": "oos_total_pnl_unavailable",
+        },
+    ]
+    primary, any_, _, _ = _count_primary_and_any(
+        rows,
+        known_codes=(
+            "no_folds",
+            "insufficient_folds",
+            "all_folds_unavailable",
+            "stage_b_window_underfilled",
+            "median_oos_sharpe<min",
+            "positive_fold_ratio<min",
+            "stage_b_pre_flight_underfilled",
+            # T099 cycle 22
+            "positive_fold_ratio_effective<min",
+            "median_oos_total_pnl<min",
+            "sum_oos_total_pnl<min",
+            "n_fold_effective_below_profit_safe_min",
+            "oos_total_pnl_unavailable",
+        ),
+    )
+    assert primary["median_oos_total_pnl<min"] == 1
+    assert primary["positive_fold_ratio_effective<min"] == 1
+    assert primary["n_fold_effective_below_profit_safe_min"] == 1
+    assert primary["oos_total_pnl_unavailable"] == 1
+    assert primary["other"] == 0
+    # any 集計でも 2 件目の sum_oos_total_pnl<min が拾われる
+    assert any_["sum_oos_total_pnl<min"] == 1

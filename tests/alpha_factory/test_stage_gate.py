@@ -1922,3 +1922,272 @@ class TestT054StageBFoldTradeCountMin:
         """Stage B fold-min を 5 に下げられる (経験式禁止だが既存値の override 自体は可能)."""
         cfg = StageGateConfig(stage_b_fold_trade_count_min=5)
         assert cfg.stage_b_fold_trade_count_min == 5
+
+
+# ===========================================================================
+# T099 cycle 22 (improve-cycle 2026-05-13): Stage B gate profit_safe_pfr opt-in
+# ===========================================================================
+
+
+class TestT099ProfitSafePfrConfig:
+    """StageGateConfig 新 field の defaults / 範囲検証."""
+
+    def test_defaults_are_legacy(self) -> None:
+        """default は legacy mode で行動完全不変."""
+        cfg = StageGateConfig()
+        assert cfg.stage_b_gate_kind == "legacy"
+        assert cfg.profit_safe_pfr_threshold == 0.4
+        assert cfg.profit_safe_pfr_min_n_fold == 20
+
+    def test_unknown_gate_kind_raises(self) -> None:
+        with pytest.raises(ValueError, match="stage_b_gate_kind"):
+            StageGateConfig(stage_b_gate_kind="invalid_kind")  # type: ignore[arg-type]
+
+    def test_nonfinite_threshold_raises(self) -> None:
+        with pytest.raises(ValueError, match="profit_safe_pfr_threshold"):
+            StageGateConfig(profit_safe_pfr_threshold=float("nan"))
+        with pytest.raises(ValueError, match="profit_safe_pfr_threshold"):
+            StageGateConfig(profit_safe_pfr_threshold=float("inf"))
+
+    def test_threshold_out_of_range_raises(self) -> None:
+        with pytest.raises(ValueError, match="in \\[0, 1\\]"):
+            StageGateConfig(profit_safe_pfr_threshold=-0.01)
+        with pytest.raises(ValueError, match="in \\[0, 1\\]"):
+            StageGateConfig(profit_safe_pfr_threshold=1.01)
+
+    def test_min_n_fold_below_one_raises(self) -> None:
+        with pytest.raises(ValueError, match="profit_safe_pfr_min_n_fold"):
+            StageGateConfig(profit_safe_pfr_min_n_fold=0)
+
+    def test_can_construct_profit_safe_pfr_mode(self) -> None:
+        cfg = StageGateConfig(
+            stage_b_gate_kind="profit_safe_pfr",
+            profit_safe_pfr_threshold=0.5,
+            profit_safe_pfr_min_n_fold=10,
+        )
+        assert cfg.stage_b_gate_kind == "profit_safe_pfr"
+        assert cfg.profit_safe_pfr_threshold == 0.5
+        assert cfg.profit_safe_pfr_min_n_fold == 10
+
+
+class TestT099BuildStageGateReadsNewFields:
+    """yaml loader (_build_stage_gate) が新 field を読む."""
+
+    def test_loader_passes_new_fields_through(self) -> None:
+        from src.alpha_factory.config import _build_stage_gate
+
+        stage_gate_raw = {
+            "stage_b": {
+                "gate_kind": "profit_safe_pfr",
+                "profit_safe_pfr_threshold": 0.55,
+                "profit_safe_pfr_min_n_fold": 25,
+            },
+        }
+        cfg = _build_stage_gate(stage_gate_raw, {})
+        assert cfg.stage_b_gate_kind == "profit_safe_pfr"
+        assert cfg.profit_safe_pfr_threshold == 0.55
+        assert cfg.profit_safe_pfr_min_n_fold == 25
+
+    def test_loader_defaults_to_legacy_when_absent(self) -> None:
+        from src.alpha_factory.config import _build_stage_gate
+
+        cfg = _build_stage_gate({"stage_b": {}}, {})
+        assert cfg.stage_b_gate_kind == "legacy"
+        assert cfg.profit_safe_pfr_threshold == 0.4
+        assert cfg.profit_safe_pfr_min_n_fold == 20
+
+
+class TestT099ComputeBaseConfigHashNewFields:
+    """compute_base_config_hash に新 field が反映され、 cross-run scope key が gate_kind 切替で更新される."""
+
+    def _make_cfg(
+        self,
+        *,
+        gate_kind: str = "legacy",
+        threshold: float = 0.4,
+        min_n_fold: int = 20,
+    ):
+        from dataclasses import replace as dc_replace
+        from pathlib import Path
+
+        from src.alpha_factory.config import load_config
+        c = load_config(Path("config/alpha_factory/default.yaml"))
+        return dc_replace(
+            c,
+            stage_gate=dc_replace(
+                c.stage_gate,
+                stage_b_gate_kind=gate_kind,
+                profit_safe_pfr_threshold=threshold,
+                profit_safe_pfr_min_n_fold=min_n_fold,
+            ),
+        )
+
+    def test_hash_changes_when_gate_kind_changes(self) -> None:
+        from src.alpha_factory.calibrate_state import compute_base_config_hash
+        cfg_legacy = self._make_cfg(gate_kind="legacy")
+        cfg_psp = self._make_cfg(gate_kind="profit_safe_pfr")
+        assert compute_base_config_hash(cfg_legacy) != compute_base_config_hash(cfg_psp)
+
+    def test_hash_changes_when_threshold_changes(self) -> None:
+        from src.alpha_factory.calibrate_state import compute_base_config_hash
+        cfg_low = self._make_cfg(threshold=0.3)
+        cfg_high = self._make_cfg(threshold=0.5)
+        assert compute_base_config_hash(cfg_low) != compute_base_config_hash(cfg_high)
+
+    def test_hash_changes_when_min_n_fold_changes(self) -> None:
+        from src.alpha_factory.calibrate_state import compute_base_config_hash
+        cfg_small = self._make_cfg(min_n_fold=10)
+        cfg_large = self._make_cfg(min_n_fold=30)
+        assert compute_base_config_hash(cfg_small) != compute_base_config_hash(cfg_large)
+
+
+class TestT099EvaluateStageBPayloadKeys:
+    """evaluate_stage_b payload に新 key 5 個が含まれる (legacy / profit_safe_pfr 両 mode)."""
+
+    def _evaluate(self, gate_kind: str) -> StageResult:
+        bars = _make_continuous_bars(20, bars_per_day=4)
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        stage_cfg = StageGateConfig(
+            wf_train_days=3,
+            wf_test_days=2,
+            wf_step_days=2,
+            wf_embargo_days=0,
+            stage_b_gate_kind=gate_kind,  # type: ignore[arg-type]
+        )
+        return evaluate_stage_b(
+            _one_clause_genome("g_t099_payload"),
+            bars,
+            usd_jpy_meta(),
+            _backtest_config(),
+            ev,
+            stage_cfg,
+        )
+
+    def test_legacy_payload_contains_new_observability_keys(self) -> None:
+        res = self._evaluate("legacy")
+        payload = cast(dict[str, Any], _envelope(res)["payload"])
+        for key in (
+            "stage_b_gate_kind",
+            "median_oos_total_pnl",
+            "sum_oos_total_pnl",
+            "oos_total_pnls",
+            "profit_safe_pfr_threshold",
+            "profit_safe_pfr_min_n_fold",
+        ):
+            assert key in payload, f"{key} missing from payload (legacy mode)"
+        assert payload["stage_b_gate_kind"] == "legacy"
+
+    def test_profit_safe_pfr_payload_contains_new_keys(self) -> None:
+        res = self._evaluate("profit_safe_pfr")
+        payload = cast(dict[str, Any], _envelope(res)["payload"])
+        assert payload["stage_b_gate_kind"] == "profit_safe_pfr"
+        assert isinstance(payload["oos_total_pnls"], tuple)
+
+
+class TestT099ProfitSafePfrReasonCodes:
+    """profit_safe_pfr mode で fold が全部 unavailable / no-trade なときの reason 構造を確認."""
+
+    def _evaluate_no_trade(self, gate_kind: str) -> StageResult:
+        bars = _make_continuous_bars(20, bars_per_day=4)
+        ev = ConstantPrimitiveEvaluator(value=0.0)
+        stage_cfg = StageGateConfig(
+            wf_train_days=3,
+            wf_test_days=2,
+            wf_step_days=2,
+            wf_embargo_days=0,
+            stage_b_gate_kind=gate_kind,  # type: ignore[arg-type]
+            profit_safe_pfr_min_n_fold=2,  # テスト fold 数に合わせる
+        )
+        return evaluate_stage_b(
+            _one_clause_genome("g_t099_psp"),
+            bars,
+            usd_jpy_meta(),
+            _backtest_config(),
+            ev,
+            stage_cfg,
+        )
+
+    def test_legacy_mode_unaffected(self) -> None:
+        """legacy mode は完全不変 (median_oos_sharpe<min ∧ positive_fold_ratio<min)."""
+        res = self._evaluate_no_trade("legacy")
+        assert not res.passed
+        assert "median_oos_sharpe<min" in res.reason_codes
+        assert "positive_fold_ratio<min" in res.reason_codes
+        # profit_safe_pfr 用の reason codes は含まれない
+        assert "median_oos_total_pnl<min" not in res.reason_codes
+        assert "sum_oos_total_pnl<min" not in res.reason_codes
+        assert "positive_fold_ratio_effective<min" not in res.reason_codes
+
+    def test_profit_safe_pfr_no_trade_fails_with_new_codes(self) -> None:
+        """profit_safe_pfr mode で no-trade fold 集団 → 新 reason codes で fail。
+
+        no-trade fold は bt.total_pnl=Decimal('0') を返すので oos_total_pnls には 0 が
+        全 fold 分 append される (= len(oos_total_pnls) == n_fold_effective)。
+        ただし n_fold_effective=0 (all_folds_unavailable で trade_count<min) のときは
+        oos_total_pnl_unavailable が trigger される。
+        いずれにせよ median/sum が < 0 にはならないが、positive_fold_ratio_effective<min /
+        n_fold_effective_below_profit_safe_min は trigger される可能性がある。
+        legacy mode 由来の median_oos_sharpe<min は **含まれない** (observe-only) ことを確認。
+        """
+        res = self._evaluate_no_trade("profit_safe_pfr")
+        # legacy 由来の reason は含まれない (observe-only)
+        assert "median_oos_sharpe<min" not in res.reason_codes
+        assert "positive_fold_ratio<min" not in res.reason_codes
+        # profit_safe_pfr の reason のいずれかが入っているはず (fail-closed)
+        assert not res.passed
+
+    def test_legacy_fold_paths_unchanged_under_profit_safe_pfr(self) -> None:
+        """profit_safe_pfr mode でも legacy 経路の reason_counts / oos_sharpes は変わらない."""
+        res_legacy = self._evaluate_no_trade("legacy")
+        res_psp = self._evaluate_no_trade("profit_safe_pfr")
+        env_l = _envelope(res_legacy)
+        env_p = _envelope(res_psp)
+        pl = cast(dict[str, Any], env_l["payload"])
+        pp = cast(dict[str, Any], env_p["payload"])
+        # n_fold / n_fold_effective / oos_sharpes / median_oos_sharpe / positive_fold_ratio
+        # の legacy 集計値は両 mode で完全一致 (= 隔離保証)
+        assert pl["n_fold"] == pp["n_fold"]
+        assert pl["n_fold_unavailable"] == pp["n_fold_unavailable"]
+        assert pl["n_fold_effective"] == pp["n_fold_effective"]
+        assert pl["oos_sharpes"] == pp["oos_sharpes"]
+        assert pl["median_oos_sharpe"] == pp["median_oos_sharpe"]
+        assert pl["positive_fold_ratio"] == pp["positive_fold_ratio"]
+        # unavailable_reason_counts も完全一致
+        assert pl["unavailable_reason_counts"] == pp["unavailable_reason_counts"]
+
+    def test_oos_total_pnls_excludes_unavailable_folds(self) -> None:
+        """Codex impl-review Round 1 Critical 修正: unavailable fold (fold_sharpe is None) は
+        oos_total_pnls に含まれない (effective fold のみ集計)."""
+        # all_folds_unavailable な状況 (= 全 fold で no-trade なので fold_sharpe is None)
+        res = self._evaluate_no_trade("profit_safe_pfr")
+        env = _envelope(res)
+        payload = cast(dict[str, Any], env["payload"])
+        # all unavailable 状況なので n_fold_effective == 0 でかつ oos_total_pnls も空
+        assert payload["n_fold_unavailable"] == payload["n_fold"]
+        assert payload["n_fold_effective"] == 0
+        assert payload["oos_total_pnls"] == ()  # 空 tuple = unavailable fold は除外
+        assert payload["median_oos_total_pnl"] is None
+        assert payload["sum_oos_total_pnl"] is None
+
+
+class TestT099CliOverrideAppliedBeforeHashCompute:
+    """Codex impl-review Round 1 Critical 修正: --stage-b-gate-kind override が
+    _resolve_stage_a_threshold より前に適用される (= override 後 cfg で base_config_hash 計算)。
+
+    実装ソースコード上の構造で検証 (full integration test は别 TODO)。
+    """
+
+    def test_run_ga_applies_stage_b_gate_kind_override_before_threshold_resolution(self) -> None:
+        import pathlib
+        src = pathlib.Path("scripts/alpha_factory/run_ga.py").read_text(encoding="utf-8")
+        # stage_b_gate_kind override block (CLI argparse 由来) が
+        # _resolve_stage_a_threshold 呼び出しより前に出現すること。
+        idx_override = src.find("stage_gate.stage_b_gate_kind_override")
+        idx_resolve = src.find("effective_threshold, threshold_source = _resolve_stage_a_threshold")
+        assert idx_override >= 0, "stage_b_gate_kind override block not found"
+        assert idx_resolve >= 0, "_resolve_stage_a_threshold call not found"
+        assert idx_override < idx_resolve, (
+            "T099 Codex Round 1 Critical: stage_b_gate_kind override must be applied "
+            "BEFORE _resolve_stage_a_threshold so that compute_base_config_hash "
+            "(used for cross-run guard) sees the override-applied cfg."
+        )
