@@ -894,3 +894,79 @@ sampler の cross-run contamination guard:
 - 任意で `--extra-marker` を渡せば run-specific cmdline marker でさらに絞り込み可能 (= 並列 smoke の future improvement)
 
 詳細: `devnotes/20260504-0010-B-phase2-step1.8-stage-c-cross-pair-dual-path/{conceptual,detailed}-design.md`
+
+---
+
+## T099 cycle 22: Stage B gate `profit_safe_pfr` opt-in (2026-05-13 improve-cycle)
+
+`stage_b_gate_kind: Literal["legacy", "profit_safe_pfr"]` を `StageGateConfig` に追加し、CLI `--stage-b-gate-kind` で切替可能化。
+
+### Motivation
+
+- Run 74 archive 実測:
+  - Stage B 通過 96 個体が **全例赤字** (total_pnl -6,940 〜 -16,670)
+  - trade_sharpe_stage_b median **-0.040** (Stage B 区間で純損失)
+  - 18 RUN 累積 Stage C pass **0/18**
+- 過去 Codex 議論 (handoff Round 4) で archive 実測 Spearman ρ:
+  - ρ(median_oos_sharpe → trade_sharpe_stage_c) = **-0.361** (curve-fit 逆予測)
+  - ρ(positive_fold_ratio_effective → trade_sharpe_stage_c) = **+0.345** (唯一の正予測)
+
+= 現行 `median_oos_sharpe + positive_fold_ratio` AND gate は **median 偏重で curve-fit 個体を優先選好**し、Stage C で持続性を失わせる構造欠陥。さらに sign-based 検査で magnitude を見ないため「赤字許容」設計。
+
+### `profit_safe_pfr` mode の条件 (4 条件 AND)
+
+```python
+if stage_b_gate_kind == "profit_safe_pfr":
+    # 1. positive_fold_ratio_effective >= 0.4 (持続性、 唯一の正予測 metric)
+    # 2. median_oos_total_pnl >= 0 (実利益、 effective fold のみで median)
+    # 3. sum_oos_total_pnl >= 0 (aggregate 赤字防止、 Codex Round 3 追加)
+    # 4. n_fold_effective >= 20 (trade_sharpe 解釈安定化、 Codex Round 1 追加)
+    # + len(oos_total_pnls) < n_fold_effective なら oos_total_pnl_unavailable fail-closed
+```
+
+`median_oos_sharpe` は `legacy` mode の判定に使うが、`profit_safe_pfr` mode では **observe-only** (payload に記録するが gate 判定しない)。
+
+### 新 reason codes (5 個追加、`generate_run_report.py` known_reason_codes 同期)
+
+- `positive_fold_ratio_effective<min`
+- `median_oos_total_pnl<min`
+- `sum_oos_total_pnl<min`
+- `n_fold_effective_below_profit_safe_min`
+- `oos_total_pnl_unavailable` (Round 3 fail-closed)
+
+### archive 列追加 (3 個、optional/nullable)
+
+- `median_oos_total_pnl`
+- `sum_oos_total_pnl`
+- `stage_b_gate_kind`
+
+GENOME_ENTRY_SCHEMA_VERSION = 2 据え置き (optional column 追加で backward compatible)。
+
+### 1 RUN smoke 手順
+
+```bash
+uv run python scripts/alpha_factory/run_ga.py \
+  --instrument EUR_JPY \
+  --population-size 96 --generations 60 \
+  --mutation-rate 0.5 --seed 60 --max-workers 2 \
+  --stage-b-gate-kind profit_safe_pfr
+```
+
+### smoke 合格条件 (= falsification 反証実験)
+
+- Stage B 通過群 `median_oos_total_pnl >= 0` ∧
+- Stage B pass 数 >= 10 (運用可能水準) ∧
+- Stage C trade_sharpe median >= legacy 18 RUN 平均
+
+3 条件全達成 → profit_safe_pfr default 化判断 (cycle 23-24 で再現確認後)。
+1 つでも未達 → flag off (cycle 23 で legacy に戻す)。
+
+### CLI override 順序 (Codex impl-review Round 1 Critical 修正)
+
+`--stage-b-gate-kind` override は `_resolve_stage_a_threshold` 呼び出し**前**に適用される。これにより `compute_base_config_hash(cfg)` が override 後 cfg で計算され、cross-run history guard が override 時にも正しく機能。
+
+### 詳細
+
+- 詳細設計: `devnotes/20260513-2007-fx-improve/detailed-design.md` (Codex Round 3 APPROVED)
+- 改善計画: `devnotes/20260513-2007-fx-improve/improvement-plan.md`
+- 分析: `devnotes/20260513-2007-fx-improve/analysis-claude.md` / `analysis-codex.md`

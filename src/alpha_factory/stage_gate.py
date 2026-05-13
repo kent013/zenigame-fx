@@ -547,6 +547,19 @@ class StageGateConfig:
     # 詳細: devnotes/20260508-1203-stage-b-gate-redesign/conceptual-design.md (v2 APPROVED)
     stage_b_median_oos_sharpe_min: float = 0.025
     stage_b_positive_fold_min: float = 0.60
+    # T099 cycle 22 (improve-cycle 2026-05-13): Stage B gate opt-in mode。
+    # legacy (default): 現行 sign-based (median_oos_sharpe + positive_fold_ratio AND)
+    # profit_safe_pfr: 4 条件 AND
+    #   1. positive_fold_ratio_effective >= profit_safe_pfr_threshold (0.4)
+    #   2. median_oos_total_pnl >= 0 (実利益保証、effective fold のみで median)
+    #   3. sum_oos_total_pnl >= 0 (aggregate 赤字防止、Codex Round 3 追加)
+    #   4. n_fold_effective >= profit_safe_pfr_min_n_fold (20)
+    # 根拠: archive 実測 Spearman ρ(median_oos_sharpe → trade_sharpe_stage_c)=-0.361
+    # (curve-fit 逆予測)、Run 74 で Stage B 通過 96 個体全例赤字。
+    # 詳細: devnotes/20260513-2007-fx-improve/detailed-design.md
+    stage_b_gate_kind: Literal["legacy", "profit_safe_pfr"] = "legacy"
+    profit_safe_pfr_threshold: float = 0.4
+    profit_safe_pfr_min_n_fold: int = 20
     stage_b_dsr_min: float = 0.0  # monitor only (Phase 4 で hard 化)
     # T044: pre-flight feasibility minimum
     # @why: LaneManager で max_folds < min なら全 lane 全個体 Stage B skip し
@@ -751,6 +764,27 @@ class StageGateConfig:
                 f"phase4_lucky_hard_penalty ({self.phase4_lucky_hard_penalty}) "
                 f"must be >= phase4_lucky_soft_penalty "
                 f"({self.phase4_lucky_soft_penalty})"
+            )
+        # T099 cycle 22: profit_safe_pfr field 範囲検証 (defensive、 SSOT は yaml loader 側)
+        if self.stage_b_gate_kind not in ("legacy", "profit_safe_pfr"):
+            raise ValueError(
+                "stage_b_gate_kind must be 'legacy' or 'profit_safe_pfr', "
+                f"got {self.stage_b_gate_kind!r}"
+            )
+        if not math.isfinite(self.profit_safe_pfr_threshold):
+            raise ValueError(
+                "profit_safe_pfr_threshold must be finite "
+                f"(NaN/±Inf forbidden), got {self.profit_safe_pfr_threshold}"
+            )
+        if not 0.0 <= self.profit_safe_pfr_threshold <= 1.0:
+            raise ValueError(
+                "profit_safe_pfr_threshold must be in [0, 1]: "
+                f"got {self.profit_safe_pfr_threshold}"
+            )
+        if self.profit_safe_pfr_min_n_fold < 1:
+            raise ValueError(
+                "profit_safe_pfr_min_n_fold must be >= 1: "
+                f"got {self.profit_safe_pfr_min_n_fold}"
             )
         # MappingProxyType で frozen dict 化（外部書換不能）
         object.__setattr__(
@@ -1259,6 +1293,10 @@ def evaluate_stage_b(
     reason_counts: dict[FoldUnavailableReason, int] = dict.fromkeys(
         FoldUnavailableReason, 0
     )
+    # T099 cycle 22: profit_safe_pfr 用に effective fold の finite total_pnl のみ集計。
+    # legacy 経路 (fold_sharpe / fold_reason / reason_counts) は完全不変。
+    # 非有限 / None は oos_total_pnls に追加しないだけで、legacy 判定経路には影響しない。
+    oos_total_pnls: list[float] = []
 
     # 18 ヶ月全体 IS monitor
     is_full_sharpe: float | None = None
@@ -1338,6 +1376,9 @@ def evaluate_stage_b(
     for i, (_train_bars, test_bars) in enumerate(folds):
         fold_sharpe: float | None = None
         fold_reason: FoldUnavailableReason | None = None
+        # T099 cycle 22: profit_safe_pfr 用 fold PnL candidate (finite なら保持)。
+        # effective fold 確定後 (= else 節) に oos_total_pnls.append する。
+        fold_pnl_candidate: float | None = None
         # B Phase 2 step 1.6: dual-path 経路用に legacy 結果を保持
         # (= 別 try ブロックに渡す、 acceptance D4 物理隔離契約)
         fold_bt: BacktestMetrics | None = None
@@ -1368,6 +1409,13 @@ def evaluate_stage_b(
                 if bt.trade_sharpe_raw is not None
                 else None
             )
+            # T099 cycle 22: fold PnL candidate を取得 (effective fold 確定後に append)。
+            # bt.total_pnl is Decimal | None → float + math.isfinite check。
+            # 非有限 / None は fold_pnl_candidate=None のままで append されない。
+            if bt.total_pnl is not None:
+                _candidate_pnl = float(bt.total_pnl)
+                if math.isfinite(_candidate_pnl):
+                    fold_pnl_candidate = _candidate_pnl
             # T054: trade_sharpe_raw が None の場合、なぜ None になったかを
             # 排他的 enum で classify する (FoldUnavailableReason)。
             if fold_sharpe is None:
@@ -1458,12 +1506,25 @@ def evaluate_stage_b(
         else:
             oos_sharpes_imputed.append(fold_sharpe)
             fold_was_unavailable.append(False)
+            # T099 cycle 22: effective fold のみ profit_safe_pfr 用 PnL を集計
+            # (Codex impl-review Round 1 Critical 修正、 設計「effective fold のみ」契約遵守)。
+            if fold_pnl_candidate is not None:
+                oos_total_pnls.append(fold_pnl_candidate)
 
     # 集計と判定
     n_fold_effective = n_fold - n_fold_unavailable
     median_oos: float | None = None
     positive_ratio: float | None = None
     positive_ratio_effective: float | None = None
+    # T099 cycle 22: profit_safe_pfr 用 PnL 集計
+    median_oos_total_pnl: float | None = None
+    sum_oos_total_pnl: float | None = None
+    if len(oos_total_pnls) >= 2:
+        median_oos_total_pnl = float(_stats.median(oos_total_pnls))
+        sum_oos_total_pnl = float(sum(oos_total_pnls))
+    elif len(oos_total_pnls) == 1:
+        median_oos_total_pnl = float(oos_total_pnls[0])
+        sum_oos_total_pnl = float(oos_total_pnls[0])
     # effective fold (unavailable=False のもの) のみを抜き出した OOS Sharpe 列
     effective_oos: list[float] = [
         s for i, s in enumerate(oos_sharpes_imputed)
@@ -1486,10 +1547,34 @@ def evaluate_stage_b(
             positive_ratio_effective = (
                 sum(1 for s in effective_oos if s > 0) / len(effective_oos)
             )
-        if median_oos < stage_config.stage_b_median_oos_sharpe_min:
-            reasons.append("median_oos_sharpe<min")
-        if positive_ratio < stage_config.stage_b_positive_fold_min:
-            reasons.append("positive_fold_ratio<min")
+        # T099 cycle 22: stage_b_gate_kind 分岐
+        if stage_config.stage_b_gate_kind == "legacy":
+            # 現行: median_oos_sharpe + positive_fold_ratio AND (完全不変)
+            if median_oos < stage_config.stage_b_median_oos_sharpe_min:
+                reasons.append("median_oos_sharpe<min")
+            if positive_ratio < stage_config.stage_b_positive_fold_min:
+                reasons.append("positive_fold_ratio<min")
+        elif stage_config.stage_b_gate_kind == "profit_safe_pfr":
+            # profit_safe_pfr: 4 条件 AND + Round 3 fail-closed for unavailable PnL fold
+            # Round 3 受入条件: 非有限 PnL fold を黙って除外して残り fold だけで pass を許さない
+            if len(oos_total_pnls) < n_fold_effective:
+                reasons.append("oos_total_pnl_unavailable")
+            if (
+                positive_ratio_effective is None
+                or positive_ratio_effective < stage_config.profit_safe_pfr_threshold
+            ):
+                reasons.append("positive_fold_ratio_effective<min")
+            if median_oos_total_pnl is None or median_oos_total_pnl < 0:
+                reasons.append("median_oos_total_pnl<min")
+            if sum_oos_total_pnl is None or sum_oos_total_pnl < 0:
+                reasons.append("sum_oos_total_pnl<min")
+            if n_fold_effective < stage_config.profit_safe_pfr_min_n_fold:
+                reasons.append("n_fold_effective_below_profit_safe_min")
+        else:
+            # __post_init__ で阻止されるが防御
+            raise ValueError(
+                f"unknown stage_b_gate_kind: {stage_config.stage_b_gate_kind!r}"
+            )
 
     # T092: `wf_min_safe_folds` は statistical safety floor (個体評価層)、
     # `wf_min_folds_required` は worker 短絡判定 graceful degrade で役割が異なる。
@@ -1558,6 +1643,14 @@ def evaluate_stage_b(
             "canonical_shadow_b_is": _canonical_shadow_summary(
                 canonical_sidecar_b_is
             ),
+            # T099 cycle 22: profit_safe_pfr 用 payload (legacy mode でも観測用に記録)。
+            # detail: devnotes/20260513-2007-fx-improve/detailed-design.md
+            "stage_b_gate_kind": stage_config.stage_b_gate_kind,
+            "median_oos_total_pnl": median_oos_total_pnl,
+            "sum_oos_total_pnl": sum_oos_total_pnl,
+            "oos_total_pnls": tuple(oos_total_pnls),
+            "profit_safe_pfr_threshold": stage_config.profit_safe_pfr_threshold,
+            "profit_safe_pfr_min_n_fold": stage_config.profit_safe_pfr_min_n_fold,
         },
     }
     return StageResult(

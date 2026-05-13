@@ -362,6 +362,19 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "未指定時は (1) history.jsonl の最新適用可能 record (2) config 値 の順で fallback。"
         ),
     )
+    # T099 cycle 22 (improve-cycle 2026-05-13): Stage B gate kind opt-in
+    p.add_argument(
+        "--stage-b-gate-kind",
+        choices=["legacy", "profit_safe_pfr"],
+        default=None,
+        help=(
+            "T099 cycle 22: Stage B gate mode を CLI で明示指定 (yaml stage_gate.stage_b.gate_kind"
+            " より優先)。 legacy (default)=現行 sign-based (median_oos_sharpe + positive_fold_ratio AND)。"
+            " profit_safe_pfr=4 条件 AND (pfr_eff>=0.4 ∧ median_oos_total_pnl>=0 ∧"
+            " sum_oos_total_pnl>=0 ∧ n_fold_effective>=20)。 1 RUN smoke 必須。"
+            " 詳細: devnotes/20260513-2007-fx-improve/detailed-design.md"
+        ),
+    )
     # PR4: Stage A fitness mode CLI override (yaml phase4.fitness_mode より優先)
     p.add_argument(
         "--fitness-mode",
@@ -1427,6 +1440,23 @@ def main(argv: list[str] | None = None) -> int:
         )
         dataset_epoch_id = generate_epoch_id_stub(cfg.dataset)
 
+    # T099 cycle 22 (Codex impl-review Round 1 Critical 修正): Stage B gate kind
+    # CLI override を **_resolve_stage_a_threshold より前** に適用する。
+    # 理由: compute_base_config_hash が stage_b_gate_kind / profit_safe_pfr_*
+    # を含むため、 override 後の cfg で hash を計算しないと cross-run guard
+    # (history record の base_config_hash 一致判定) が override 時に効かなくなる。
+    if args.stage_b_gate_kind is not None and args.stage_b_gate_kind != cfg.stage_gate.stage_b_gate_kind:
+        logger.info(
+            "stage_gate.stage_b_gate_kind_override",
+            old=cfg.stage_gate.stage_b_gate_kind,
+            new=args.stage_b_gate_kind,
+            source="cli",
+        )
+        cfg = replace(
+            cfg,
+            stage_gate=replace(cfg.stage_gate, stage_b_gate_kind=args.stage_b_gate_kind),
+        )
+
     # T054: Stage A threshold の effective 値と source を確定し cfg に反映する。
     # source 単一値 ("config" | "history" | "cli") を必ず確定 (詳細設計 §0b)。
     repo_root = Path(__file__).resolve().parents[2]
@@ -1457,6 +1487,14 @@ def main(argv: list[str] | None = None) -> int:
         stage_a_threshold=cfg.stage_gate.stage_a_threshold,
         source=threshold_source,
         full_config_hash=compute_full_config_hash(cfg),
+    )
+
+    # T099 cycle 22: 必ず effective stage_b_gate_kind を log 出力 (override は上記で適用済)
+    logger.info(
+        "stage_gate.stage_b_gate_kind",
+        kind=cfg.stage_gate.stage_b_gate_kind,
+        profit_safe_pfr_threshold=cfg.stage_gate.profit_safe_pfr_threshold,
+        profit_safe_pfr_min_n_fold=cfg.stage_gate.profit_safe_pfr_min_n_fold,
     )
 
     if cfg.ga.fitness_metric != "sharpe":
