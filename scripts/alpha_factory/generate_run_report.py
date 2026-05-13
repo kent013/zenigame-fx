@@ -387,6 +387,94 @@ def main(argv: list[str] | None = None) -> int:
     lines.extend(_format_live_criteria(summary.get("live_criteria")))
     lines.append("")
 
+    # cycle 23 C2: graduation KPI 分離 (3 KPI 並列表示)
+    # - graduation_count: 仕様通り (Stage C pass AND cross_pair pass)
+    # - stage_c_pass_count: Stage C 単独通過 (archive 集計)
+    # - mission_candidate_count: live_criteria.all_pass 個体数 (= C1 修正後の真値、
+    #   archive 全行で _check_live_criteria を再実行して集計)
+    # single-instrument 運用では graduation 構造的 0 で KPI 誤読しやすいため明示分離。
+    # Codex Round 1 Warning: 過去 RUN の retroactive 整合性のため、 summary 内に
+    # 保存された live_criteria 閾値 (= run 実行時の閾値) を使う設計。
+    lines.append("## KPI 分離 (cycle 23 C2)")
+    lines.append("")
+    grad_count = summary.get("graduation_count")
+    lines.append(
+        f"- **graduation_count**: {grad_count if grad_count is not None else '—'}"
+        " (仕様: Stage C pass AND cross_pair pass。"
+        " single-instrument では構造的に 0 となる)"
+    )
+    if archive_rows is None:
+        lines.append("- **stage_c_pass_count**: archive なし、計算スキップ")
+        lines.append("- **mission_candidate_count**: archive なし、計算スキップ")
+    else:
+        sc_count = sum(1 for r in archive_rows if r.get("stage_c_pass"))
+        lines.append(
+            f"- **stage_c_pass_count**: {sc_count} (= Stage C 単独通過数)"
+        )
+        # mission_candidate_count: Stage C pass かつ live_criteria.all_pass
+        # 過去 RUN の retroactive 整合性のため summary 内 live_criteria 閾値を使う。
+        # archive の各行は trade_sharpe_stage_c / trade_sharpe_raw / trade_count を持つ。
+        try:
+            from src.alpha_factory.stage_gate import _annualize_trade_sharpe
+
+            lc_summary = summary.get("live_criteria") or {}
+            lc_checks = lc_summary.get("checks") or {}
+            sharpe_min = float(lc_checks.get("sharpe", {}).get("threshold", 1.0))
+            pnl_min = float(
+                lc_checks.get("total_pnl", {}).get("threshold", 50000.0)
+            )
+            dd_max = float(
+                lc_checks.get("max_drawdown_pct", {}).get("threshold", 20.0)
+            )
+            tc_min = int(
+                lc_checks.get("trade_count", {}).get("threshold_min", 50)
+            )
+            tc_max = int(
+                lc_checks.get("trade_count", {}).get("threshold_max", 5000)
+            )
+            # Stage C 内部判定と同じ window を summary から取得
+            sg_cfg = summary.get("stage_gate_config") or {}
+            holdout_days = int(sg_cfg.get("stage_c_holdout_days", 60))
+            stage_a_window_days = int(sg_cfg.get("stage_a_window_days", 60))
+
+            mc_count = 0
+            for r in archive_rows:
+                if not r.get("stage_c_pass"):
+                    continue
+                # sharpe annualized 判定 (trade_sharpe_stage_c 優先)
+                stage_c_val = r.get("trade_sharpe_stage_c")
+                if stage_c_val is not None:
+                    sharpe_trade = float(stage_c_val)
+                    win = holdout_days
+                else:
+                    raw_val = r.get("trade_sharpe_raw")
+                    if raw_val is None:
+                        continue
+                    sharpe_trade = float(raw_val)
+                    win = stage_a_window_days
+                tc = int(r.get("trade_count", 0) or 0)
+                sa = _annualize_trade_sharpe(sharpe_trade, tc, win)
+                if sa is None or sa < sharpe_min:
+                    continue
+                pnl = float(r.get("total_pnl", 0.0) or 0.0)
+                if pnl < pnl_min:
+                    continue
+                dd = float(r.get("max_drawdown_pct", 0.0) or 0.0)
+                if dd > dd_max:
+                    continue
+                if not (tc_min <= tc <= tc_max):
+                    continue
+                mc_count += 1
+            lines.append(
+                f"- **mission_candidate_count**: {mc_count}"
+                " (= live_criteria.all_pass 個体数、 cycle 23 C1 単位修正後の真値)"
+            )
+        except Exception as exc:
+            lines.append(
+                f"- **mission_candidate_count**: 計算失敗 ({exc})"
+            )
+    lines.append("")
+
     # GA 設定
     lines.append("## GA 設定")
     lines.append("")
@@ -419,6 +507,85 @@ def main(argv: list[str] | None = None) -> int:
             "- ⚠ Stage B verdict is **statistically inconclusive** "
             "(`n_fold_effective < 3`)."
         )
+    lines.append("")
+
+    # cycle 23 C4: trade_count 境界張り付き分析 (Stage C 通過群)
+    # live_criteria.trade_count_min 狙い撃ち最適化の構造把握用。 閾値変更はしない。
+    lines.append("## trade_count 境界張り付き分析 (cycle 23 C4)")
+    lines.append("")
+    if archive_rows is None:
+        lines.append("- archive Parquet なし、計算スキップ")
+    else:
+        sc_rows = [r for r in archive_rows if r.get("stage_c_pass")]
+        lc_summary = summary.get("live_criteria") or {}
+        lc_checks = lc_summary.get("checks") or {}
+        tc_min = int(
+            lc_checks.get("trade_count", {}).get("threshold_min", 50)
+        )
+        if not sc_rows:
+            lines.append("- Stage C 通過群が 0 件、分析対象なし")
+        else:
+            from statistics import median as _stats_median
+
+            def _safe_float(v: object) -> float | None:
+                try:
+                    return float(v) if v is not None else None
+                except (TypeError, ValueError):
+                    return None
+
+            # trade_count 分布
+            tc_dist: dict[int, int] = {}
+            for r in sc_rows:
+                tc = int(r.get("trade_count", 0) or 0)
+                tc_dist[tc] = tc_dist.get(tc, 0) + 1
+            lines.append(f"- Stage C 通過群: {len(sc_rows)} 件")
+            lines.append(f"- live_criteria.trade_count_min = {tc_min}")
+            lines.append("")
+            lines.append("### trade_count 分布")
+            lines.append("")
+            lines.append("| trade_count | count | pct |")
+            lines.append("|-------------|-------|-----|")
+            for tc in sorted(tc_dist.keys()):
+                cnt = tc_dist[tc]
+                pct = 100.0 * cnt / len(sc_rows)
+                marker = " ← min" if tc == tc_min else ""
+                lines.append(
+                    f"| {tc}{marker} | {cnt} | {pct:.1f}% |"
+                )
+            lines.append("")
+            # 境界張り付き vs 非張り付きの比較
+            at_min = [r for r in sc_rows if int(r.get("trade_count", 0) or 0) == tc_min]
+            above_min = [
+                r for r in sc_rows if int(r.get("trade_count", 0) or 0) > tc_min
+            ]
+            lines.append("### 境界張り付き (==min) vs 非張り付き (>min) 比較")
+            lines.append("")
+            lines.append("| 指標 | 境界張り付き (==min) | 非張り付き (>min) |")
+            lines.append("|------|---------------------|------------------|")
+            for label, sub in (
+                ("count", None),
+                ("median total_pnl", "total_pnl"),
+                ("median trade_sharpe_stage_c", "trade_sharpe_stage_c"),
+                ("median max_drawdown_pct", "max_drawdown_pct"),
+            ):
+                if sub is None:
+                    lines.append(f"| {label} | {len(at_min)} | {len(above_min)} |")
+                else:
+                    am_vals = [
+                        _safe_float(r.get(sub)) for r in at_min
+                    ]
+                    am_vals = [v for v in am_vals if v is not None]
+                    ab_vals = [
+                        _safe_float(r.get(sub)) for r in above_min
+                    ]
+                    ab_vals = [v for v in ab_vals if v is not None]
+                    am_med = (
+                        f"{_stats_median(am_vals):.4f}" if am_vals else "—"
+                    )
+                    ab_med = (
+                        f"{_stats_median(ab_vals):.4f}" if ab_vals else "—"
+                    )
+                    lines.append(f"| {label} | {am_med} | {ab_med} |")
     lines.append("")
 
     # Lane 別落下分布

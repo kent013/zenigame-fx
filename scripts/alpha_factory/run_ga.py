@@ -106,7 +106,10 @@ from src.alpha_factory.schema_contract import (
     assert_run_report_v2,
 )
 from src.alpha_factory.stage_b_inconclusive import is_stage_b_inconclusive
-from src.alpha_factory.stage_gate import STAGE_GATE_VERSION
+from src.alpha_factory.stage_gate import (
+    STAGE_GATE_VERSION,
+    _annualize_trade_sharpe,
+)
 from src.alpha_factory.stage_partition_guard import validate_stage_partition
 from src.alpha_factory.swim_lane import (
     GRADUATION_LANE_ID,
@@ -916,7 +919,21 @@ def _row_to_metrics_dict(row: Mapping[str, Any] | None) -> dict[str, Any]:
 def _check_live_criteria(
     row: Mapping[str, Any] | None,
     criteria: Mapping[str, float | int],
+    *,
+    holdout_days: int,
+    stage_a_window_days: int,
 ) -> dict[str, Any]:
+    """live_criteria 判定 (cycle 23 C1: Stage C 内部判定と整合化)。
+
+    sharpe は trade-level → annualized 換算後に sharpe_min (= annualized) と比較する。
+    比較値は `trade_sharpe_stage_c` 第一優先 (= Stage C scope、 holdout_days で annualize)、
+    fallback で `trade_sharpe_raw` (= Stage A scope、 stage_a_window_days で annualize)。
+
+    `value` には annualized SSOT を、 `value_trade_level` には trade-level を併記する。
+    `sharpe_calc_version` は `<original>_annualized_live` に拡張 (summary 内専用 SSOT)。
+    archive 側の `sharpe_calc_version` 列は変更しない (= 既存 consumer 互換、 Codex
+    design-review Round 1 Warning 反映)。
+    """
     if row is None:
         return {"checks": {}, "all_pass": False}
     checks: dict[str, dict[str, Any]] = {}
@@ -925,30 +942,74 @@ def _check_live_criteria(
     # v1 archive 行は sharpe_calc_version で識別し検査時に None 扱い (比較禁止)。
     raw_version = row.get("sharpe_calc_version")
     version = "v1_bar_annualized" if raw_version is None else str(raw_version)
-    # v1/未知 archive 行は v2 sharpe_min と比較しない
     if version not in ("v1_bar_annualized", "v2_trade_level"):
         logger.warning(
             "live_criteria.unknown_sharpe_calc_version",
             sharpe_calc_version=version,
         )
-    sharpe_raw = (
-        row.get("trade_sharpe_raw") if version == "v2_trade_level" else None
-    )
+
+    # cycle 23 C1: sharpe 比較値の優先順位
+    # 1. trade_sharpe_stage_c (Stage C scope、 第一優先) → holdout_days で annualize
+    # 2. trade_sharpe_raw (Stage A scope、 fallback) → stage_a_window_days で annualize
+    sharpe_trade_level: float | None = None
+    sharpe_source: str = "none"
+    annualize_window_days: int = holdout_days
+    if version == "v2_trade_level":
+        stage_c_val = row.get("trade_sharpe_stage_c")
+        if stage_c_val is not None:
+            try:
+                sharpe_trade_level = float(stage_c_val)
+                sharpe_source = "trade_sharpe_stage_c"
+                annualize_window_days = holdout_days
+            except (TypeError, ValueError):
+                sharpe_trade_level = None
+        if sharpe_trade_level is None:
+            raw_val = row.get("trade_sharpe_raw")
+            if raw_val is not None:
+                try:
+                    sharpe_trade_level = float(raw_val)
+                    sharpe_source = "trade_sharpe_raw"
+                    # Codex design-review Round 1 Warning: raw fallback は Stage A scope
+                    # = stage_a_window_days で annualize する。 holdout_days を使うとスケール不整合
+                    annualize_window_days = stage_a_window_days
+                except (TypeError, ValueError):
+                    sharpe_trade_level = None
+
+    trade_count = int(row.get("trade_count", 0) or 0)
     sharpe_min = float(criteria.get("sharpe_min", 0.0))
-    if sharpe_raw is None:
+
+    sharpe_annualized = _annualize_trade_sharpe(
+        sharpe_trade_level, trade_count, annualize_window_days
+    ) if sharpe_trade_level is not None else None
+
+    # version 拡張は summary 内専用 (= archive 列は変更しない、 Codex Warning 反映)
+    version_summary = (
+        f"{version}_annualized_live" if sharpe_annualized is not None else version
+    )
+
+    if sharpe_annualized is None:
         checks["sharpe"] = {
             "value": None,
+            "value_trade_level": (
+                str(sharpe_trade_level)
+                if sharpe_trade_level is not None
+                else None
+            ),
             "threshold": str(sharpe_min),
             "pass": False,
-            "sharpe_calc_version": version,
+            "sharpe_calc_version": version_summary,
+            "sharpe_source": sharpe_source,
+            "annualize_window_days": annualize_window_days,
         }
     else:
-        sharpe_val = float(sharpe_raw)
         checks["sharpe"] = {
-            "value": str(sharpe_val),
+            "value": str(sharpe_annualized),
+            "value_trade_level": str(sharpe_trade_level),
             "threshold": str(sharpe_min),
-            "pass": sharpe_val >= sharpe_min,
-            "sharpe_calc_version": version,
+            "pass": sharpe_annualized >= sharpe_min,
+            "sharpe_calc_version": version_summary,
+            "sharpe_source": sharpe_source,
+            "annualize_window_days": annualize_window_days,
         }
 
     pnl_val = float(row.get("total_pnl", 0.0) or 0.0)
@@ -1012,7 +1073,13 @@ def _write_reports(
     best_fitness_val, best_finite = _safe_finite(best_entry.fitness_pen)
     best_fitness_str = _fitness_to_str(best_entry.fitness_pen)
     best_metrics = _row_to_metrics_dict(best_row)
-    live_check = _check_live_criteria(best_row, cfg.live_criteria)
+    # cycle 23 C1: holdout_days / stage_a_window_days を渡して annualize 経路に統一
+    live_check = _check_live_criteria(
+        best_row,
+        cfg.live_criteria,
+        holdout_days=cfg.stage_gate.stage_c_holdout_days,
+        stage_a_window_days=cfg.stage_gate.stage_a_window_days,
+    )
 
     # per_generation.best_fitness_pen を非有限値から保護する
     # (R1 impl-review B1: summary.json に -inf/nan が漏れる経路遮断)

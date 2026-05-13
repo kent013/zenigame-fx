@@ -970,3 +970,88 @@ uv run python scripts/alpha_factory/run_ga.py \
 - 詳細設計: `devnotes/20260513-2007-fx-improve/detailed-design.md` (Codex Round 3 APPROVED)
 - 改善計画: `devnotes/20260513-2007-fx-improve/improvement-plan.md`
 - 分析: `devnotes/20260513-2007-fx-improve/analysis-claude.md` / `analysis-codex.md`
+
+---
+
+## cycle 23: live_criteria.sharpe 単位整合性修正 (2026-05-14 improve-cycle)
+
+### Motivation
+
+cycle 22 Run 75 (T099 profit_safe_pfr) で 18 RUN 累積 mission 0/19 という結果に対し、 Codex 独立分析が **Critical bug** を発見:
+
+- `_check_live_criteria` (`scripts/alpha_factory/run_ga.py:916`) が trade-level `trade_sharpe_raw` を annualized `sharpe_min=1.0` と直接比較
+- `evaluate_stage_c` 内部判定 (`src/alpha_factory/stage_gate.py:1902-1912`) は `_annualize_trade_sharpe` で年率化後に比較
+- 結果: summary.json の live_criteria.sharpe.pass=False が **bug 由来で固定**、 過去 19 RUN の mission 達成個体が見えない状態
+
+実測検証: Run 75 Stage C 通過 217 個体の annualized sharpe min=**2.596**, median=**2.764**, mean=**2.883**, max=**5.023** → **全件 ≥ 1.0**。
+
+### 修正内容
+
+`_check_live_criteria` の signature を変更し、 Stage C 内部判定と整合化:
+
+```python
+def _check_live_criteria(
+    row: Mapping[str, Any] | None,
+    criteria: Mapping[str, float | int],
+    *,
+    holdout_days: int,
+    stage_a_window_days: int,
+) -> dict[str, Any]:
+    # sharpe 比較値の優先順位:
+    # 1. trade_sharpe_stage_c (Stage C scope, holdout_days で annualize)
+    # 2. trade_sharpe_raw (Stage A scope fallback, stage_a_window_days で annualize)
+    ...
+    sharpe_annualized = _annualize_trade_sharpe(sharpe_trade_level, trade_count, annualize_window_days)
+    checks["sharpe"] = {
+        "value": str(sharpe_annualized),  # SSOT
+        "value_trade_level": str(sharpe_trade_level),  # 併記
+        "pass": sharpe_annualized >= sharpe_min,
+        "sharpe_calc_version": "v2_trade_level_annualized_live",  # summary 専用、 archive 列は変更しない
+        "sharpe_source": ...,
+        "annualize_window_days": annualize_window_days,
+    }
+```
+
+caller (`run_ga.py:1015`):
+```python
+live_check = _check_live_criteria(
+    best_row, cfg.live_criteria,
+    holdout_days=cfg.stage_gate.stage_c_holdout_days,
+    stage_a_window_days=cfg.stage_gate.stage_a_window_days,
+)
+```
+
+### Codex design-review Warning 反映
+
+1. **raw fallback は `stage_a_window_days` で annualize** (Stage A scope 整合性)
+2. **`sharpe_calc_version` 拡張は summary 内専用** (`v2_trade_level_annualized_live`)、 archive 列の `sharpe_calc_version` は変更しない (= 既存 consumer 互換)
+3. **retroactive 再評価では各 run の `summary.json` 内の閾値を使う** (= 現行 yaml ではない、 retroactive contamination 防止)
+
+### KPI 分離 (run report)
+
+`generate_run_report.py` で 3 KPI 並列表示:
+- **graduation_count**: 仕様通り (Stage C pass AND cross_pair pass)。 single-instrument では構造的 0
+- **stage_c_pass_count**: Stage C 単独通過数 (archive 集計)
+- **mission_candidate_count**: live_criteria.all_pass 個体数 (= cycle 23 C1 修正後の真値)
+
+### trade_count 境界張り付き分析
+
+Stage C 通過群の trade_count 分布を表示し、 `trade_count == live_criteria.trade_count_min` (境界張り付き) と `> min` (非張り付き) の比較を表示。 閾値変更はしない (= 調査のみ、 Reactive Parametric 回避)。
+
+### Retroactive audit script
+
+`scripts/alpha_factory/audit_live_criteria_retroactive.py` で過去 RUN を再評価:
+
+```bash
+uv run python scripts/alpha_factory/audit_live_criteria_retroactive.py \
+  --run-ids run_20260507_011702 run_20260513_120619 \
+  --output reports/audit-live-criteria-retroactive.md
+```
+
+Run 75 実測: **mission_candidates=217 / Stage C pass=217**、 top annualized sharpe **5.02**。
+
+### 詳細
+
+- 詳細設計: `devnotes/20260514-0033-fx-improve/detailed-design.md` (Codex design-review Round 1 APPROVED)
+- 改善計画: `devnotes/20260514-0033-fx-improve/improvement-plan.md`
+- 分析: `devnotes/20260514-0033-fx-improve/analysis-claude.md` / `analysis-codex.md`

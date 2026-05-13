@@ -170,6 +170,27 @@ CLI override: `scripts/alpha_factory/run_ga.py --stage-b-gate-kind profit_safe_p
 
 ---
 
+## cycle 23: live_criteria.sharpe 単位整合性修正 (2026-05-14 improve-cycle)
+
+cycle 22 (Run 75 profit_safe_pfr) で発見した **Critical bug**: `scripts/alpha_factory/run_ga.py` の `_check_live_criteria` が **trade-level `trade_sharpe_raw` を annualized `sharpe_min=1.0` と直接比較**していた (= summary.json 出力経路の単位不整合)。 一方 `evaluate_stage_c` 内部判定は `_annualize_trade_sharpe` で年率化後に比較しており、 **二重基準** が存在。 結果として「Stage C pass=217 だが summary.live_criteria.all_pass=False」という矛盾。
+
+修正後の `_check_live_criteria`:
+- keyword-only 引数 `holdout_days` / `stage_a_window_days` を必須化
+- sharpe 比較値の優先順位: `trade_sharpe_stage_c` (Stage C scope) > `trade_sharpe_raw` (Stage A scope) fallback
+- 各 sharpe の annualize window: stage_c は `holdout_days`、 raw は `stage_a_window_days` (Codex Round 1 Warning 反映)
+- `_annualize_trade_sharpe` で年率化、 SSOT 比較値は annualized
+- 出力 `checks["sharpe"]`: `value` (annualized) / `value_trade_level` (元値) / `sharpe_source` / `annualize_window_days` / `sharpe_calc_version="v2_trade_level_annualized_live"` (summary 内専用、 archive 列は変更なし)
+
+retroactive 検証 (`scripts/alpha_factory/audit_live_criteria_retroactive.py`): Run 75 で **mission_candidates=217 / Stage C pass=217**、 top annualized sharpe **5.02**。 18 RUN 累積 mission 0/19 は完全に bug 由来の過小評価。
+
+`generate_run_report.py` に新セクション追加:
+- `## KPI 分離 (cycle 23 C2)`: graduation_count / stage_c_pass_count / mission_candidate_count を並列表示 (single-instrument では graduation 構造的 0 で KPI 誤読する問題対応)
+- `## trade_count 境界張り付き分析 (cycle 23 C4)`: live_criteria.trade_count_min 狙い撃ち最適化の構造把握 (= 境界張り付き群 vs 非張り付き群の median PnL / sharpe 比較)
+
+詳細: `docs/alpha_factory/stage-gates.md` § "cycle 23: live_criteria.sharpe 単位整合性修正" / `devnotes/20260514-0033-fx-improve/detailed-design.md` (Codex design-review Round 1 APPROVED)。
+
+---
+
 ## .claude/ 設定の現状
 
 `.claude/skills/` 配下は以下の三層構成:
