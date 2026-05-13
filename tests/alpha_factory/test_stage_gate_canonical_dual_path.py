@@ -518,9 +518,20 @@ def test_stage_b_is_canonical_dual_path_log_only_preserves_legacy_payload() -> N
     payload_dis = dict(res_dis.metrics["payload"])  # type: ignore[arg-type]
     assert set(payload_log.keys()) == set(payload_dis.keys())
     for key in payload_log:
+        if key == "canonical_shadow_b_is":
+            # PR3: shadow 列は LOG_ONLY と DISABLED で意図的に異なる
+            # (LOG_ONLY 時のみ sidecar 値が populated、 DISABLED 時は None)。
+            # GA selection / gate は不変 (= shadow 列は selection に流入しない)。
+            continue
         assert payload_log[key] == payload_dis[key], (
             f"Stage B payload[{key}] differs"
         )
+    # PR3: DISABLED mode では canonical_shadow_b_is=None
+    # (= canonical_sidecar_b_is が None で _canonical_shadow_summary も None)。
+    assert payload_dis.get("canonical_shadow_b_is") is None
+    # LOG_ONLY mode では None or dict (= sidecar 計算成否次第)。
+    log_shadow = payload_log.get("canonical_shadow_b_is")
+    assert log_shadow is None or isinstance(log_shadow, dict)
 
 
 def test_stage_b_is_canonical_log_isolation_when_canonical_raises(
@@ -728,9 +739,18 @@ def test_stage_c_base_canonical_dual_path_log_only_preserves_legacy_payload() ->
     payload_dis = dict(res_dis.metrics["payload"])  # type: ignore[arg-type]
     assert set(payload_log.keys()) == set(payload_dis.keys())
     for key in payload_log:
+        if key == "canonical_shadow_c_base":
+            # PR3: shadow 列は LOG_ONLY と DISABLED で意図的に異なる
+            # (LOG_ONLY 時のみ sidecar 値が populated、 DISABLED 時は None)。
+            # GA selection / gate は不変 (= shadow 列は selection に流入しない)。
+            continue
         assert payload_log[key] == payload_dis[key], (
             f"Stage C payload[{key}] differs"
         )
+    # PR3: DISABLED mode では canonical_shadow_c_base=None
+    assert payload_dis.get("canonical_shadow_c_base") is None
+    log_shadow = payload_log.get("canonical_shadow_c_base")
+    assert log_shadow is None or isinstance(log_shadow, dict)
 
 
 def test_stage_c_base_canonical_log_isolation_when_canonical_raises(
@@ -1159,6 +1179,12 @@ def test_stage_b_per_fold_canonical_dual_path_log_only_preserves_legacy_payload(
     payload_dis = dict(res_dis.metrics["payload"])  # type: ignore[arg-type]
     assert set(payload_log.keys()) == set(payload_dis.keys())
     for key in payload_log:
+        if key == "canonical_shadow_b_is":
+            # PR3: shadow 列は LOG_ONLY と DISABLED で意図的に異なる
+            # (per-fold ループ自体は payload に shadow 値を書かないが、
+            # IS-monitor 由来の canonical_shadow_b_is が metrics_envelope に
+            # 集約されるため、 stage B の評価結果として現れる)。
+            continue
         assert payload_log[key] == payload_dis[key], (
             f"Stage B per-fold payload[{key}] differs"
         )
@@ -1216,6 +1242,12 @@ def test_stage_b_per_fold_canonical_log_isolation_when_canonical_raises(
     payload_dis = dict(res_disabled.metrics["payload"])  # type: ignore[arg-type]
     assert set(payload_raise.keys()) == set(payload_dis.keys())
     for key in payload_raise:
+        if key == "canonical_shadow_b_is":
+            # PR3: shadow 列は LOG_ONLY と DISABLED で意図的に異なる
+            # (per-fold で canonical raise しても IS-monitor 側の sidecar が
+            # 別 try-block で評価されるため shadow 値は populated される可能性
+            # がある)。
+            continue
         assert payload_raise[key] == payload_dis[key], (
             f"per-fold canonical raise: payload[{key}] differs"
         )
@@ -1267,6 +1299,11 @@ def test_stage_b_per_fold_canonical_log_helper_isolation_when_log_raises(
     payload_dis = dict(res_disabled.metrics["payload"])  # type: ignore[arg-type]
     assert set(payload_log_raise.keys()) == set(payload_dis.keys())
     for key in payload_log_raise:
+        if key == "canonical_shadow_b_is":
+            # PR3: shadow 列は LOG_ONLY と DISABLED で意図的に異なる
+            # (log helper が raise しても sidecar 計算自体は完走、 shadow 値は
+            # populated される可能性がある)。
+            continue
         assert payload_log_raise[key] == payload_dis[key], (
             f"per-fold log helper raise: payload[{key}] differs"
         )
@@ -1572,6 +1609,11 @@ def test_stage_c_stress_canonical_dual_path_log_only_preserves_legacy_payload() 
     payload_dis = dict(res_dis.metrics["payload"])  # type: ignore[arg-type]
     assert set(payload_log.keys()) == set(payload_dis.keys())
     for key in payload_log:
+        if key == "canonical_shadow_c_base":
+            # PR3: shadow 列は LOG_ONLY と DISABLED で意図的に異なる
+            # (stress 経路自体は shadow を書かないが、 base 評価由来の
+            # canonical_shadow_c_base が metrics_envelope に集約される)。
+            continue
         assert payload_log[key] == payload_dis[key], (
             f"Stage C stress payload[{key}] differs"
         )
@@ -1624,6 +1666,10 @@ def test_stage_c_stress_canonical_log_isolation_when_canonical_raises(
     payload_dis = dict(res_disabled.metrics["payload"])  # type: ignore[arg-type]
     assert set(payload_raise.keys()) == set(payload_dis.keys())
     for key in payload_raise:
+        if key == "canonical_shadow_c_base":
+            # PR3: shadow 列は LOG_ONLY と DISABLED で意図的に異なる
+            # (stress 側 raise でも base 側 sidecar は別途完走)。
+            continue
         assert payload_raise[key] == payload_dis[key], (
             f"C_stress canonical raise: payload[{key}] differs"
         )
@@ -1686,6 +1732,10 @@ def test_stage_c_stress_canonical_log_helper_isolation_when_log_raises(
     payload_dis = dict(res_disabled.metrics["payload"])  # type: ignore[arg-type]
     assert set(payload_raise.keys()) == set(payload_dis.keys())
     for key in payload_raise:
+        if key == "canonical_shadow_c_base":
+            # PR3: shadow 列は LOG_ONLY と DISABLED で意図的に異なる
+            # (log helper raise でも sidecar 計算自体は完走)。
+            continue
         assert payload_raise[key] == payload_dis[key], (
             f"C_stress log helper raise: payload[{key}] differs"
         )
@@ -1896,3 +1946,175 @@ def test_stage_c_stress_canonical_golden_first_evaluation_succeeds() -> None:
     assert result.session_block_win_rate_worst == pytest.approx(0.5, abs=1e-9)
     assert result.gate_pass is False  # sharpe_min=1.0 を満たさない
     assert result.invariants.is_feasible is True
+
+
+# ---------------------------------------------------------------------------
+# PR3: _canonical_shadow_summary helper
+# (devnotes/20260513-1419-todo-pr3-canonical-mission-shadow/)
+# ---------------------------------------------------------------------------
+
+
+def _make_canonical_five_for_shadow(
+    *,
+    slack_sharpe: float = 0.5,
+    slack_pnl: float = 0.5,
+    slack_dd: float = 0.5,
+    slack_tc: float = 0.5,
+    slack_wr: float = 0.5,
+    gate_pass: bool = True,
+    is_feasible: bool = True,
+):
+    """PR3 test 用 CanonicalFiveResult fixture (最小構築)."""
+    from src.alpha_factory.canonical_metrics import (
+        CanonicalFiveResult,
+        InfeasibleReasonCode,
+        InvariantFlags,
+        SessionBucket,
+    )
+    if is_feasible:
+        codes: frozenset[InfeasibleReasonCode] = frozenset()
+    else:
+        codes = frozenset({InfeasibleReasonCode.INPUT_EMPTY_TRADE_LIST})
+    invariants = InvariantFlags(
+        session_close_drop_count=0,
+        negative_equity_drop_open_count=0,
+        infeasible_reason_codes=codes,
+    )
+    return CanonicalFiveResult(
+        sr_session_worst_block_scale=0.1,
+        sr_session_worst_annual_estimate=2.5,
+        net_pnl_after_cost=100000.0,
+        max_dd=0.1,
+        trade_count=500,
+        session_block_win_rate_worst=0.5,
+        per_bucket_sr={b: 0.1 for b in SessionBucket},
+        per_bucket_wr={b: 0.5 for b in SessionBucket},
+        low_sample_buckets=frozenset(),
+        slack_sharpe=slack_sharpe,
+        slack_pnl=slack_pnl,
+        slack_dd=slack_dd,
+        slack_tc=slack_tc,
+        slack_wr=slack_wr,
+        gate_worst_gap=0.0,
+        gate_pass=gate_pass,
+        log_pf_clip=0.0,
+        bucket_validator_version="unvalidated",
+        invariants=invariants,
+    )
+
+
+def test_pr3_canonical_shadow_summary_none_input() -> None:
+    """PR3: canonical_sidecar=None → summary=None (= adapter / disabled fallback)."""
+    from src.alpha_factory.stage_gate import _canonical_shadow_summary
+    assert _canonical_shadow_summary(None) is None
+
+
+def test_pr3_canonical_shadow_summary_valid_canonical_passes() -> None:
+    """PR3: feasible canonical (全 slack 正) → mission_inf_gap=0、 signed_margin=min(slacks)."""
+    from src.alpha_factory.stage_gate import _canonical_shadow_summary
+    canonical = _make_canonical_five_for_shadow(
+        slack_sharpe=0.1, slack_pnl=0.2, slack_dd=0.3, slack_tc=0.4,
+        slack_wr=0.0,  # wr は mission_inf_gap 計算に含まれない (synthesis § 6.4)
+        gate_pass=True,
+        is_feasible=True,
+    )
+    summary = _canonical_shadow_summary(canonical)
+    assert summary is not None
+    assert summary["gate_pass"] is True
+    assert summary["mission_inf_gap"] == pytest.approx(0.0)
+    # min(sharpe/pnl/dd/tc) = 0.1 (wr は含まれない)
+    assert summary["mission_signed_margin"] == pytest.approx(0.1)
+
+
+def test_pr3_canonical_shadow_summary_negative_slack_records_gap() -> None:
+    """PR3: 1 slack 負 → mission_inf_gap > 0、 signed_margin < 0."""
+    from src.alpha_factory.stage_gate import _canonical_shadow_summary
+    canonical = _make_canonical_five_for_shadow(
+        slack_sharpe=-0.5, slack_pnl=0.2, slack_dd=0.3, slack_tc=0.4,
+        gate_pass=False,
+        is_feasible=True,
+    )
+    summary = _canonical_shadow_summary(canonical)
+    assert summary is not None
+    assert summary["gate_pass"] is False
+    assert summary["mission_inf_gap"] == pytest.approx(0.5)
+    assert summary["mission_signed_margin"] == pytest.approx(-0.5)
+
+
+def test_pr3_canonical_shadow_summary_infeasible_canonical() -> None:
+    """PR3: invariants infeasible → signed_margin=-inf を float そのまま返す
+    (archive 側で None 正規化される責務分離).
+    """
+    import math
+
+    from src.alpha_factory.stage_gate import _canonical_shadow_summary
+    canonical = _make_canonical_five_for_shadow(
+        slack_sharpe=0.1, slack_pnl=0.2, slack_dd=0.3, slack_tc=0.4,
+        gate_pass=False,
+        is_feasible=False,
+    )
+    summary = _canonical_shadow_summary(canonical)
+    assert summary is not None
+    assert summary["gate_pass"] is False
+    # invariants=False → mission_signed_margin sentinel = -inf
+    assert math.isinf(summary["mission_signed_margin"])
+    assert summary["mission_signed_margin"] < 0
+    # mission_inf_gap は純粋計算 (slack 値由来)、 全 slack 非負なら 0.0
+    assert summary["mission_inf_gap"] == pytest.approx(0.0)
+
+
+def test_pr3_canonical_shadow_summary_value_error_returns_gate_pass_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR3: evaluate_mission_inf_gap が ValueError (NaN slack 等) raise した場合、
+    gate_pass のみ保持で mission 系 None を返す
+    (= Codex impl-review Round 1 [Suggestion] 反映、 NaN 混入時の契約固定化).
+    """
+    from src.alpha_factory import stage_gate as sg
+    from src.alpha_factory.stage_gate import _canonical_shadow_summary
+
+    def _raise_value_error(*args: object, **kwargs: object) -> object:
+        raise ValueError("simulated upstream T061 NaN slack injection")
+
+    monkeypatch.setattr(sg, "evaluate_mission_inf_gap", _raise_value_error)
+
+    canonical = _make_canonical_five_for_shadow(
+        slack_sharpe=0.1, slack_pnl=0.2, slack_dd=0.3, slack_tc=0.4,
+        gate_pass=True,
+        is_feasible=True,
+    )
+    summary = _canonical_shadow_summary(canonical)
+    assert summary == {
+        "gate_pass": True,
+        "mission_inf_gap": None,
+        "mission_signed_margin": None,
+    }
+
+
+def test_pr3_canonical_shadow_summary_unexpected_error_returns_gate_pass_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR3: evaluate_mission_inf_gap が ValueError 以外の想定外例外を raise しても
+    gate 判定経路に波及せず、 gate_pass のみ保持で mission 系 None を返す
+    (= Codex impl-review Round 1 [Warning] 反映、 broader except による行動不変
+    強化、 future-proofing).
+    """
+    from src.alpha_factory import stage_gate as sg
+    from src.alpha_factory.stage_gate import _canonical_shadow_summary
+
+    def _raise_attr_error(*args: object, **kwargs: object) -> object:
+        raise AttributeError("simulated upstream T061 schema breaking change")
+
+    monkeypatch.setattr(sg, "evaluate_mission_inf_gap", _raise_attr_error)
+
+    canonical = _make_canonical_five_for_shadow(
+        slack_sharpe=0.1, slack_pnl=0.2, slack_dd=0.3, slack_tc=0.4,
+        gate_pass=False,
+        is_feasible=True,
+    )
+    summary = _canonical_shadow_summary(canonical)
+    assert summary == {
+        "gate_pass": False,
+        "mission_inf_gap": None,
+        "mission_signed_margin": None,
+    }

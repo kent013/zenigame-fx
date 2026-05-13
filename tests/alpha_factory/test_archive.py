@@ -166,7 +166,7 @@ def _make_archive() -> GenomeArchive:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_has_52_columns() -> None:
+def test_schema_has_58_columns() -> None:
     # T-sharpe Phase 1A: trade_sharpe_raw + sharpe_calc_version (28→30)
     # T035: n_fold_effective + positive_fold_ratio_effective + stage_b_reason_codes (30→33)
     # T043: mission_score (33→34)
@@ -178,7 +178,9 @@ def test_schema_has_52_columns() -> None:
     # T091 cycle_phase1 段階 2: trade_count_stage_a / trade_count_stage_b /
     #       trade_count_full_dataset / median_oos_sharpe (47→51)
     # PR2 (persistence_score_shadow): Stage B 持続性予測 shadow score (51→52)
-    assert len(GENOMES_SCHEMA.names) == 52
+    # PR3 (canonical / mission_inf_gap shadow): Stage B IS + Stage C base 各
+    #     3 列 (gate_pass / inf_gap / signed_margin) = 6 列 (52→58)
+    assert len(GENOMES_SCHEMA.names) == 58
     expected = {
         "run_id", "run_number", "generation", "individual_name",
         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
@@ -209,6 +211,12 @@ def test_schema_has_52_columns() -> None:
         "trade_count_full_dataset", "median_oos_sharpe",
         # PR2: Stage B 持続性予測 shadow score
         "persistence_score_shadow",
+        # PR3: canonical_metrics / mission_inf_gap shadow (Stage B IS +
+        # Stage C base 各 3 列)
+        "canonical_gate_pass_b_shadow", "mission_inf_gap_b_shadow",
+        "mission_signed_margin_b_shadow",
+        "canonical_gate_pass_c_shadow", "mission_inf_gap_c_shadow",
+        "mission_signed_margin_c_shadow",
     }
     assert set(GENOMES_SCHEMA.names) == expected
 
@@ -1025,6 +1033,12 @@ def test_schema_nullable_attributes() -> None:
         "trade_count_full_dataset", "median_oos_sharpe",
         # PR2: Stage B 持続性予測 shadow score (collect_stage_b で書込、 nullable=True)
         "persistence_score_shadow",
+        # PR3: canonical_metrics / mission_inf_gap shadow 列 (Stage B/C 評価前
+        # は None、 sidecar skip 時も None のため全 nullable=True)
+        "canonical_gate_pass_b_shadow", "mission_inf_gap_b_shadow",
+        "mission_signed_margin_b_shadow",
+        "canonical_gate_pass_c_shadow", "mission_inf_gap_c_shadow",
+        "mission_signed_margin_c_shadow",
     }
     for f in GENOMES_SCHEMA:
         if f.name in nullable_cols:
@@ -1921,3 +1935,277 @@ def test_pr2_persistence_score_shadow_persisted_in_parquet(tmp_path: Path) -> No
     assert "persistence_score_shadow" in df.columns
     # 0.7 * 0.6 + 0.3 * 1.0 = 0.72
     assert df.iloc[0]["persistence_score_shadow"] == pytest.approx(0.72)
+
+
+# ---------------------------------------------------------------------------
+# PR3: canonical_metrics / mission_inf_gap shadow 配線
+# (devnotes/20260513-1419-todo-pr3-canonical-mission-shadow/)
+# ---------------------------------------------------------------------------
+
+
+def test_pr3_schema_has_canonical_shadow_columns() -> None:
+    """PR3: GENOMES_SCHEMA に canonical/mission shadow 6 列が存在."""
+    names = GENOMES_SCHEMA.names
+    for col in (
+        "canonical_gate_pass_b_shadow",
+        "mission_inf_gap_b_shadow",
+        "mission_signed_margin_b_shadow",
+        "canonical_gate_pass_c_shadow",
+        "mission_inf_gap_c_shadow",
+        "mission_signed_margin_c_shadow",
+    ):
+        assert col in names, f"missing column: {col}"
+    # 型 / nullable 検証
+    assert GENOMES_SCHEMA.field("canonical_gate_pass_b_shadow").type == pa.bool_()
+    assert GENOMES_SCHEMA.field("canonical_gate_pass_b_shadow").nullable
+    assert GENOMES_SCHEMA.field("mission_inf_gap_b_shadow").type == pa.float64()
+    assert GENOMES_SCHEMA.field("mission_inf_gap_b_shadow").nullable
+    assert (
+        GENOMES_SCHEMA.field("mission_signed_margin_b_shadow").type == pa.float64()
+    )
+    assert GENOMES_SCHEMA.field("canonical_gate_pass_c_shadow").type == pa.bool_()
+    assert GENOMES_SCHEMA.field("mission_inf_gap_c_shadow").type == pa.float64()
+    assert (
+        GENOMES_SCHEMA.field("mission_signed_margin_c_shadow").type == pa.float64()
+    )
+
+
+def test_pr3_template_canonical_shadow_defaults_none() -> None:
+    """PR3: row template default は全 6 列 None (Stage B/C 評価前)."""
+    template = _create_row_template()
+    for col in (
+        "canonical_gate_pass_b_shadow",
+        "mission_inf_gap_b_shadow",
+        "mission_signed_margin_b_shadow",
+        "canonical_gate_pass_c_shadow",
+        "mission_inf_gap_c_shadow",
+        "mission_signed_margin_c_shadow",
+    ):
+        assert template[col] is None, f"expected None for {col}"
+
+
+def test_pr3_finite_or_none_normalizes_non_finite() -> None:
+    """PR3: _finite_or_none で ±inf / NaN / bool / None / 非数値 が None に正規化."""
+    import math
+
+    from src.alpha_factory.archive import _finite_or_none
+
+    assert _finite_or_none(None) is None
+    assert _finite_or_none(math.inf) is None
+    assert _finite_or_none(-math.inf) is None
+    assert _finite_or_none(math.nan) is None
+    assert _finite_or_none("hoge") is None
+    assert _finite_or_none(True) is None  # bool は弾く (gate_pass 誤渡し対策)
+    assert _finite_or_none(False) is None
+    assert _finite_or_none(0.0) == 0.0
+    assert _finite_or_none(-3.5) == -3.5
+    assert _finite_or_none(1e10) == 1e10
+    assert _finite_or_none(42) == 42.0  # int は許容、 float 変換
+
+
+def test_pr3_extract_canonical_shadow_missing_key() -> None:
+    """PR3: payload に canonical_shadow key が無い / None / 非 Mapping → 全 None."""
+    from src.alpha_factory.archive import _extract_canonical_shadow
+
+    assert _extract_canonical_shadow({}, "canonical_shadow_b_is") == (
+        None, None, None
+    )
+    assert _extract_canonical_shadow(
+        {"canonical_shadow_b_is": None}, "canonical_shadow_b_is"
+    ) == (None, None, None)
+    assert _extract_canonical_shadow(
+        {"canonical_shadow_b_is": "not_a_mapping"}, "canonical_shadow_b_is"
+    ) == (None, None, None)
+    assert _extract_canonical_shadow(
+        {"canonical_shadow_b_is": 42}, "canonical_shadow_b_is"
+    ) == (None, None, None)
+
+
+def test_pr3_extract_canonical_shadow_valid_payload() -> None:
+    """PR3: payload に valid shadow dict があれば 3-tuple で抽出."""
+    from src.alpha_factory.archive import _extract_canonical_shadow
+
+    payload = {
+        "canonical_shadow_b_is": {
+            "gate_pass": True,
+            "mission_inf_gap": 0.0,
+            "mission_signed_margin": 0.5,
+        }
+    }
+    assert _extract_canonical_shadow(payload, "canonical_shadow_b_is") == (
+        True, 0.0, 0.5
+    )
+
+
+def test_pr3_extract_canonical_shadow_infeasible_payload() -> None:
+    """PR3: ±inf / NaN は None に正規化されて返る (gate_pass=False 保持)."""
+    import math
+
+    from src.alpha_factory.archive import _extract_canonical_shadow
+
+    payload = {
+        "canonical_shadow_c_base": {
+            "gate_pass": False,
+            "mission_inf_gap": math.inf,
+            "mission_signed_margin": -math.inf,
+        }
+    }
+    assert _extract_canonical_shadow(payload, "canonical_shadow_c_base") == (
+        False, None, None
+    )
+
+
+def test_pr3_extract_canonical_shadow_partial_fields() -> None:
+    """PR3: shadow dict に field 欠損 → 該当値は None で返る (defensive)."""
+    from src.alpha_factory.archive import _extract_canonical_shadow
+
+    payload = {
+        "canonical_shadow_b_is": {"gate_pass": True}
+    }
+    assert _extract_canonical_shadow(payload, "canonical_shadow_b_is") == (
+        True, None, None
+    )
+
+
+def test_pr3_extract_canonical_shadow_non_bool_gate_pass() -> None:
+    """PR3: gate_pass が bool 以外 (int / None / str) → None で返る."""
+    from src.alpha_factory.archive import _extract_canonical_shadow
+
+    # int 1 は bool ではないので None になる (int は isinstance(_, bool)=False)
+    payload = {
+        "canonical_shadow_b_is": {
+            "gate_pass": 1,
+            "mission_inf_gap": 0.5,
+            "mission_signed_margin": 0.1,
+        }
+    }
+    assert _extract_canonical_shadow(payload, "canonical_shadow_b_is") == (
+        None, 0.5, 0.1
+    )
+
+
+def test_pr3_collect_stage_b_writes_canonical_shadow_when_payload_has_it() -> None:
+    """PR3: collect_stage_b で canonical_shadow_b_is が archive に書き込まれる."""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    stage_b = _stage_b_result(
+        canonical_shadow_b_is={
+            "gate_pass": True,
+            "mission_inf_gap": 0.0,
+            "mission_signed_margin": 0.42,
+        }
+    )
+    arc.collect_stage_b(g, "lane", 0, stage_b)
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["canonical_gate_pass_b_shadow"] is True
+    assert row["mission_inf_gap_b_shadow"] == pytest.approx(0.0)
+    assert row["mission_signed_margin_b_shadow"] == pytest.approx(0.42)
+
+
+def test_pr3_collect_stage_b_without_canonical_shadow_keeps_none() -> None:
+    """PR3: payload に canonical_shadow_b_is が無ければ shadow 列は None のまま.
+
+    stage_gate が PR3 未対応バージョン (= payload に shadow key を入れない) でも
+    archive 側は安全に fall through する.
+    """
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    arc.collect_stage_b(g, "lane", 0, _stage_b_result())  # PR3 未対応 payload
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["canonical_gate_pass_b_shadow"] is None
+    assert row["mission_inf_gap_b_shadow"] is None
+    assert row["mission_signed_margin_b_shadow"] is None
+
+
+def test_pr3_collect_stage_b_with_none_canonical_shadow() -> None:
+    """PR3: canonical_shadow_b_is=None (= sidecar 計算 skip) → shadow 列 None."""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    stage_b = _stage_b_result(canonical_shadow_b_is=None)
+    arc.collect_stage_b(g, "lane", 0, stage_b)
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["canonical_gate_pass_b_shadow"] is None
+    assert row["mission_inf_gap_b_shadow"] is None
+    assert row["mission_signed_margin_b_shadow"] is None
+
+
+def test_pr3_collect_stage_c_writes_canonical_shadow_when_payload_has_it() -> None:
+    """PR3: collect_stage_c で canonical_shadow_c_base が archive に書き込まれる."""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    arc.collect_stage_b(g, "lane", 0, _stage_b_result())
+    stage_c = _stage_c_result(
+        canonical_shadow_c_base={
+            "gate_pass": False,
+            "mission_inf_gap": 0.18,
+            "mission_signed_margin": -0.18,
+        }
+    )
+    arc.collect_stage_c(g, "lane", 0, stage_c)
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["canonical_gate_pass_c_shadow"] is False
+    assert row["mission_inf_gap_c_shadow"] == pytest.approx(0.18)
+    assert row["mission_signed_margin_c_shadow"] == pytest.approx(-0.18)
+
+
+def test_pr3_collect_stage_c_without_canonical_shadow_keeps_none() -> None:
+    """PR3: payload に canonical_shadow_c_base が無ければ shadow 列は None のまま."""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    arc.collect_stage_b(g, "lane", 0, _stage_b_result())
+    arc.collect_stage_c(g, "lane", 0, _stage_c_result())  # PR3 未対応 payload
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["canonical_gate_pass_c_shadow"] is None
+    assert row["mission_inf_gap_c_shadow"] is None
+    assert row["mission_signed_margin_c_shadow"] is None
+
+
+def test_pr3_canonical_shadow_persisted_in_parquet(tmp_path: Path) -> None:
+    """PR3: flush 後の Parquet で canonical_shadow 6 列が読み出せる."""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    arc.collect_stage_b(
+        g, "lane", 0,
+        _stage_b_result(
+            canonical_shadow_b_is={
+                "gate_pass": True,
+                "mission_inf_gap": 0.0,
+                "mission_signed_margin": 0.5,
+            }
+        ),
+    )
+    arc.collect_stage_c(
+        g, "lane", 0,
+        _stage_c_result(
+            canonical_shadow_c_base={
+                "gate_pass": False,
+                "mission_inf_gap": 0.1,
+                "mission_signed_margin": -0.05,
+            }
+        ),
+    )
+    out = arc.flush(output_dir=tmp_path)
+    import pyarrow.parquet as pq
+    table = pq.read_table(out)
+    df = table.to_pandas()
+    for col in (
+        "canonical_gate_pass_b_shadow",
+        "mission_inf_gap_b_shadow",
+        "mission_signed_margin_b_shadow",
+        "canonical_gate_pass_c_shadow",
+        "mission_inf_gap_c_shadow",
+        "mission_signed_margin_c_shadow",
+    ):
+        assert col in df.columns, f"missing in Parquet: {col}"
+    assert bool(df.iloc[0]["canonical_gate_pass_b_shadow"]) is True
+    assert df.iloc[0]["mission_inf_gap_b_shadow"] == pytest.approx(0.0)
+    assert df.iloc[0]["mission_signed_margin_b_shadow"] == pytest.approx(0.5)
+    assert bool(df.iloc[0]["canonical_gate_pass_c_shadow"]) is False
+    assert df.iloc[0]["mission_inf_gap_c_shadow"] == pytest.approx(0.1)
+    assert df.iloc[0]["mission_signed_margin_c_shadow"] == pytest.approx(-0.05)
