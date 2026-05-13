@@ -281,3 +281,21 @@ schema_contract:
 # 詳細: devnotes/20260503-1024-B-phase2-step1-canonical-metrics/
 phase2:
   canonical_metrics_mode: log_only
+
+# PR4: legacy_pnl_smoke fitness opt-in + anti-luck guard (= 初の行動変更 PR)
+# fitness_mode:
+#   legacy           - 現状 fitness 関数 (= sharpe - α*size_norm - tc_penalty)、
+#                      default、 完全行動不変。
+#   legacy_pnl_smoke - legacy + β*clipped_pnl_slack*persistence_weight
+#                      - lucky_run_penalty。 1 RUN smoke 検証必須、 baseline 5 RUN
+#                      median と比較。 user 実行で `--fitness-mode legacy_pnl_smoke`
+#                      override 可能 (= yaml 編集不要)。
+# @why: PR1-PR3 で観測基盤完成、 PR4 で初の mission-aligned 探索圧導入
+#       (Codex Y Round 5 確定)。
+# 詳細: devnotes/20260513-1715-todo-pr4-legacy-pnl-smoke/
+phase4:
+  fitness_mode: legacy
+  beta: 0.05
+  persistence_weight: 0.5
+  lucky_hard_penalty: 1.0
+  lucky_soft_penalty: 0.3
