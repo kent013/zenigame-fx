@@ -978,3 +978,9 @@ class GenomeArchive:
         prev = str(row.get(_MAX_STAGE_KEY, ""))
         if _STAGE_ORDER[incoming] > _STAGE_ORDER[prev]:
             row[_MAX_STAGE_KEY] = incoming
+            # T058 contract (PR1): source_stage を小文字 stage label で
+            # 同期 populated。 既存の max stage tracking は不変。 archive
+            # Parquet schema は nullable string で定義済み、 row template
+            # default は None (= 評価開始前)。 archive_role は PR2 で
+            # 別途値入力する (cpps_archive.determine_archive_role 依存)。
+            row["source_stage"] = incoming.lower()

@@ -223,9 +223,10 @@ def test_end_to_end_writes_v2_archive_with_all_required_fields(
     assert row["genome_entry_schema_version"] == GENOME_ENTRY_SCHEMA_VERSION == 2
     # 空 string fallback → RunContext.dataset_epoch_id で補完
     assert row["dataset_epoch_id"] == "epoch_2026_q1"
-    # archive_role / source_stage は T058 段階で None default (T063-T066 で書込)
+    # archive_role は PR2 (cpps_archive.determine_archive_role 配線) で書込予定
+    # source_stage は PR1 で collect_stage_a 経由で "a" 書込済 (T058 contract 進展)
     assert row["archive_role"] is None
-    assert row["source_stage"] is None
+    assert row["source_stage"] == "a"
 
 
 def test_end_to_end_writes_v2_archive_keeps_template_stub_when_set(

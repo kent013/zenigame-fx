@@ -1432,9 +1432,10 @@ def test_t058_flush_keeps_epoch_legacy_when_run_context_none(
     d = table.to_pylist()[0]
     # template default のまま flush
     assert d["dataset_epoch_id"] == "epoch_legacy"
-    # archive_role / source_stage は T066 / T063-T064 で書込のため None
+    # archive_role は PR2 (cpps_archive.determine_archive_role 配線) で書込
+    # source_stage は PR1 で collect_stage_a 経由で "a" 書込済 (T058 contract 完成度向上)
     assert d["archive_role"] is None
-    assert d["source_stage"] is None
+    assert d["source_stage"] == "a"
     # genome_entry_schema_version は常に 2
     assert d["genome_entry_schema_version"] == 2
 
@@ -1768,3 +1769,60 @@ def test_load_empty_v2_archive_returns_v2_schema_version(tmp_path: Path) -> None
     assert isinstance(result, tuple)
     _table, sv = result
     assert sv == 2  # 物理 schema は v2 なので空でも raise しない
+
+
+# ---------------------------------------------------------------------------
+# PR1: T058 contract source_stage 値入力 (devnotes/20260513-0400-todo-pr1-source-stage/)
+# ---------------------------------------------------------------------------
+
+
+def test_pr1_source_stage_initial_default_is_none() -> None:
+    """row template の source_stage default は None (評価開始前)。"""
+    template = _create_row_template()
+    assert template["source_stage"] is None
+
+
+def test_pr1_source_stage_populated_after_stage_a() -> None:
+    """Stage A collect 後に source_stage == "a" が書き込まれる。"""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["source_stage"] == "a"
+
+
+def test_pr1_source_stage_advances_through_stages() -> None:
+    """Stage A → B → C の進行で source_stage が "a" → "b" → "c" に更新される。"""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    assert arc._rows[("lane", 0, "g0_i0")]["source_stage"] == "a"
+    arc.collect_stage_b(g, "lane", 0, _stage_b_result())
+    assert arc._rows[("lane", 0, "g0_i0")]["source_stage"] == "b"
+    arc.collect_stage_c(g, "lane", 0, _stage_c_result())
+    assert arc._rows[("lane", 0, "g0_i0")]["source_stage"] == "c"
+
+
+def test_pr1_source_stage_remains_a_when_stage_b_unreached() -> None:
+    """Stage A pass のみで Stage B 未評価の row は source_stage == "a" のまま。"""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["source_stage"] == "a"
+    # Stage B 評価せず再確認
+    assert row["source_stage"] == "a"
+
+
+def test_pr1_source_stage_persisted_in_parquet(tmp_path: Path) -> None:
+    """flush 後の Parquet で source_stage が populated される (orphan 解消)。"""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    arc.collect_stage_b(g, "lane", 0, _stage_b_result())
+    out = arc.flush(output_dir=tmp_path)
+    import pyarrow.parquet as pq
+    table = pq.read_table(out)
+    df = table.to_pandas()
+    assert len(df) == 1
+    assert df.iloc[0]["source_stage"] == "b"
