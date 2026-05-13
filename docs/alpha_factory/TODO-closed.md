@@ -95,6 +95,7 @@
 | T091 | Stage B gate redesign Phase 1 | stage-gate | High | 2026-05-09 10:12 | - |
 | T092 | Stage B n_fold_effective safe floor guard | stage-gate | High | 2026-05-12 22:00 | - |
 | T093 | PR3: canonical_metrics / mission_inf_gap shadow 配線 | stage-gate | Medium | 2026-05-13 15:09 | PR3-T093 |
+| T094 | PR4: legacy_pnl_smoke fitness opt-in + anti-luck guard | stage-gate | High | 2026-05-13 18:28 | PR4-T094 |
 
 ## Obsoleted
 
