@@ -44,6 +44,7 @@ from src.alpha_factory.canonical_metrics import (
     CanonicalFiveThresholds,
     evaluate_canonical_five,
 )
+from src.alpha_factory.mission_inf_gap import evaluate_mission_inf_gap
 from src.alpha_factory.walk_forward import make_wf_folds
 from src.backtest.engine import BacktestConfig, run_backtest
 from src.backtest.metrics import BacktestMetrics, compute_metrics
@@ -302,6 +303,62 @@ def _log_canonical_dual_path(
     if pair_label is not None:
         log_kwargs["pair"] = pair_label
     logger.info("stage_gate.canonical_five.dual_path", **log_kwargs)
+
+
+def _canonical_shadow_summary(
+    canonical: CanonicalFiveResult | None,
+) -> dict[str, object] | None:
+    """PR3: canonical_sidecar から archive shadow 列用の summary dict を抽出.
+
+    archive 側の ``collect_stage_b`` / ``collect_stage_c`` が ``.get("gate_pass")``
+    等で安全参照することを前提に、 ``±inf`` / NaN は本関数で **正規化しない**
+    (= archive 側 ``_finite_or_none`` helper が一括処理する責務分離).
+
+    Args:
+        canonical: ``_try_evaluate_canonical_five_safe`` の return。 ``None`` なら
+            ``None`` を返す (= adapter / thresholds 例外 fallback、 archive 列も
+            None で初期化される).
+
+    Returns:
+        ``{"gate_pass": bool, "mission_inf_gap": float | None,
+        "mission_signed_margin": float | None}`` の dict、 ``canonical`` が
+        ``None`` なら ``None``。
+
+        ``mission_inf_gap`` / ``mission_signed_margin`` は
+        :func:`evaluate_mission_inf_gap` の戻り値そのまま (``±inf`` を含み得る、
+        archive 側で正規化)。 ただし engine bug (= slack に NaN が混入) で
+        ``ValueError`` を捕捉した場合は ``None`` を返す (= caller を巻き込まず、
+        ``gate_pass`` のみ記録).
+
+    詳細: ``devnotes/20260513-1419-todo-pr3-canonical-mission-shadow/``.
+    """
+    if canonical is None:
+        return None
+    try:
+        mission = evaluate_mission_inf_gap(canonical)
+    except Exception as exc:
+        # Codex impl-review Round 1 [Warning] 反映: ValueError 以外の想定外例外
+        # (= AttributeError / TypeError 等の upstream T061 engine 変更時) でも
+        # gate 判定経路に波及しないよう broad catch で隔離。 PR3 shadow としては
+        # 「計算不能」 とみなして gate_pass のみ返す (mission 系は None)。 caller
+        # の log は既に T061 / T062 で出ているはず。 sentinel WARN log を出すこと
+        # で silent failure を回避 (= debug 可能性確保)。
+        logger.warning(
+            "stage_gate.canonical_shadow.mission_eval_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return {
+            "gate_pass": bool(canonical.gate_pass),
+            "mission_inf_gap": None,
+            "mission_signed_margin": None,
+        }
+    return {
+        "gate_pass": bool(canonical.gate_pass),
+        "mission_inf_gap": float(mission.mission_inf_gap),
+        "mission_signed_margin": float(mission.mission_signed_margin),
+    }
+
 
 # T034: Stage A fitness_pen sentinel 序列。
 # archive `_required_float` は None → 0.0 fallback するため、Stage A の 3 失敗
@@ -1002,6 +1059,10 @@ def evaluate_stage_b(
     is_full_sharpe: float | None = None
     is_full_total_pnl: float = 0.0
     is_full_trade_count = 0
+    # PR3: canonical_sidecar_b_is を except 経路でも安全に参照できるように初期化
+    # (= IS monitor backtest 例外時にも payload の canonical_shadow_b_is=None で
+    # archive に書込まれる、 detail-design § 1.3 参照)。
+    canonical_sidecar_b_is: CanonicalFiveResult | None = None
     try:
         strategy = DslStrategy(genome, primitive_evaluator)
         broker = MockBroker(instrument_meta=meta)
@@ -1283,6 +1344,15 @@ def evaluate_stage_b(
             # cycle 21: fold trade_count 観測 (= time-concentrated 仮説検証用、
             # archive 列拡張なし、 payload only。 -1 は fold_exception sentinel)
             "fold_trade_counts": tuple(fold_trade_counts),
+            # PR3: canonical 5 / mission_inf_gap shadow summary (archive 用、
+            # in-memory only)。 canonical_sidecar_b_is が None / 例外 fallback の
+            # 場合は本 key も None。 archive.collect_stage_b で抽出され
+            # canonical_gate_pass_b_shadow / mission_inf_gap_b_shadow /
+            # mission_signed_margin_b_shadow 列に書込まれる。 詳細:
+            # devnotes/20260513-1419-todo-pr3-canonical-mission-shadow/
+            "canonical_shadow_b_is": _canonical_shadow_summary(
+                canonical_sidecar_b_is
+            ),
         },
     }
     return StageResult(
@@ -1462,6 +1532,10 @@ def evaluate_stage_c(
     base_trade_count = 0
     overnight_violations = 0
     base_failed = False
+    # PR3: canonical_sidecar_c_base を except 経路でも安全に参照できるように初期化
+    # (= base backtest 例外時にも payload の canonical_shadow_c_base=None で
+    # archive に書込まれる、 detail-design § 1.4 参照)。
+    canonical_sidecar_c_base: CanonicalFiveResult | None = None
 
     try:
         strategy = DslStrategy(genome, primitive_evaluator)
@@ -1874,6 +1948,15 @@ def evaluate_stage_c(
             "overnight_violations": overnight_violations,
             "stress": stress_payload,
             "cross_pair": cross_pair_payload,
+            # PR3: canonical 5 / mission_inf_gap shadow summary (archive 用、
+            # in-memory only)。 canonical_sidecar_c_base が None / 例外 fallback
+            # の場合は本 key も None。 archive.collect_stage_c で抽出され
+            # canonical_gate_pass_c_shadow / mission_inf_gap_c_shadow /
+            # mission_signed_margin_c_shadow 列に書込まれる。 詳細:
+            # devnotes/20260513-1419-todo-pr3-canonical-mission-shadow/
+            "canonical_shadow_c_base": _canonical_shadow_summary(
+                canonical_sidecar_c_base
+            ),
         },
     }
     return StageResult(

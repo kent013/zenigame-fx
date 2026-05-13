@@ -32,6 +32,7 @@ GA Run の個体評価結果を 1 行 = 1 個体 (lane × generation × individu
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -141,6 +142,19 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
         # archive 実測 Spearman で Stage C 持続性を正予測する 2 metric の加重合成。
         # 詳細: devnotes/20260513-1223-todo-pr2-persistence-score-shadow/
         pa.field("persistence_score_shadow", pa.float64(), nullable=True),
+        # PR3: canonical_metrics / mission_inf_gap shadow 列 (selection 影響なし、
+        # audit only)。 Stage B IS monitor (18 ヶ月) と Stage C base 評価 (60 日
+        # holdout) で算出した CanonicalFiveResult + MissionGapResult の summary。
+        # ±inf / NaN は None に正規化 (_finite_or_none helper 経由)。
+        # canonical_sidecar が skip (= adapter 例外 / mode=disabled / backtest 失敗)
+        # の場合は全 None。 詳細:
+        # devnotes/20260513-1419-todo-pr3-canonical-mission-shadow/
+        pa.field("canonical_gate_pass_b_shadow", pa.bool_(), nullable=True),
+        pa.field("mission_inf_gap_b_shadow", pa.float64(), nullable=True),
+        pa.field("mission_signed_margin_b_shadow", pa.float64(), nullable=True),
+        pa.field("canonical_gate_pass_c_shadow", pa.bool_(), nullable=True),
+        pa.field("mission_inf_gap_c_shadow", pa.float64(), nullable=True),
+        pa.field("mission_signed_margin_c_shadow", pa.float64(), nullable=True),
         # T054: Stage B fold unavailable の排他的 reason 別カウント。
         # JSON 文字列として永続化 (FoldUnavailableReason value → count)。
         # 不変条件: 全 reason の合計 == n_fold_unavailable。
@@ -244,6 +258,14 @@ def _create_row_template() -> dict[str, Any]:
         "median_oos_sharpe": None,
         # PR2: Stage B 持続性予測 shadow score (collect_stage_b で計算・書込)
         "persistence_score_shadow": None,
+        # PR3: canonical_metrics / mission_inf_gap shadow 列 (collect_stage_b/c
+        # で書込)
+        "canonical_gate_pass_b_shadow": None,
+        "mission_inf_gap_b_shadow": None,
+        "mission_signed_margin_b_shadow": None,
+        "canonical_gate_pass_c_shadow": None,
+        "mission_inf_gap_c_shadow": None,
+        "mission_signed_margin_c_shadow": None,
         # T043: mission_score (Stage C 評価時のみ書き込み、それ以外は None)
         "mission_score": None,
         # T036: FSP — post-RUN updater が一括書き戻し、template は null 初期化のみ
@@ -315,6 +337,68 @@ def _compute_persistence_score_shadow(
         return max(0.0, min(1.0, float(positive_fold_ratio)))
     composite = 0.7 * float(positive_fold_ratio) + 0.3 * float(fold_sign_ratio)
     return max(0.0, min(1.0, composite))
+
+
+def _finite_or_none(value: object) -> float | None:
+    """PR3: Parquet float64 互換のため ``±inf`` / NaN / None / 非数値 を None に正規化.
+
+    archive 列が ``pa.float64()`` nullable で、 ``±inf`` は技術的には書き込めるが
+    downstream 解析の単純化のため有限値 / None のみに統一する。 boolean は
+    ``isinstance(True, int) == True`` で float() 変換が成立するが、 PR3 shadow
+    列は float 専用のため明示的に弾く (= caller が gate_pass を誤って渡した時の
+    defensive).
+
+    Args:
+        value: 数値 / None / NaN / ±inf 想定。 boolean / 文字列等は ``None`` 扱い.
+
+    Returns:
+        有限 float なら ``float(value)``、 ``None`` / NaN / ``±inf`` / 非数値型
+        なら ``None``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        f = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(f):
+        return None
+    return f
+
+
+def _extract_canonical_shadow(
+    payload: Mapping[str, object],
+    key: str,
+) -> tuple[bool | None, float | None, float | None]:
+    """PR3: stage_gate payload から canonical_shadow summary を抽出.
+
+    Args:
+        payload: ``stage_result.metrics["payload"]``.
+        key: ``"canonical_shadow_b_is"`` (Stage B) /
+            ``"canonical_shadow_c_base"`` (Stage C).
+
+    Returns:
+        ``(gate_pass, mission_inf_gap, mission_signed_margin)`` tuple。
+        payload に key が無い / 値が None / 非 Mapping / field 欠損のとき、
+        該当値は ``None`` で返す (= defensive、 stage_gate が PR3 未対応バージョン
+        の場合でも archive 側で安全に fall through する).
+
+    詳細: ``devnotes/20260513-1419-todo-pr3-canonical-mission-shadow/``.
+    """
+    shadow = payload.get(key)
+    if not isinstance(shadow, Mapping):
+        return (None, None, None)
+    gate_pass_raw = shadow.get("gate_pass")
+    gate_pass: bool | None = (
+        gate_pass_raw if isinstance(gate_pass_raw, bool) else None
+    )
+    return (
+        gate_pass,
+        _finite_or_none(shadow.get("mission_inf_gap")),
+        _finite_or_none(shadow.get("mission_signed_margin")),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +700,17 @@ class GenomeArchive:
             row.get("positive_fold_ratio_effective"),
             row.get("fold_sign_ratio"),
         )
+        # PR3: canonical_metrics / mission_inf_gap shadow を archive に記録
+        # (Stage B IS monitor 由来、 selection 影響なし、 audit only)。
+        # payload 側 (stage_gate.evaluate_stage_b) で canonical_shadow_b_is に
+        # 既に正規化済 dict が入っている (= None の可能性あり、 _extract で
+        # defensive 抽出)。
+        gate_pass_b, gap_b, margin_b = _extract_canonical_shadow(
+            payload, "canonical_shadow_b_is"
+        )
+        row["canonical_gate_pass_b_shadow"] = gate_pass_b
+        row["mission_inf_gap_b_shadow"] = gap_b
+        row["mission_signed_margin_b_shadow"] = margin_b
         self._mark_stage(row, "B")
 
     def collect_stage_c(
@@ -687,6 +782,17 @@ class GenomeArchive:
         # T043: mission_score を payload から書き写す (stage_gate 側で計算済)。
         # base 評価が trade を出さず Sharpe=None だった場合は None になる。
         row["mission_score"] = _opt_float(payload, "mission_score")
+        # PR3: canonical_metrics / mission_inf_gap shadow を archive に記録
+        # (Stage C base 由来、 selection 影響なし、 audit only)。
+        # payload 側 (stage_gate.evaluate_stage_c) で canonical_shadow_c_base に
+        # 既に正規化済 dict が入っている (= None の可能性あり、 _extract で
+        # defensive 抽出)。
+        gate_pass_c, gap_c, margin_c = _extract_canonical_shadow(
+            payload, "canonical_shadow_c_base"
+        )
+        row["canonical_gate_pass_c_shadow"] = gate_pass_c
+        row["mission_inf_gap_c_shadow"] = gap_c
+        row["mission_signed_margin_c_shadow"] = margin_c
         self._mark_stage(row, "C")
 
     def mark_graduated(
