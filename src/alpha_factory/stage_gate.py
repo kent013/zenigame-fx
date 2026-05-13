@@ -360,6 +360,91 @@ def _canonical_shadow_summary(
     }
 
 
+# ---------------------------------------------------------------------------
+# PR4: legacy_pnl_smoke fitness opt-in + anti-luck guard 用 helper
+# (devnotes/20260513-1715-todo-pr4-legacy-pnl-smoke/)
+# ---------------------------------------------------------------------------
+
+# 二層 PnL target (Codex Y Round 3-5 確定)
+_PR4_PNL_SHORT_TARGET: Final[float] = 12000.0   # archive p95 近辺 = 探索勾配あり
+_PR4_PNL_LONG_TARGET: Final[float] = 50000.0    # mission (live_criteria.total_pnl_min)
+_PR4_SHORT_WEIGHT: Final[float] = 0.7           # short 主圧
+_PR4_LONG_WEIGHT: Final[float] = 0.3            # long 方向付け
+# 二段 anti-luck guard 境界 (= 詳細設計 § 2.3.2 SSOT)
+_PR4_LUCKY_TRIGGER_PNL: Final[float] = 12000.0  # `>` 厳密、 12000 ちょうどは免責
+_PR4_LUCKY_HARD_DD_EPSILON: Final[float] = 1e-9 # `<=` 等号含む、 数値誤差込み
+_PR4_LUCKY_SOFT_DD_THRESHOLD: Final[float] = 0.5  # `<` 厳密、 0.5 ちょうどは免責
+_PR4_LUCKY_SOFT_TC_THRESHOLD: Final[int] = 80    # `<` 厳密、 80 ちょうどは免責
+
+
+def _compute_clipped_pnl_slack(total_pnl: float) -> float:
+    """PR4: 二層 PnL target からの clipped slack (= mission_shortfall 探索圧).
+
+    short (12k) を主圧、 long (50k = mission) を方向付け。 short は ``[-1.0, +2.0]``、
+    long は ``[-1.0, +1.0]`` にクリップして Goodhart を抑制.
+
+    Args:
+        total_pnl: Stage A backtest の total_pnl (= float JPY).
+
+    Returns:
+        slack 値 (= 加重平均、 値域は ``[-1.0, 1.7]`` = 0.7*2.0 + 0.3*1.0).
+
+    詳細: devnotes/20260513-1715-todo-pr4-legacy-pnl-smoke/ § Codex Y Round 5 / § 2.3.2.
+    """
+    short = (total_pnl - _PR4_PNL_SHORT_TARGET) / _PR4_PNL_SHORT_TARGET
+    short_clip = max(-1.0, min(2.0, short))
+    long_ = (total_pnl - _PR4_PNL_LONG_TARGET) / _PR4_PNL_LONG_TARGET
+    long_clip = max(-1.0, min(1.0, long_))
+    return _PR4_SHORT_WEIGHT * short_clip + _PR4_LONG_WEIGHT * long_clip
+
+
+def _compute_lucky_run_penalty(
+    total_pnl: float,
+    max_dd_pct: float,
+    trade_count: int,
+    *,
+    hard_penalty: float,
+    soft_penalty: float,
+) -> float:
+    """PR4: 二段 anti-luck guard (= max_dd≈0 lucky run の連続抑制).
+
+    短期 target (12k) 達成個体のみ対象。 二段:
+    - hard_lucky_flag: ``max_dd_pct <= epsilon (≒ 0)`` → ``hard_penalty`` (強、 = 真の lucky)
+    - soft_lucky_penalty: ``max_dd_pct < 0.5% AND trade_count < 80`` → ``soft_penalty``
+      (連続、 = 短期高 PnL + 低 DD + 少取引の組合せ = 疑わしい)
+
+    その他 (= max_dd >= 0.5% or trade_count >= 80) → 0.0 (= 通常 robust 候補).
+
+    境界等号値の仕様 (= 詳細設計 § 2.3.2 SSOT):
+    - ``total_pnl == 12000.0`` → 対象外 (= ``>`` 厳密、 短期 target ぎり達成は免責)
+    - ``max_dd_pct == 1e-9`` → hard (= ``<=`` 等号含む、 数値誤差込みでゼロ扱い)
+    - ``max_dd_pct == 0.5`` → 対象外 (= ``<`` 厳密、 ぎりぎり robust 免責)
+    - ``trade_count == 80`` → 対象外 (= ``<`` 厳密、 同上)
+
+    Args:
+        total_pnl: Stage A backtest の total_pnl (= float JPY).
+        max_dd_pct: Stage A backtest の max_drawdown_pct (= percent, e.g. 1.0 = 1%).
+        trade_count: Stage A backtest の trade_count (= int).
+        hard_penalty: ``stage_config.phase4_lucky_hard_penalty``.
+        soft_penalty: ``stage_config.phase4_lucky_soft_penalty``.
+
+    Returns:
+        penalty 値 (= 0.0 / soft_penalty / hard_penalty のいずれか、 非負).
+
+    詳細: devnotes/20260513-1715-todo-pr4-legacy-pnl-smoke/ § Codex Y Round 4 / § 2.3.2.
+    """
+    if total_pnl <= _PR4_LUCKY_TRIGGER_PNL:
+        return 0.0
+    if max_dd_pct <= _PR4_LUCKY_HARD_DD_EPSILON:
+        return hard_penalty
+    if (
+        max_dd_pct < _PR4_LUCKY_SOFT_DD_THRESHOLD
+        and trade_count < _PR4_LUCKY_SOFT_TC_THRESHOLD
+    ):
+        return soft_penalty
+    return 0.0
+
+
 # T034: Stage A fitness_pen sentinel 序列。
 # archive `_required_float` は None → 0.0 fallback するため、Stage A の 3 失敗
 # 経路 (system_failure / no_exposure / metric_unavailable) は payload に明示的な
@@ -545,6 +630,16 @@ class StageGateConfig:
     # 詳細: devnotes/20260503-1024-B-phase2-step1-canonical-metrics/
     phase2_canonical_metrics_mode: Literal["log_only", "disabled"] = "log_only"
 
+    # PR4: legacy_pnl_smoke fitness opt-in + anti-luck guard
+    # (= AlphaFactoryConfig.phase4 から伝搬)。 default `legacy` で行動完全不変。
+    # `below_threshold` 経路のみで発火 (= sentinel 3 経路は不変)。
+    # 詳細: devnotes/20260513-1715-todo-pr4-legacy-pnl-smoke/
+    phase4_fitness_mode: Literal["legacy", "legacy_pnl_smoke"] = "legacy"
+    phase4_beta: float = 0.05
+    phase4_persistence_weight: float = 0.5
+    phase4_lucky_hard_penalty: float = 1.0
+    phase4_lucky_soft_penalty: float = 0.3
+
     _LIVE_CRITERIA_REQUIRED: ClassVar[frozenset[str]] = frozenset(
         {
             "sharpe_min",
@@ -609,6 +704,53 @@ class StageGateConfig:
                 f"(禁止事項 #4 ガード): got min_exposure_trade_count="
                 f"{self.min_exposure_trade_count}, "
                 f"trade_count_min={lc_trade_count_min}"
+            )
+        # PR4: phase4 fields の defensive 範囲検証 (= 二重防御、 SSOT は Phase4Config 側)。
+        # 不正値混入時にも fail-fast、 fitness 関数誤動作の前にここで止める。
+        # NaN/Inf 防御 (= Codex impl-review Round 1 [Warning] 反映): isfinite で
+        # 先に弾き、 fitness_pen が nan/-inf 化して GA selection 順序性を壊すのを
+        # 未然防止。 Phase4Config 側でも同型チェックあり (= 経路 1 = yaml loader)、
+        # 本 stage_gate 側は経路 2 = 直接 StageGateConfig 生成 (= test 等) でも担保。
+        phase4_valid_modes = {"legacy", "legacy_pnl_smoke"}
+        if self.phase4_fitness_mode not in phase4_valid_modes:
+            raise ValueError(
+                f"phase4_fitness_mode must be one of {sorted(phase4_valid_modes)}, "
+                f"got {self.phase4_fitness_mode!r}"
+            )
+        for _fname, _fval in (
+            ("phase4_beta", self.phase4_beta),
+            ("phase4_persistence_weight", self.phase4_persistence_weight),
+            ("phase4_lucky_hard_penalty", self.phase4_lucky_hard_penalty),
+            ("phase4_lucky_soft_penalty", self.phase4_lucky_soft_penalty),
+        ):
+            if not math.isfinite(_fval):
+                raise ValueError(
+                    f"{_fname} must be finite (NaN/±Inf forbidden), got {_fval}"
+                )
+        if not 0.0 <= self.phase4_beta <= 1.0:
+            raise ValueError(
+                f"phase4_beta must be in [0.0, 1.0]: got {self.phase4_beta}"
+            )
+        if not 0.0 <= self.phase4_persistence_weight <= 1.0:
+            raise ValueError(
+                f"phase4_persistence_weight must be in [0.0, 1.0]: "
+                f"got {self.phase4_persistence_weight}"
+            )
+        if (
+            self.phase4_lucky_hard_penalty < 0.0
+            or self.phase4_lucky_soft_penalty < 0.0
+        ):
+            raise ValueError(
+                f"phase4_lucky_* must be >= 0: hard={self.phase4_lucky_hard_penalty} "
+                f"soft={self.phase4_lucky_soft_penalty}"
+            )
+        # HARD >= SOFT 契約: hard は max_dd≈0、 soft は max_dd<0.5%、 hard 側が
+        # 強い signal でなければ順序整合性違反 (= Phase4Config と同契約).
+        if self.phase4_lucky_hard_penalty < self.phase4_lucky_soft_penalty:
+            raise ValueError(
+                f"phase4_lucky_hard_penalty ({self.phase4_lucky_hard_penalty}) "
+                f"must be >= phase4_lucky_soft_penalty "
+                f"({self.phase4_lucky_soft_penalty})"
             )
         # MappingProxyType で frozen dict 化（外部書換不能）
         object.__setattr__(
@@ -817,6 +959,11 @@ def evaluate_stage_a(
     # archive Parquet には書かない (28+ カラム fixed schema を尊重)。
     # post-RUN sidecar diagnostics (`stage_a_provenance.parquet`) で参照する。
     total_pnl_a: float = 0.0
+    # PR4: Stage A backtest の max_drawdown_pct を anti-luck guard 用に保持 (in-memory)。
+    # `legacy_pnl_smoke` mode の lucky_run_penalty 計算で参照。 例外時 / 計算不能時は
+    # 0.0 (= anti-luck guard 観点では「DD ゼロ = 最も lucky」 だが、 sentinel 経路で
+    # 弾かれるため fitness 経路に届かない、 また `legacy` mode では参照されない)。
+    max_dd_pct_a: float = 0.0
     # T037: Stage A backtest 中に runtime fired した clause idx 数 (observation
     # only, archive `active_clause` 列に記録される)。例外時 / strategy 未生成時は
     # 0 (測定不能を表すが、archive 既存契約 (non-null int32) との整合のため 0
@@ -845,6 +992,13 @@ def evaluate_stage_a(
                 total_pnl_a = 0.0
         except Exception:
             total_pnl_a = 0.0
+        # PR4: max_drawdown_pct を anti-luck guard 用に保持 (= total_pnl_a と同型)。
+        try:
+            max_dd_pct_a = float(bt.max_drawdown_pct)
+            if not math.isfinite(max_dd_pct_a):
+                max_dd_pct_a = 0.0
+        except Exception:
+            max_dd_pct_a = 0.0
         # T037: backtest 完了後の strategy.active_clause_indices を集計。
         # backtest 経路で必ず prepare()→on_bar が呼ばれているはずだが、
         # defensive に len() 経由で取り出す。
@@ -906,6 +1060,12 @@ def evaluate_stage_a(
     # T034: 3 失敗経路は payload に sentinel fitness_pen を入れる (None → 0.0
     # fallback の排除、selection_score tie-break で「無取引優位」を解消)。
     # fitness_raw は変更しない (観察値は保持、ペナルティは fitness_pen のみ)。
+    # PR4: sentinel 3 経路 (system_failure / no_exposure / metric_unavailable) は
+    # mode 関係なく不変。 fitness 計算分岐は `below_threshold` 経路のみで発火
+    # (= 詳細設計 § 2.3.1 sentinel 不変契約)。
+    # PR4 observe-only fields (legacy mode では None、 sentinel 経路でも None)
+    phase4_pnl_slack: float | None = None
+    phase4_lucky_penalty: float | None = None
     if exception_caught:
         reasons.append("system_failure")
         fitness_pen = SYSTEM_FAILURE_FITNESS
@@ -930,11 +1090,43 @@ def evaluate_stage_a(
             )
         else:
             trade_count_penalty = 0.0
-        fitness_pen = (
-            fitness_raw
-            - stage_config.stage_a_alpha * size_norm_val
-            - trade_count_penalty
+        # PR4: fitness mode 分岐 (= sentinel 経路を抜けた below_threshold 経路のみ)
+        # legacy 部分 (= 現状不変 = fitness_raw - α*size_norm)。 tc_penalty は最終
+        # 合算で 1 回だけ控除 (= 二重控除回避、 詳細設計 § 2.3 注釈)。
+        sharpe_term = (
+            fitness_raw - stage_config.stage_a_alpha * size_norm_val
         )
+        if stage_config.phase4_fitness_mode == "legacy":
+            # 現状 fitness (= 完全行動不変)
+            fitness_pen = sharpe_term - trade_count_penalty
+        elif stage_config.phase4_fitness_mode == "legacy_pnl_smoke":
+            # PR4 新規: PnL 方向の探索圧 + anti-luck guard
+            # 詳細: devnotes/20260513-1715-todo-pr4-legacy-pnl-smoke/
+            phase4_pnl_slack = _compute_clipped_pnl_slack(total_pnl_a)
+            pnl_term = (
+                stage_config.phase4_beta
+                * phase4_pnl_slack
+                * stage_config.phase4_persistence_weight
+            )
+            phase4_lucky_penalty = _compute_lucky_run_penalty(
+                total_pnl=total_pnl_a,
+                max_dd_pct=max_dd_pct_a,
+                trade_count=trade_count,
+                hard_penalty=stage_config.phase4_lucky_hard_penalty,
+                soft_penalty=stage_config.phase4_lucky_soft_penalty,
+            )
+            fitness_pen = (
+                sharpe_term
+                + pnl_term
+                - trade_count_penalty
+                - phase4_lucky_penalty
+            )
+        else:
+            # __post_init__ で範囲検証済だが防御的に
+            raise RuntimeError(
+                f"unknown phase4_fitness_mode: "
+                f"{stage_config.phase4_fitness_mode!r}"
+            )
         if fitness_pen <= stage_config.stage_a_threshold:
             reasons.append("below_threshold")
 
@@ -961,6 +1153,19 @@ def evaluate_stage_a(
             # T033: sidecar diagnostics 用 in-memory only field。
             # archive Parquet には書かない (28+ カラム fixed schema 尊重)。
             "total_pnl": total_pnl_a,
+            # PR4: fitness mode + observed values + config snapshot
+            # (= archive 列拡張なし、 diagnostics sidecar 用、 future migration
+            # 監査の再現性確保、 Codex 設計レビュー Round 1 [Warning] 反映で
+            # config 値も記録)。
+            # phase4_pnl_slack / phase4_lucky_penalty は legacy mode + sentinel
+            # 経路では None (= 計算 skip された証跡)。
+            "phase4_fitness_mode": stage_config.phase4_fitness_mode,
+            "phase4_pnl_slack": phase4_pnl_slack,
+            "phase4_lucky_penalty": phase4_lucky_penalty,
+            "phase4_beta": stage_config.phase4_beta,
+            "phase4_persistence_weight": stage_config.phase4_persistence_weight,
+            "phase4_lucky_hard_penalty": stage_config.phase4_lucky_hard_penalty,
+            "phase4_lucky_soft_penalty": stage_config.phase4_lucky_soft_penalty,
         },
     }
     return StageResult(

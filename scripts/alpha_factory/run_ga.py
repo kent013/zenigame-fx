@@ -362,6 +362,19 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "未指定時は (1) history.jsonl の最新適用可能 record (2) config 値 の順で fallback。"
         ),
     )
+    # PR4: Stage A fitness mode CLI override (yaml phase4.fitness_mode より優先)
+    p.add_argument(
+        "--fitness-mode",
+        choices=["legacy", "legacy_pnl_smoke"],
+        default=None,
+        help=(
+            "PR4: Stage A fitness mode を CLI で明示指定 (yaml phase4.fitness_mode より"
+            "優先)。 未指定時は yaml の値 (default `legacy` = 行動完全不変)。 smoke 検証"
+            "時のみ `legacy_pnl_smoke` 指定 (1 RUN smoke 必須、 60-487 分、 baseline "
+            "5 RUN median と比較)。 詳細: "
+            "devnotes/20260513-1715-todo-pr4-legacy-pnl-smoke/."
+        ),
+    )
     # T057 Phase 2 Gate C: aux preflight override (dev 用)
     p.add_argument(
         "--allow-aux-missing",
@@ -418,6 +431,11 @@ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
             "fitness_metric": args.fitness_metric,
             "seed": args.seed,
             "max_workers": args.max_workers,
+        },
+        # PR4: --fitness-mode CLI override (= yaml phase4.fitness_mode より優先)。
+        # None なら _build_phase4 が dataclass default を尊重する。
+        "phase4": {
+            "fitness_mode": args.fitness_mode,
         },
     }
 

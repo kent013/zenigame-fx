@@ -40,6 +40,8 @@ __all__ = [
     "FspConfig",
     "GAConfig",
     "GAFeasibilityConfig",
+    "Phase2Config",
+    "Phase4Config",  # PR4
     "SchemaContractConfig",  # T058
     "StageGateConfig",
     "StageWindowsConfig",
@@ -299,6 +301,82 @@ class Phase2Config:
 
 
 @dataclass(frozen=True)
+class Phase4Config:
+    """PR4 = legacy_pnl_smoke fitness opt-in + anti-luck guard 用 config.
+
+    Stage A fitness 関数に opt-in flag を導入し、 mission_shortfall 方向への探索圧
+    (= clipped_pnl_slack 加算) と anti-luck guard (= max_dd≈0 lucky run の連続抑制)
+    を加える。 default は legacy (= 行動完全不変)。
+
+    fitness_mode:
+        - legacy: 現状 fitness 関数 (= sharpe - α*size_norm - tc_penalty)、 default、
+          完全行動不変。
+        - legacy_pnl_smoke: legacy + β*clipped_pnl_slack*persistence_weight
+          - lucky_run_penalty。 **1 RUN smoke 検証必須** (= 行動変更)。
+
+    smoke 検証は user 実行 (= ``scripts/alpha_factory/run_ga.py --fitness-mode
+    legacy_pnl_smoke ...`` で 1 RUN、 60-487 分、 baseline 5 RUN median 比較)。
+
+    詳細: ``devnotes/20260513-1715-todo-pr4-legacy-pnl-smoke/``.
+    """
+
+    fitness_mode: Literal["legacy", "legacy_pnl_smoke"] = "legacy"
+    beta: float = 0.05
+    persistence_weight: float = 0.5  # PR4 minimal scope = 固定値
+    lucky_hard_penalty: float = 1.0
+    lucky_soft_penalty: float = 0.3
+
+    def __post_init__(self) -> None:
+        valid = {"legacy", "legacy_pnl_smoke"}
+        if self.fitness_mode not in valid:
+            raise ValueError(
+                f"Phase4Config.fitness_mode must be one of {sorted(valid)}, "
+                f"got {self.fitness_mode!r}."
+            )
+        # NaN/Inf 防御 (= Codex impl-review Round 1 [Warning] 反映: nan は比較を
+        # すり抜けるため `not 0.0 <= x <= 1.0` だけでは取り逃がす。 isfinite で
+        # 先に弾き、 fitness_pen が nan/-inf 化して GA selection 順序性を壊すのを
+        # 未然防止)。 SSOT は本 Phase4Config 側、 StageGateConfig 側は二重防御。
+        import math as _math
+
+        for fname, fval in (
+            ("beta", self.beta),
+            ("persistence_weight", self.persistence_weight),
+            ("lucky_hard_penalty", self.lucky_hard_penalty),
+            ("lucky_soft_penalty", self.lucky_soft_penalty),
+        ):
+            if not _math.isfinite(fval):
+                raise ValueError(
+                    f"Phase4Config.{fname} must be finite "
+                    f"(NaN/±Inf forbidden), got {fval}"
+                )
+        if not 0.0 <= self.beta <= 1.0:
+            raise ValueError(
+                f"Phase4Config.beta must be in [0.0, 1.0], got {self.beta}"
+            )
+        if not 0.0 <= self.persistence_weight <= 1.0:
+            raise ValueError(
+                f"Phase4Config.persistence_weight must be in [0.0, 1.0], "
+                f"got {self.persistence_weight}"
+            )
+        if self.lucky_hard_penalty < 0.0 or self.lucky_soft_penalty < 0.0:
+            raise ValueError(
+                f"Phase4Config.lucky_* penalty must be non-negative, "
+                f"got hard={self.lucky_hard_penalty} "
+                f"soft={self.lucky_soft_penalty}"
+            )
+        # HARD >= SOFT 契約: hard は max_dd≈0 即時抑制、 soft は max_dd<0.5%
+        # 連続抑制、 hard 側が強い違反シグナルでなければ順序整合性違反。
+        if self.lucky_hard_penalty < self.lucky_soft_penalty:
+            raise ValueError(
+                f"Phase4Config.lucky_hard_penalty ({self.lucky_hard_penalty}) "
+                f"must be >= lucky_soft_penalty ({self.lucky_soft_penalty}) "
+                f"(= hard は max_dd≈0 即時抑制、 soft は max_dd<0.5% 連続抑制、"
+                f" hard 側が強い signal でなければ順序整合性違反)"
+            )
+
+
+@dataclass(frozen=True)
 class AlphaFactoryConfig:
     """Alpha Factory 全体 config。loader から返される SSOT 構造。
 
@@ -317,6 +395,7 @@ class AlphaFactoryConfig:
         default_factory=SchemaContractConfig
     )
     phase2: Phase2Config = field(default_factory=Phase2Config)  # B step 1 で追加
+    phase4: Phase4Config = field(default_factory=Phase4Config)  # PR4 で追加
 
     @property
     def live_criteria(self) -> Mapping[str, float | int]:
@@ -544,14 +623,21 @@ def load_config(
         raw.get("stage_gate") or {}, raw.get("live_criteria") or {}
     )
     phase2 = _build_phase2(raw.get("phase2") or {})
+    phase4 = _build_phase4(raw.get("phase4") or {})  # PR4
     # B Phase 2 切替コミット step 1 (Codex impl-review Round 1 [Critical] 1 取込):
     # phase2.canonical_metrics_mode を StageGateConfig.phase2_canonical_metrics_mode に
     # 値伝搬 (= 禁止事項 8 値伝搬漏れ防止)。 stage_gate caller が dual-path 計算の
     # enabled flag をこの field から読む。
+    # PR4: phase4 の 5 field も同様に StageGateConfig へ伝搬 (= 4 段接続契約)。
     from dataclasses import replace as _dc_replace
     stage_gate = _dc_replace(
         stage_gate,
         phase2_canonical_metrics_mode=phase2.canonical_metrics_mode,
+        phase4_fitness_mode=phase4.fitness_mode,
+        phase4_beta=phase4.beta,
+        phase4_persistence_weight=phase4.persistence_weight,
+        phase4_lucky_hard_penalty=phase4.lucky_hard_penalty,
+        phase4_lucky_soft_penalty=phase4.lucky_soft_penalty,
     )
     return AlphaFactoryConfig(
         dataset=_build_dataset(raw.get("dataset") or {}),
@@ -565,6 +651,7 @@ def load_config(
         fsp=_build_fsp(raw.get("factor_shadow") or {}),
         schema_contract=_build_schema_contract(raw.get("schema_contract") or {}),
         phase2=phase2,
+        phase4=phase4,  # PR4
     )
 
 
@@ -580,6 +667,37 @@ def _build_phase2(raw: Mapping[str, Any]) -> Phase2Config:
     if "canonical_metrics_mode" in raw:
         kwargs["canonical_metrics_mode"] = str(raw["canonical_metrics_mode"])
     return Phase2Config(**kwargs)
+
+
+def _build_phase4(raw: Mapping[str, Any]) -> Phase4Config:
+    """PR4: ``phase4`` yaml section → :class:`Phase4Config`.
+
+    unknown key は明示的に reject (= phase2 / schema_contract と同パターン).
+    None 値は skip し dataclass default を尊重 (= CLI override 経路で None が
+    入った場合の対応、 ``_args_to_overrides`` 由来)。
+    """
+    allowed = {
+        "fitness_mode",
+        "beta",
+        "persistence_weight",
+        "lucky_hard_penalty",
+        "lucky_soft_penalty",
+    }
+    unknown_keys = set(raw.keys()) - allowed
+    if unknown_keys:
+        raise ValueError(f"phase4: unknown keys {sorted(unknown_keys)}")
+    kwargs: dict[str, Any] = {}
+    if raw.get("fitness_mode") is not None:
+        kwargs["fitness_mode"] = str(raw["fitness_mode"])
+    for numeric_key in (
+        "beta",
+        "persistence_weight",
+        "lucky_hard_penalty",
+        "lucky_soft_penalty",
+    ):
+        if raw.get(numeric_key) is not None:
+            kwargs[numeric_key] = float(raw[numeric_key])
+    return Phase4Config(**kwargs)
 
 
 def _build_schema_contract(raw: Mapping[str, Any]) -> SchemaContractConfig:
