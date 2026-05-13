@@ -166,7 +166,7 @@ def _make_archive() -> GenomeArchive:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_has_51_columns() -> None:
+def test_schema_has_52_columns() -> None:
     # T-sharpe Phase 1A: trade_sharpe_raw + sharpe_calc_version (28→30)
     # T035: n_fold_effective + positive_fold_ratio_effective + stage_b_reason_codes (30→33)
     # T043: mission_score (33→34)
@@ -177,7 +177,8 @@ def test_schema_has_51_columns() -> None:
     #       / archive_role / source_stage) (43→47)
     # T091 cycle_phase1 段階 2: trade_count_stage_a / trade_count_stage_b /
     #       trade_count_full_dataset / median_oos_sharpe (47→51)
-    assert len(GENOMES_SCHEMA.names) == 51
+    # PR2 (persistence_score_shadow): Stage B 持続性予測 shadow score (51→52)
+    assert len(GENOMES_SCHEMA.names) == 52
     expected = {
         "run_id", "run_number", "generation", "individual_name",
         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
@@ -206,6 +207,8 @@ def test_schema_has_51_columns() -> None:
         # T091 cycle_phase1 段階 2: trade_count スコープ整合 + Layer 1 検証用
         "trade_count_stage_a", "trade_count_stage_b",
         "trade_count_full_dataset", "median_oos_sharpe",
+        # PR2: Stage B 持続性予測 shadow score
+        "persistence_score_shadow",
     }
     assert set(GENOMES_SCHEMA.names) == expected
 
@@ -1020,6 +1023,8 @@ def test_schema_nullable_attributes() -> None:
         # (Stage A/B 各 collect で書込、 旧 archive 互換のため nullable=True)
         "trade_count_stage_a", "trade_count_stage_b",
         "trade_count_full_dataset", "median_oos_sharpe",
+        # PR2: Stage B 持続性予測 shadow score (collect_stage_b で書込、 nullable=True)
+        "persistence_score_shadow",
     }
     for f in GENOMES_SCHEMA:
         if f.name in nullable_cols:
@@ -1826,3 +1831,93 @@ def test_pr1_source_stage_persisted_in_parquet(tmp_path: Path) -> None:
     df = table.to_pandas()
     assert len(df) == 1
     assert df.iloc[0]["source_stage"] == "b"
+
+
+# ---------------------------------------------------------------------------
+# PR2: persistence_score_shadow 列 (devnotes/20260513-1223-todo-pr2-persistence-score-shadow/)
+# ---------------------------------------------------------------------------
+
+
+def test_pr2_schema_has_persistence_score_shadow_column() -> None:
+    """PR2: GENOMES_SCHEMA に persistence_score_shadow 列が存在 (nullable float)."""
+    names = GENOMES_SCHEMA.names
+    assert "persistence_score_shadow" in names
+    assert GENOMES_SCHEMA.field("persistence_score_shadow").type == pa.float64()
+    assert GENOMES_SCHEMA.field("persistence_score_shadow").nullable
+
+
+def test_pr2_template_persistence_score_shadow_default_none() -> None:
+    """PR2: row template default は None (Stage B 評価前)."""
+    template = _create_row_template()
+    assert template["persistence_score_shadow"] is None
+
+
+def test_pr2_collect_stage_b_writes_persistence_score_shadow() -> None:
+    """PR2: collect_stage_b で persistence_score_shadow が計算・書き込みされる.
+
+    _stage_b_result の oos_sharpes=(0.1,-0.2,0.3,-0.1,0.4) → fold_sign_ratio=1.0
+    positive_fold_ratio_effective を 0.6 で payload override
+    → 0.7 * 0.6 + 0.3 * 1.0 = 0.72
+    """
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    # 注: _stage_b_result の payload には `positive_fold_ratio` (旧キー) しか
+    # 入っていない。 collect_stage_b は `positive_fold_ratio_effective` (T035 新キー)
+    # を読むため、 PR2 テストでは override が必要。
+    arc.collect_stage_b(
+        g, "lane", 0, _stage_b_result(positive_fold_ratio_effective=0.6)
+    )
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["persistence_score_shadow"] == pytest.approx(0.72)
+
+
+def test_pr2_collect_stage_b_writes_persistence_score_shadow_fallback() -> None:
+    """PR2: positive_fold_ratio_effective なし、 fold_sign_ratio のみで計算可能.
+
+    _stage_b_result default では positive_fold_ratio_effective は payload にない
+    → row["positive_fold_ratio_effective"] = None
+    → fold_sign_ratio=1.0 のみで計算 → 1.0
+    """
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    arc.collect_stage_b(g, "lane", 0, _stage_b_result())
+    row = arc._rows[("lane", 0, "g0_i0")]
+    assert row["persistence_score_shadow"] == pytest.approx(1.0)
+
+
+def test_pr2_compute_persistence_score_shadow_handles_none_inputs() -> None:
+    """PR2: 両 None → None、 片方 None → 他方のみで計算 (clip)。"""
+    from src.alpha_factory.archive import _compute_persistence_score_shadow
+    assert _compute_persistence_score_shadow(None, None) is None
+    assert _compute_persistence_score_shadow(0.5, None) == pytest.approx(0.5)
+    assert _compute_persistence_score_shadow(None, 0.8) == pytest.approx(0.8)
+
+
+def test_pr2_compute_persistence_score_shadow_clipped_to_unit_range() -> None:
+    """PR2: 結果は [0.0, 1.0] にクリップされる."""
+    from src.alpha_factory.archive import _compute_persistence_score_shadow
+    # 上限: 0.7 * 1.5 + 0.3 * 1.5 = 1.5 → clip 1.0
+    assert _compute_persistence_score_shadow(1.5, 1.5) == 1.0
+    # 下限: 0.7 * -0.5 + 0.3 * -0.5 = -0.5 → clip 0.0
+    assert _compute_persistence_score_shadow(-0.5, -0.5) == 0.0
+    # 片方 over: 0.7 * 2.0 + 0.3 * 0.5 = 1.55 → clip 1.0
+    assert _compute_persistence_score_shadow(2.0, 0.5) == 1.0
+
+
+def test_pr2_persistence_score_shadow_persisted_in_parquet(tmp_path: Path) -> None:
+    """PR2: flush 後の Parquet で persistence_score_shadow が読み出せる."""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    arc.collect_stage_b(
+        g, "lane", 0, _stage_b_result(positive_fold_ratio_effective=0.6)
+    )
+    out = arc.flush(output_dir=tmp_path)
+    import pyarrow.parquet as pq
+    table = pq.read_table(out)
+    df = table.to_pandas()
+    assert "persistence_score_shadow" in df.columns
+    # 0.7 * 0.6 + 0.3 * 1.0 = 0.72
+    assert df.iloc[0]["persistence_score_shadow"] == pytest.approx(0.72)

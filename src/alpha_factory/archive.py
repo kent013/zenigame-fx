@@ -136,6 +136,11 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
         pa.field("trade_count_stage_b", pa.int32(), nullable=True),
         pa.field("trade_count_full_dataset", pa.int32(), nullable=True),
         pa.field("median_oos_sharpe", pa.float64(), nullable=True),
+        # PR2: Stage B 持続性予測 shadow score (selection 影響なし、 audit only)。
+        # 計算式: clip(0.7 * positive_fold_ratio_effective + 0.3 * fold_sign_ratio, 0, 1)。
+        # archive 実測 Spearman で Stage C 持続性を正予測する 2 metric の加重合成。
+        # 詳細: devnotes/20260513-1223-todo-pr2-persistence-score-shadow/
+        pa.field("persistence_score_shadow", pa.float64(), nullable=True),
         # T054: Stage B fold unavailable の排他的 reason 別カウント。
         # JSON 文字列として永続化 (FoldUnavailableReason value → count)。
         # 不変条件: 全 reason の合計 == n_fold_unavailable。
@@ -237,6 +242,8 @@ def _create_row_template() -> dict[str, Any]:
         "trade_count_stage_b": None,
         "trade_count_full_dataset": None,
         "median_oos_sharpe": None,
+        # PR2: Stage B 持続性予測 shadow score (collect_stage_b で計算・書込)
+        "persistence_score_shadow": None,
         # T043: mission_score (Stage C 評価時のみ書き込み、それ以外は None)
         "mission_score": None,
         # T036: FSP — post-RUN updater が一括書き戻し、template は null 初期化のみ
@@ -283,6 +290,31 @@ def _read_active_clause_from_payload(payload: Mapping[str, object]) -> int:
     if isinstance(v, int):
         return v if v >= 0 else 0
     return 0
+
+
+def _compute_persistence_score_shadow(
+    positive_fold_ratio: float | None,
+    fold_sign_ratio: float | None,
+) -> float | None:
+    """PR2: Stage B 持続性予測 shadow score (audit only、 selection 影響なし).
+
+    archive 実測 Spearman で Stage C 持続性を正予測する 2 metric の加重合成:
+    - ``positive_fold_ratio_effective`` (Spearman ρ=+0.345) を 0.7 重み
+    - ``fold_sign_ratio`` (Spearman ρ=+0.248) を 0.3 重み
+
+    両 None なら None、 片方 None なら他方のみで計算 (= NaN handling).
+    結果は ``[0.0, 1.0]`` にクリップ.
+
+    詳細: devnotes/20260513-1223-todo-pr2-persistence-score-shadow/
+    """
+    if positive_fold_ratio is None and fold_sign_ratio is None:
+        return None
+    if positive_fold_ratio is None:
+        return max(0.0, min(1.0, float(fold_sign_ratio)))
+    if fold_sign_ratio is None:
+        return max(0.0, min(1.0, float(positive_fold_ratio)))
+    composite = 0.7 * float(positive_fold_ratio) + 0.3 * float(fold_sign_ratio)
+    return max(0.0, min(1.0, composite))
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +609,13 @@ class GenomeArchive:
         median_oos = _opt_float(payload, "median_oos_sharpe")
         if median_oos is not None:
             row["median_oos_sharpe"] = median_oos
+        # PR2: persistence_score_shadow を計算・書込 (selection 影響なし、 audit only)。
+        # row["positive_fold_ratio_effective"] / row["fold_sign_ratio"] は本 collect_stage_b
+        # の上流で既に書き込み済 (= _populate_stage_b_observability で書込)。
+        row["persistence_score_shadow"] = _compute_persistence_score_shadow(
+            row.get("positive_fold_ratio_effective"),
+            row.get("fold_sign_ratio"),
+        )
         self._mark_stage(row, "B")
 
     def collect_stage_c(
