@@ -1,0 +1,40 @@
+{
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "name": "g59_i94",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "P2",
+          "weight": 1.0116671184874129,
+          "params": {
+            "atr_n": 12
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "P6",
+          "weight": -1.7957823864029507,
+          "params": {
+            "atr_n": 14,
+            "threshold_rel": 0.0007309693889522703,
+            "scale_rel": 0.0009418076417573914
+          }
+        }
+      ],
+      "weight": 1.0861450201573661
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.14636424509790813,
+    "exit_threshold": -0.10811229319368322,
+    "max_pos": 4,
+    "time_stop_min": 296
+  },
+  "risk": {
+    "stop_atr": 3.116532108078507,
+    "take_atr": 1.3360451110727831
+  }
+}
