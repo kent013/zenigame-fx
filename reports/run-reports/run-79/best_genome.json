@@ -1,0 +1,84 @@
+{
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "name": "g52_i93",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F6",
+          "weight": 1.4137104179986415,
+          "params": {
+            "session": 0,
+            "k": 2.6698320477412425,
+            "atr_n": 12
+          }
+        },
+        {
+          "name": "F8",
+          "weight": 0.9973522954067487,
+          "params": {
+            "n": 32,
+            "k": 2.513358342153473
+          }
+        },
+        {
+          "name": "F13",
+          "weight": 1.7242770943802281,
+          "params": {
+            "w": 77,
+            "lag": 4
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.8006541690447638
+    },
+    {
+      "directional": [
+        {
+          "name": "P7",
+          "weight": 0.8725956034967817,
+          "params": {
+            "spx_n": 12,
+            "vix_threshold": 35.95081071113988,
+            "vix_scale": 9.964563638719884,
+            "vix_staleness_days": 22.648853450033112,
+            "spx_staleness_bars": 430
+          }
+        },
+        {
+          "name": "P12",
+          "weight": 1.3174180287990371,
+          "params": {
+            "mom_n": 48,
+            "scale": 0.04456777854268735,
+            "staleness_bars": 150
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "P10",
+          "weight": -1.2387910547846936,
+          "params": {
+            "window_min": 14.19522978589413,
+            "scale_min": 7.838280838636849,
+            "min_impact": 1
+          }
+        }
+      ],
+      "weight": 1.136393329078013
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.3210074258818144,
+    "exit_threshold": 0.03514452630121075,
+    "max_pos": 1,
+    "time_stop_min": 0
+  },
+  "risk": {
+    "stop_atr": 1.9570811205959098,
+    "take_atr": 3.0016974165205457
+  }
+}
