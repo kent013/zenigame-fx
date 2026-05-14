@@ -95,6 +95,37 @@ def test_ga_config_max_workers_eight_accepted() -> None:
     assert ga.max_workers == 8
 
 
+def test_ga_config_max_tasks_per_child_defaults_to_none() -> None:
+    """maxtasksperchild は default None (= リサイクルなし = 既存挙動)。"""
+    ga = GAConfig(
+        population_size=10,
+        generations=5,
+        crossover_rate=0.7,
+        mutation_rate=0.3,
+        tournament_size=3,
+        elite_count=2,
+        max_depth=4,
+    )
+    assert ga.max_tasks_per_child is None
+
+
+def test_ga_config_max_tasks_per_child_zero_raises() -> None:
+    """max_tasks_per_child < 1 (None 以外) は ValueError。"""
+    with pytest.raises(
+        ValueError, match=r"ga\.max_tasks_per_child must be >= 1 or None"
+    ):
+        GAConfig(
+            population_size=10,
+            generations=5,
+            crossover_rate=0.7,
+            mutation_rate=0.3,
+            tournament_size=3,
+            elite_count=2,
+            max_depth=4,
+            max_tasks_per_child=0,
+        )
+
+
 def test_ga_config_apply_from_generation_must_be_le_generations() -> None:
     """apply_from_generation > generations は ValueError."""
     with pytest.raises(
@@ -313,6 +344,69 @@ def test_load_config_yaml_overrides_max_workers(tmp_path: Path) -> None:
     p.write_text(yaml_text, encoding="utf-8")
     cfg = load_config(p)
     assert cfg.ga.max_workers == 4
+
+
+def test_default_yaml_loads_ga_max_tasks_per_child(tmp_path: Path) -> None:
+    """default.yaml の ga.max_tasks_per_child (null) が GAConfig に伝搬する。"""
+    repo_yaml = (
+        Path(__file__).resolve().parents[2]
+        / "config"
+        / "alpha_factory"
+        / "default.yaml"
+    )
+    cfg = load_config(repo_yaml)
+    # default.yaml は null → 自動導出のため GAConfig 上は None
+    assert cfg.ga.max_tasks_per_child is None
+
+
+def test_load_config_yaml_overrides_max_tasks_per_child(tmp_path: Path) -> None:
+    """yaml で ga.max_tasks_per_child に明示 int を与えると GAConfig に伝搬する。"""
+    yaml_text = textwrap.dedent(
+        """
+        dataset:
+          instrument: EUR_JPY
+          start: "2025-10-01T00:00:00Z"
+          end: "2026-04-01T00:00:00Z"
+        backtest:
+          initial_cash: "1000000"
+          leverage: 25
+          units: 10000
+          max_spread_bps: "10"
+        ga:
+          population_size: 8
+          generations: 2
+          crossover_rate: 0.7
+          mutation_rate: 0.3
+          tournament_size: 3
+          elite_count: 2
+          max_depth: 4
+          max_workers: 4
+          max_tasks_per_child: 50
+        live_criteria:
+          sharpe_min: 1.0
+          total_pnl_min: 50000
+          max_drawdown_max: 0.2
+          trade_count_min: 50
+          trade_count_max: 5000
+        stage_gate:
+          stage_a:
+            window_days: 60
+            target_pass_rate: 0.15
+            alpha: 0.03
+            threshold: 0.0
+          stage_b:
+            window_months: 18
+          stage_c:
+            holdout_days: 60
+            spread_stress_multiplier: 1.5
+        cross_pair:
+          mode: shadow
+        """
+    )
+    p = tmp_path / "test.yaml"
+    p.write_text(yaml_text, encoding="utf-8")
+    cfg = load_config(p)
+    assert cfg.ga.max_tasks_per_child == 50
 
 
 def test_strict_bool_string_false_is_false() -> None:

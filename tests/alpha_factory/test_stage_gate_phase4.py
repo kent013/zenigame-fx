@@ -491,6 +491,7 @@ def test_pr4_cli_args_to_overrides_includes_fitness_mode() -> None:
         population_size=None, generations=None, mutation_rate=None,
         crossover_rate=None, tournament_size=None, elite_count=None,
         max_depth=None, fitness_metric=None, seed=None, max_workers=None,
+        max_tasks_per_child=None,
         fitness_mode="legacy_pnl_smoke",
     )
     overrides = _args_to_overrides(args)
@@ -508,6 +509,7 @@ def test_pr4_cli_args_to_overrides_none_fitness_mode() -> None:
         population_size=None, generations=None, mutation_rate=None,
         crossover_rate=None, tournament_size=None, elite_count=None,
         max_depth=None, fitness_metric=None, seed=None, max_workers=None,
+        max_tasks_per_child=None,
         fitness_mode=None,
     )
     overrides = _args_to_overrides(args)

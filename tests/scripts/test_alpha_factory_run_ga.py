@@ -302,12 +302,13 @@ def test_main_constructs_lane_eval_context_with_preflight_payload(
     class _SpyEvaluator(_OrigEvaluator):
         def __init__(
             self, max_workers, stage_gate_cfg, cross_pair_cfg,
-            prim_evaluator, lane_contexts,
+            prim_evaluator, lane_contexts, **kwargs,
         ):
             captured["lane_contexts"] = dict(lane_contexts)
+            # max_tasks_per_child 等の keyword-only 引数を透過
             super().__init__(
                 max_workers, stage_gate_cfg, cross_pair_cfg,
-                prim_evaluator, lane_contexts,
+                prim_evaluator, lane_contexts, **kwargs,
             )
 
     monkeypatch.setattr(run_ga_module, "GenomeEvaluator", _SpyEvaluator)

@@ -149,10 +149,20 @@ class GAConfig:
     feasibility: GAFeasibilityConfig = field(default_factory=GAFeasibilityConfig)
     # T052: GA 評価並列ワーカー数 (1 = sequential, 2 以上で multiprocessing.Pool)。
     # L1 selection / L2 row-order 決定論性は worker 数に依存しない契約。
-    # default 2: 24GB マシンで安全な水準 (1 worker ~400MB × 2 + main ≈ 1.2GB)、
-    # 軽量 RUN でも spawn overhead を上回る wall-time 短縮を期待。
+    # 実測 per-worker RSS は pymalloc アリーナ断片化 (run_backtest の Decimal
+    # churn 由来) により数 GB 規模になり得る。max_tasks_per_child で頭打ちする。
+    # 正確な per-worker 試算は Decimal churn 削減 (別タスク) 完了後に再評価。
     # 上書きは CLI `--max-workers` または YAML `ga.max_workers`。
+    # @ref: devnotes/20260514-2045-ga-worker-memory/
     max_workers: int = 2
+    # GA 評価 worker のリサイクル間隔 (multiprocessing.Pool の maxtasksperchild)。
+    # worker が指定タスク数を処理したらプロセスごと退役 → 新規 spawn し、
+    # 断片化した pymalloc アリーナを OS に完全返却して per-worker RSS を頭打ちにする。
+    # None = リサイクルなし (従来挙動)。run_ga.py は None 時に
+    # 2*population_size//max_workers (約 2 世代ごと) を自動導出する。
+    # 決定論: 退役 worker は同一 initargs で再 init されるため L1/L2 不変。
+    # @ref: devnotes/20260514-2045-ga-worker-memory/
+    max_tasks_per_child: int | None = None
 
     def __post_init__(self) -> None:
         if self.population_size < 1:
@@ -160,6 +170,14 @@ class GAConfig:
         if self.max_workers < 1:
             raise ValueError(
                 f"ga.max_workers must be >= 1: {self.max_workers}"
+            )
+        if (
+            self.max_tasks_per_child is not None
+            and self.max_tasks_per_child < 1
+        ):
+            raise ValueError(
+                "ga.max_tasks_per_child must be >= 1 or None: "
+                f"{self.max_tasks_per_child}"
             )
         if self.generations < 0:
             raise ValueError("ga.generations must be >= 0")
@@ -502,6 +520,11 @@ def _build_ga(raw: Mapping[str, Any]) -> GAConfig:
         n_edit_max=int(raw.get("n_edit_max", 3)),
         feasibility=_build_feasibility(raw.get("feasibility")),
         max_workers=int(raw.get("max_workers", 2)),
+        max_tasks_per_child=(
+            int(mtpc)
+            if (mtpc := raw.get("max_tasks_per_child")) is not None
+            else None
+        ),
     )
 
 

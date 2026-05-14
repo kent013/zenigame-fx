@@ -348,6 +348,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="--max-workers のエイリアス (zenigame との表記互換)",
     )
     p.add_argument(
+        "--max-tasks-per-child",
+        type=int,
+        default=None,
+        help=(
+            "GA 評価 worker のリサイクル間隔 (multiprocessing.Pool の "
+            "maxtasksperchild)。worker が指定タスク数を処理したら退役 → "
+            "新規 spawn し、断片化した pymalloc アリーナを OS に返却して "
+            "per-worker RSS を頭打ちにする。未指定時は "
+            "2*population_size//max_workers を自動導出。"
+        ),
+    )
+    p.add_argument(
         "--strict-memory-guard",
         action="store_true",
         help=(
@@ -447,6 +459,7 @@ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
             "fitness_metric": args.fitness_metric,
             "seed": args.seed,
             "max_workers": args.max_workers,
+            "max_tasks_per_child": args.max_tasks_per_child,
         },
         # PR4: --fitness-mode CLI override (= yaml phase4.fitness_mode より優先)。
         # None なら _build_phase4 が dataclass default を尊重する。
@@ -1062,6 +1075,7 @@ def _write_reports(
     cross_pair_mode: str,
     now: datetime,
     run_context: RunContext,
+    effective_max_tasks_per_child: int,
     diagnostics_sidecar_path: Path | None = None,
     top_fold_sidecar_path: Path | None = None,
     peak_rss_per_generation: list[dict[str, float]] | None = None,
@@ -1249,6 +1263,15 @@ def _write_reports(
         "parallel_config": {
             "max_workers": cfg.ga.max_workers,
             "mode": "parallel" if cfg.ga.max_workers > 1 else "sequential",
+            # worker リサイクル間隔の実効値 (observability)。main() で導出した
+            # 値を引数で受け取り再導出しない (SSOT)。max_workers<=1 (pool 無し)
+            # では maxtasksperchild は無効のため null を記録する。
+            # @ref: devnotes/20260514-2045-ga-worker-memory/
+            "max_tasks_per_child": (
+                effective_max_tasks_per_child
+                if cfg.ga.max_workers > 1
+                else None
+            ),
         },
         "max_rss_mb_per_worker": float(
             max(
@@ -1345,7 +1368,13 @@ def _check_memory_budget(max_workers: int, strict: bool) -> None:
     """T052: max_workers が available memory budget を超えたら warning。
 
     `--strict-memory-guard` 指定時は SystemExit (autopilot 等で OOM 防止)。
-    1 worker あたり 約 400MB (保守的試算) + main 400MB + OS マージン 4GB を仮定。
+
+    NOTE: 旧来の「1 worker 約 400MB」前提は実測 (5.5〜8.7GB) と乖離している。
+    実 per-worker RSS は pymalloc アリーナ断片化 (run_backtest の Decimal
+    churn 由来) で数 GB 規模に達する。maxtasksperchild による worker
+    リサイクル (devnotes/20260514-2045-ga-worker-memory/) で頭打ちするが、
+    本関数の // 400 式自体の本格修正 (4 項モデル化) は Decimal churn 削減
+    タスクとセットで別途行う。現状は粗い下限ガードとして残置する。
     """
     try:
         import psutil
@@ -1367,6 +1396,27 @@ def _check_memory_budget(max_workers: int, strict: bool) -> None:
                 f"recommended {recommended_max} "
                 f"(available_mb={int(available_mb)})"
             )
+
+
+def _derive_max_tasks_per_child(
+    configured: int | None,
+    population_size: int,
+    max_workers: int,
+) -> tuple[int | None, str]:
+    """GenomeEvaluator に渡す maxtasksperchild の実効値を決定する。
+
+    - configured が非 None: その値をそのまま使う (source="config")。
+    - configured が None: ``2*population_size // max_workers`` を自動導出
+      (= 各 worker をおよそ 2 世代ごとにリサイクル、source="auto")。
+      下限 1。
+
+    Returns:
+        ``(effective_value, source)``。
+    """
+    if configured is not None:
+        return configured, "config"
+    derived = max(1, (2 * population_size) // max(1, max_workers))
+    return derived, "auto"
 
 
 def _aggregate_ab_summary(
@@ -1834,6 +1884,18 @@ def main(argv: list[str] | None = None) -> int:
         max_workers=cfg.ga.max_workers,
         mode="parallel" if cfg.ga.max_workers > 1 else "sequential",
     )
+    # worker リサイクル間隔 (pymalloc アリーナ断片化対策) の実効値を決定
+    effective_max_tasks_per_child, mtpc_source = _derive_max_tasks_per_child(
+        cfg.ga.max_tasks_per_child,
+        cfg.ga.population_size,
+        cfg.ga.max_workers,
+    )
+    logger.info(
+        "run_ga.max_tasks_per_child",
+        value=effective_max_tasks_per_child,
+        source=mtpc_source,
+        active=cfg.ga.max_workers > 1,  # max_workers==1 (pool 無し) では未使用
+    )
 
     # GA loop は GenomeEvaluator の `with` 文内で実行 (close 漏れ防止)
     per_generation: list[dict[str, Any]] = []
@@ -1845,6 +1907,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with GenomeEvaluator(
         max_workers=cfg.ga.max_workers,
+        max_tasks_per_child=effective_max_tasks_per_child,
         stage_gate_cfg=cfg.stage_gate,
         cross_pair_cfg=cfg.cross_pair,
         prim_evaluator=primitive_evaluator,
@@ -2030,6 +2093,7 @@ def main(argv: list[str] | None = None) -> int:
             cross_pair_mode=cross_pair_mode,
             now=now,
             run_context=run_context,
+            effective_max_tasks_per_child=effective_max_tasks_per_child,
             diagnostics_sidecar_path=sidecar_path_written,
             top_fold_sidecar_path=top_fold_path_written,
             peak_rss_per_generation=peak_rss_per_generation,

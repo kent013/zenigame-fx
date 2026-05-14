@@ -81,19 +81,21 @@ def _run_with_workers(
     sub_dir: str,
     max_workers: int,
     seed: int = 42,
+    max_tasks_per_child: int | None = None,
 ) -> tuple[dict[str, Any], pd.DataFrame]:
     """1 RUN を実行し summary + archive DataFrame を返す."""
     out_root = _setup_smoke_run_env(monkeypatch, tmp_path, sub_dir=sub_dir)
-    rc = run_ga_module.main(
-        [
-            "--config", str(CONFIG_PATH),
-            "--run-id", f"run_parallel_test_{max_workers}",
-            "--population-size", "4",
-            "--generations", "1",
-            "--seed", str(seed),
-            "--max-workers", str(max_workers),
-        ]
-    )
+    argv = [
+        "--config", str(CONFIG_PATH),
+        "--run-id", f"run_parallel_test_{max_workers}",
+        "--population-size", "4",
+        "--generations", "1",
+        "--seed", str(seed),
+        "--max-workers", str(max_workers),
+    ]
+    if max_tasks_per_child is not None:
+        argv += ["--max-tasks-per-child", str(max_tasks_per_child)]
+    rc = run_ga_module.main(argv)
     assert rc == 0
     summary = json.loads(
         (out_root / "reports" / "run-1" / "summary.json").read_text(encoding="utf-8")
@@ -169,6 +171,45 @@ def test_parallel_evaluation_preserves_l2_row_order_determinism(
         )
 
 
+def test_parallel_determinism_preserved_with_worker_recycling(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """worker リサイクル (maxtasksperchild) 有効下でも L1/L2 決定論が維持される.
+
+    population より小さい max_tasks_per_child で worker を強制リサイクルさせ、
+    max_workers=1 (リサイクル無関係) と best / fitness / live_criteria / L2
+    数値 column が完全一致することを確認する。
+    """
+    seq_summary, seq_df = _run_with_workers(
+        monkeypatch, tmp_path, sub_dir="seq_recycle", max_workers=1
+    )
+    # max_tasks_per_child=2 < population(4)*generations → worker は必ずリサイクルされる
+    par_summary, par_df = _run_with_workers(
+        monkeypatch, tmp_path, sub_dir="par_recycle",
+        max_workers=2, max_tasks_per_child=2,
+    )
+    # L1 selection
+    assert seq_summary["best"]["name"] == par_summary["best"]["name"]
+    assert seq_summary["best"]["fitness"] == par_summary["best"]["fitness"]
+    assert (
+        seq_summary["best"]["selection_score"]
+        == par_summary["best"]["selection_score"]
+    )
+    assert (
+        seq_summary["live_criteria"]["all_pass"]
+        == par_summary["live_criteria"]["all_pass"]
+    )
+    # L2 row-order
+    sort_keys = ["lane_id", "generation", "individual_name"]
+    seq_sorted = seq_df.sort_values(sort_keys).reset_index(drop=True)
+    par_sorted = par_df.sort_values(sort_keys).reset_index(drop=True)
+    assert len(seq_sorted) == len(par_sorted)
+    for col in (c for c in NUMERIC_L2_COLUMNS if c in seq_df.columns):
+        assert seq_sorted[col].equals(par_sorted[col]), (
+            f"column '{col}' mismatch under worker recycling"
+        )
+
+
 def test_summary_contains_parallel_config_and_schema_version(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -180,7 +221,27 @@ def test_summary_contains_parallel_config_and_schema_version(
     assert "parallel_config" in summary
     assert summary["parallel_config"]["max_workers"] == 2
     assert summary["parallel_config"]["mode"] == "parallel"
+    # worker リサイクル間隔の実効値が記録される (None 設定 → 自動導出 int)
+    assert isinstance(
+        summary["parallel_config"]["max_tasks_per_child"], int
+    )
+    assert summary["parallel_config"]["max_tasks_per_child"] >= 1
     assert "max_rss_mb_per_worker" in summary
+
+
+def test_summary_max_tasks_per_child_null_in_sequential_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """max_workers=1 (pool 無し) では maxtasksperchild は無効 → summary は null.
+
+    consumer が sequential 経路で実効値を「有効なリサイクル間隔」と誤読しない
+    ための観測契約 (Codex impl-review Round 2 [Warning] 反映)。
+    """
+    summary, _ = _run_with_workers(
+        monkeypatch, tmp_path, sub_dir="seq_mtpc_null", max_workers=1
+    )
+    assert summary["parallel_config"]["mode"] == "sequential"
+    assert summary["parallel_config"]["max_tasks_per_child"] is None
     # per_generation[*] に stage 別 timing
     assert summary["per_generation"], "per_generation should be non-empty"
     pg0 = summary["per_generation"][0]

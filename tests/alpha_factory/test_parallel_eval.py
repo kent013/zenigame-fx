@@ -498,6 +498,42 @@ class TestGenomeEvaluatorInProcess:
                 lane_contexts={},
             )
 
+    def test_rejects_invalid_max_tasks_per_child(self) -> None:
+        with pytest.raises(
+            ValueError, match="max_tasks_per_child must be >= 1 or None"
+        ):
+            GenomeEvaluator(
+                max_workers=1,
+                stage_gate_cfg=StageGateConfig(),
+                cross_pair_cfg=CrossPairConfig(),
+                prim_evaluator=MagicMock(),
+                lane_contexts={},
+                max_tasks_per_child=0,
+            )
+
+    def test_max_tasks_per_child_defaults_to_none(self) -> None:
+        ev = GenomeEvaluator(
+            max_workers=1,
+            stage_gate_cfg=StageGateConfig(),
+            cross_pair_cfg=CrossPairConfig(),
+            prim_evaluator=MagicMock(),
+            lane_contexts={},
+        )
+        assert ev.max_tasks_per_child is None
+        ev.close()
+
+    def test_max_tasks_per_child_property_reflects_arg(self) -> None:
+        ev = GenomeEvaluator(
+            max_workers=1,
+            stage_gate_cfg=StageGateConfig(),
+            cross_pair_cfg=CrossPairConfig(),
+            prim_evaluator=MagicMock(),
+            lane_contexts={},
+            max_tasks_per_child=5,
+        )
+        assert ev.max_tasks_per_child == 5
+        ev.close()
+
     def test_evaluate_population_returns_results_in_population_order(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -666,6 +702,119 @@ class TestGenomeEvaluatorMultiprocessing:
         ) as ev:
             results = ev.evaluate_population(ctx.lane_id, 0, population)
         assert [r.genome_name for r in results] == [g.name for g in population]
+
+    def test_pool_recycles_workers_after_max_tasks(self) -> None:
+        """maxtasksperchild 到達で worker がリサイクルされ pid が入れ替わる."""
+        from src.alpha_factory.primitives import (
+            RegistryEvaluator,
+            ensure_registered,
+        )
+
+        ensure_registered()
+        ctx = _make_ctx()
+        prim = RegistryEvaluator(pair="EUR_JPY")
+        # max_tasks_per_child=2, max_workers=2 → 8 タスクで各 slot がリサイクル
+        population = [_make_genome(f"g{i}") for i in range(8)]
+        with GenomeEvaluator(
+            max_workers=2,
+            stage_gate_cfg=StageGateConfig(),
+            cross_pair_cfg=CrossPairConfig(),
+            prim_evaluator=prim,
+            lane_contexts={ctx.lane_id: ctx},
+            max_tasks_per_child=2,
+        ) as ev:
+            initial_pids = ev.pool_pids
+            results = ev.evaluate_population(ctx.lane_id, 0, population)
+            final_pids = ev.pool_pids
+        # 結果は population 順 (リサイクルしても L2 不変)
+        assert [r.genome_name for r in results] == [g.name for g in population]
+        # 初期 worker は全て退役済み → pid 集合が完全に入れ替わっている
+        assert initial_pids and final_pids
+        assert initial_pids.isdisjoint(final_pids)
+
+    def test_recycling_preserves_evaluation_results(self) -> None:
+        """worker リサイクル有無で評価結果が完全一致する (L1/L2 決定論)。
+
+        passing スイート内で「リサイクルが決定論を壊さない」契約を検証する
+        (run_ga full RUN を要する test_run_ga_parallel.py とは独立)。
+        evaluate_genome は純粋関数、退役 worker は同一 initargs で再 init
+        されるため、max_tasks_per_child の有無は結果に影響しない。
+
+        signature は L1 selection 契約に効く数値 (fitness_pen / 各 stage の
+        numeric metrics) まで含める。NaN は "<nan>" に正規化して比較可能化。
+        """
+        import math
+
+        from src.alpha_factory.primitives import (
+            RegistryEvaluator,
+            ensure_registered,
+        )
+
+        ensure_registered()
+        population = [_make_genome(f"g{i}") for i in range(8)]
+
+        # L3 (artifact bit equivalence) は非保証契約。worker 数・リサイクル有無
+        # に依存し得る非決定フィールドは signature から除外する。
+        _VOLATILE_KEYS = {"wall_time_seconds"}
+
+        def _norm(v: Any) -> Any:
+            """NaN を比較可能なトークンに、float は丸めて正規化する.
+
+            dict 内の L3 非決定キー (_VOLATILE_KEYS) は再帰的に除外する。
+            """
+            if isinstance(v, float):
+                if math.isnan(v):
+                    return "<nan>"
+                return round(v, 10)
+            if isinstance(v, dict):
+                return {
+                    k: _norm(x)
+                    for k, x in sorted(v.items())
+                    if k not in _VOLATILE_KEYS
+                }
+            if isinstance(v, (list, tuple)):
+                return tuple(_norm(x) for x in v)
+            return v
+
+        def _stage_sig(sr: Any) -> Any:
+            if sr is None:
+                return None
+            return (
+                sr.stage,
+                sr.passed,
+                tuple(sr.reason_codes),
+                # metrics dict 全体を NaN 正規化して比較 (fitness_pen / payload
+                # / numeric metrics を網羅。L1 selection 契約に効く値を固定)
+                _norm(sr.metrics),
+            )
+
+        def _signatures(max_tasks_per_child: int | None) -> list[tuple]:
+            # ctx / prim は worker へ pickle されるため毎回新規構築 (同値)
+            ctx = _make_ctx()
+            prim = RegistryEvaluator(pair="EUR_JPY")
+            with GenomeEvaluator(
+                max_workers=2,
+                stage_gate_cfg=StageGateConfig(),
+                cross_pair_cfg=CrossPairConfig(),
+                prim_evaluator=prim,
+                lane_contexts={ctx.lane_id: ctx},
+                max_tasks_per_child=max_tasks_per_child,
+            ) as ev:
+                results = ev.evaluate_population(ctx.lane_id, 0, population)
+            return [
+                (
+                    r.genome_name,
+                    r.error.error_code if r.error else None,
+                    _stage_sig(r.stage_a),
+                    _stage_sig(r.stage_b),
+                    _stage_sig(r.stage_c),
+                )
+                for r in results
+            ]
+
+        no_recycle = _signatures(None)
+        with_recycle = _signatures(2)  # population(8) > 2 → 強制リサイクル
+        assert with_recycle == no_recycle
 
 
 # ---------------------------------------------------------------------------

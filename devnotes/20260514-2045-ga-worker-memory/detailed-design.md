@@ -1,421 +1,200 @@
-# 詳細設計: GA 並列ワーカーのメモリ過剰使用の改善
+# 詳細設計: GA 並列ワーカーのメモリ過剰使用の改善（root cause 確定版）
+
+## 改訂履歴
+
+- **初版（2026-05-14）**: Phase 0 計測先行 → レバー A/B/C の段階設計（Codex 詳細設計レビュー Round 3 APPROVED）。
+- **本版（2026-05-15）**: ライブ RUN（`run_20260514_144214`）の worker を直接実測し **root cause を確定**。初版のレバー A/B/C（`_PROC_AUX_CACHE` / `PriceBar __slots__` / mmap 共有ストア）は **いずれも的外れ**と判明したため、設計を実測ベースで全面改訂。`devnotes/.../detailed-design-v1.md` に初版を退避。
+
+---
 
 ## 使命・制約（絶対遵守）
 
-### zenigame-fx Alpha Factory 使命
-live_criteria 全指標同時充足 + (ii-lite) 通過で使命達成。
-絶対制約: イントラデイ / ロング・ショート両方向 / スワップ・スプレッド反映。
-
-本タスクは live_criteria を直接動かさない**探索基盤の制約解除**（OOM/swap リスク除去・複数ペア swim-lane 拡張の前提確保）。`live_criteria` / stage gate 閾値 / dataset window / fitness 関数は一切変更しない。
-
-### 禁止事項
-1. A・B・C 評価期間を根拠なしに延長 / 2. 見た目の数値改善 / 3. GA ハック / 4. live_criteria 緩和 / 5. 過度な複雑化 / 6. 取引回数削減で成績を見せる / 7. オーバーナイト保有前提 / 8. archive スキーマ変更時の値伝搬漏れ
-
-### コーディングルール
-- バグ修正はテストファースト / 全施策にテスト必須 / テスト命名は振る舞いベース（Run 名・日付を含めない）/ テストは対象モジュール対応ファイルに配置
-- `uv run pytest tests/alpha_factory/ tests/scripts/` / `uv run ruff check src/ tests/` / `uv run mypy src/`
-- Python 3.13 + numpy + pandas
-
-## 概念設計リファレンス
-
-`devnotes/20260514-2045-ga-worker-memory/conceptual-design.md`（Codex 概念設計レビュー Round 2 APPROVED）
-
-設計の根幹: **計測先行（Phase 0）→ 内訳に応じた段階レバー（Phase 1: A→B→C）**。Phase 1 の各レバーは Phase 0 の二層計測結果でゲートされるため、本詳細設計では **Phase 0（施策 1）と Phase 0 非依存の共通施策（施策 2）を実装レベルで確定**し、**Phase 1 レバー（施策 3〜5）は決定ルール・インターフェース・テスト計画を仕様確定**する（具体コードは Phase 0 結果確定後に本ファイルへ追記更新）。
-
-## 施策一覧
-
-| # | 施策名 | 変更ファイル | 優先度 | Phase |
-|---|--------|------------|--------|-------|
-| 1 | 二層メモリ計測フック（RSS/USS + worker object 内訳） | `parallel_eval.py` / `run_ga.py` / `swim_lane.py` | 高 | 0 |
-| 2 | 4 項メモリモデル化 + per-worker 前提の一本化 | `run_ga.py` / `config.py` / `config/alpha_factory/default.yaml` / `.claude/skills/zenigame-fx-codex-review/SKILL.md` / `docs/alpha_factory/runbook.md` | 高 | 0/共通 |
-| 3 | レバー A: `_PROC_AUX_CACHE` ライフサイクル管理 | `parallel_eval.py` / `aux_loader.py` | Phase 0 ゲート | 1-A |
-| 4 | レバー B: `PriceBar` / `Ohlc` `__slots__` 付与 | `src/domain/price.py` | Phase 0 ゲート | 1-B |
-| 5 | レバー C: mmap SoA 共有ストア導入 | 新規 `src/alpha_factory/shared_bar_store.py` / `parallel_eval.py` | Phase 0 ゲート（着手条件厳格） | 1-C |
+本タスクは live_criteria を直接動かさない**探索基盤の制約解除**（OOM/swap リスク除去・複数ペア swim-lane 拡張の前提確保）。`live_criteria` / stage gate 閾値 / dataset window / fitness 関数は一切変更しない。決定論契約 L1 selection / L2 row-order を厳守する。
 
 ---
 
-## 施策 1: 二層メモリ計測フック
+## Phase 0 相当の調査結果（ライブ RUN 実測 — root cause 確定）
 
-### 目的
-worker プロセスのメモリ実害を「OS resident（層 1）」と「Python object 内訳（層 2）」に分離計測し、Phase 1 レバー選択の唯一の根拠となる内訳表を得る。**デフォルト無効・opt-in**、決定論契約（L1/L2）と既存ロジックを一切変えない。
+初版が「Phase 0 で計測する」としていた内容を、稼働中の RUN を使って実測した。
 
-### 1-1. 層 1: RSS に加え USS を計測（main プロセス側のみ）
+### Fact（観察事実）
+
+1. **ライブ worker の vmmap**（`run_20260514_144214` の worker PID 55107、gen 17 時点）:
+   - Physical footprint 7.5G（peak 9.2G）、RESIDENT 5.8G / DIRTY 5.4G / SWAPPED 2.0G
+   - **システム malloc ゾーン（`MALLOC_SMALL/TINY/LARGE` 合計）は ~490MB しかない** — numpy の大配列はここに出るはずだが出ていない
+   - **`VM_ALLOCATE` 領域が 7,241 個、各きっかり 1024K、`SM=PRV`（private）** — これが 5.1G resident + 2.0G swap の本体
+2. **`PriceBar` 1 個の実測**: `tracemalloc` で 1,225 bytes/bar。dataset 全体 328,883 bars でも 1 コピー 384MB、2 worker で 0.75GB。
+3. **再現テスト**: `list[tuple[datetime, Decimal]]` を大量生成 → `del` + `gc.collect()` しても RSS は起動時（16MB）に戻らず ~221MB に張り付く。
+4. プロセスは `cpython-3.11.15`。
+5. `evaluate_stage_b` の fold ループ（`stage_gate.py:1389-1393`）は `aux_bundle.align_to(test_bars)` をループ毎に生成し局所変数で捨てる（GC 対象、蓄積しない）。
+6. `_bars_cache`（`primitives/_bars_cache.py`）は `MAX_ENTRIES=8` の LRU で上限あり。`_PROC_AUX_CACHE` / `AuxAlignmentCache` は安定オブジェクト（`bars_a/b/holdout`）キーで実質 3 エントリ上限。
+
+### Interpretation（解釈・root cause）
+
+**worker の 7GB は pymalloc アリーナの断片化**。
+
+- CPython 3.11 は pymalloc アリーナサイズを 256K → **1MB** に変更済み。pymalloc アリーナは `obmalloc.c` が `VM_ALLOCATE`（mmap）で直接確保するため、システム `MALLOC_*` ゾーンには出ない。→ Fact 1 の「7,241 × 1024K の `VM_ALLOCATE` private 領域」は **pymalloc アリーナそのもの**。
+- pymalloc アリーナに入るのは ≤512 byte の小オブジェクト = `Decimal` / `datetime` / 小 `tuple` / `PriceBar` / `Ohlc`。
+- **メカニズム**: `run_backtest` が genome × fold × 世代ごとに `equity_curve: list[tuple[datetime, Decimal]]`（Stage B IS monitor で ~20万点、fold 約 33 本 × ~2万点）と `trades`（`Decimal` だらけ）を生成。1 genome の Stage B 評価だけで ~90万個の小オブジェクトを churn する。これらは評価後に GC されるが、**pymalloc はアリーナが 100% 空になるまで OS に返さない**（Fact 3 で実証）。churn が続くと、わずかな長寿命オブジェクトが各アリーナに散らばってアリーナをピン留めし、断片化として 7,000 個以上のアリーナが resident に残る。
+- リーク（参照保持）ではなく **アロケータ断片化**。`gc.collect()` では解消しない（オブジェクトは回収済み、アリーナが返らない）。
+- worker でのみ起きて main で起きないのは、実バックテスト（`run_backtest`）を回すのが worker だけだから。
+
+### 初版レバーの再評価（C8 — 的外れの明示）
+
+| 初版レバー | 再評価 | 根拠 |
+|---|---|---|
+| A: `_PROC_AUX_CACHE` ライフサイクル管理 | **空振り** | 蓄積する cache は存在しない（Fact 5/6） |
+| B: `PriceBar` / `Ohlc` `__slots__` | **ほぼ空振り** | bars は 384MB/worker しかない（Fact 2）。7GB の主因ではない |
+| C: mmap SoA 共有ストア | **ほぼ空振り** | 同上、削減できるのは 384MB だけ |
+
+初版の「まず計測」判断自体は正しかった（これを検出できた）。レバーの当て先が全て bars/cache に偏っていたのが誤り。
+
+---
+
+## 施策一覧（改訂版）
+
+| # | 施策名 | 変更ファイル | 種別 |
+|---|--------|------------|------|
+| 1 | **`maxtasksperchild` による worker 定期リサイクル** | `parallel_eval.py` / `config.py` / `run_ga.py` / `config/alpha_factory/default.yaml` | 本タスクで実装 |
+| 2 | per-worker メモリ前提コメントの実態修正 | `config.py` / `config/alpha_factory/default.yaml` | 本タスクで実装（施策 1 に付随） |
+| 3 | バックテスト hot path の `Decimal` churn 削減（本丸） | `backtest/engine.py` ほか | **別タスク（follow-up）** |
+
+---
+
+## 施策 1: `maxtasksperchild` による worker 定期リサイクル
+
+### 方針
+`multiprocessing.Pool` の `maxtasksperchild` を設定し、worker が一定タスク数を処理したら**プロセスごと退役→新規 spawn** させる。退役時に断片化したアリーナは OS に完全返却される。新 worker は同じ initargs で `_init_worker` を再実行するため状態は同一。
+
+これは pymalloc 断片化に対する**標準的かつ低リスクな緩和策**（CPython 公式の Pool 機能）。本丸（施策 3 = `Decimal` churn そのものの削減）は backtest engine 改修を要する別タスクだが、施策 1 だけで peak RSS を「断片化が溜まり切る前」に頭打ちできる。
+
+### 1-1. `GenomeEvaluator` に `maxtasksperchild` を配線
 
 #### 変更箇所
-- `src/alpha_factory/parallel_eval.py` `measure_peak_rss_mb` (L656-702)
+`src/alpha_factory/parallel_eval.py` `GenomeEvaluator.__init__`（L546-577）
 
-#### 現行コード
-```python
-def measure_peak_rss_mb(pool_pids: set[int] | None = None) -> dict[str, float]:
-    ...
-    for child in process.children(recursive=True):
-        try:
-            rss_mb = child.memory_info().rss / 1024 / 1024
-        except psutil.NoSuchProcess:
-            continue
-        if pool_pids is not None and child.pid in pool_pids:
-            ga_worker_rss.append(rss_mb)
-        elif pool_pids is None:
-            all_child_rss.append(rss_mb)
-    return {
-        "main_rss_mb": main_rss_mb,
-        "ga_worker_max_rss_mb": max(ga_worker_rss, default=0.0),
-        ...
-    }
-```
-
-#### 変更後コード（方針）
-- 新規 keyword 引数 `with_uss: bool = False` を追加（デフォルト False で**既存呼び出し挙動・戻り値キーは不変** = 後方互換）。
-- `with_uss=True` のとき、各 child / main で `memory_full_info().uss`（取得不可プラットフォームは `AccessDenied` / `AttributeError` を捕捉し `rss` に fallback、warning log）を併取。
-- 戻り dict に `*_uss_mb` 系キー（`main_uss_mb` / `ga_worker_max_uss_mb` / `ga_worker_total_uss_mb` / `all_children_max_uss_mb` / `all_children_total_uss_mb`）を追加。`with_uss=False` のときはこれらのキーを**含めない**（既存 schema 不変）。
-- **USS fallback の識別（Codex Round 3 [Warning] 反映）**: USS 取得に失敗し RSS で代替した場合、その値を真の USS と誤読すると shared/private 切り分けを誤る。戻り dict に `uss_available: bool`（= `uss_fallback_used` の否定）を必ず含め、`memory_profile.process_rss_uss` にも伝播させる。
+#### 変更内容
+- keyword-only 引数 `max_tasks_per_child: int | None = None` を追加（default `None` = **既存挙動と完全互換** = Pool に `maxtasksperchild=None` を渡す = リサイクルなし）。
+- `max_workers > 1` のとき `mp_ctx.Pool(...)` の引数に `maxtasksperchild=max_tasks_per_child` を追加。
+- `__init__` 冒頭で `max_tasks_per_child is not None and max_tasks_per_child < 1` を `ValueError` で弾く。
+- `self._max_tasks_per_child` に保持（observability / テスト用）。
 
 ```python
-def measure_peak_rss_mb(
-    pool_pids: set[int] | None = None,
+def __init__(
+    self,
+    max_workers: int,
+    stage_gate_cfg: StageGateConfig,
+    cross_pair_cfg: CrossPairConfig,
+    prim_evaluator: RegistryEvaluator,
+    lane_contexts: Mapping[str, LaneEvalContext],
     *,
-    with_uss: bool = False,
-) -> dict[str, float]:
-    # ... 既存 RSS 集計 ...
-    # with_uss=True のときのみ uss を別 list に集計し、戻り dict に *_uss_mb を追加
+    max_tasks_per_child: int | None = None,
+) -> None:
+    if max_workers < 1:
+        raise ValueError(f"max_workers must be >= 1: {max_workers}")
+    if max_tasks_per_child is not None and max_tasks_per_child < 1:
+        raise ValueError(
+            f"max_tasks_per_child must be >= 1 or None: {max_tasks_per_child}"
+        )
+    ...
+    self._max_tasks_per_child = max_tasks_per_child
+    if max_workers > 1:
+        mp_ctx = multiprocessing.get_context("spawn")
+        self._pool = mp_ctx.Pool(
+            processes=max_workers,
+            initializer=_init_worker,
+            initargs=(...),
+            maxtasksperchild=max_tasks_per_child,  # None = 従来通りリサイクルなし
+        )
 ```
 
-- `run_ga.py` L1971-1973 の呼び出しは、計測 opt-in 時のみ `with_uss=True` を渡す（次項参照）。
+#### 1-1b. `evaluate_population` に `chunksize=1` を明示（Codex impl-review Round 2 [Critical] 反映）
+`maxtasksperchild` は `Pool` の**タスク単位**でカウントされる。`pool.map` の default chunking では 1 タスク = 複数 genome の chunk（例: population 96 / 2 worker → chunksize≈12）になり、`max_tasks_per_child` が genome 数と大きく乖離してリサイクルが意図の数十倍遅延する（pymalloc 断片化の頭打ち効果が live RUN で効かない）。
+→ `evaluate_population` の `pool.map(_eval_genome_worker, args)` を **`chunksize=1`** にし、1 タスク = 1 genome に固定する。これにより `max_tasks_per_child` は「何 genome 評価ごとに worker を退役させるか」を直接表し、自動導出式 `2*population_size//max_workers`（約 2 世代ごと）が設計通りに機能する。`pool.map` は `chunksize` に依らず入力順で結果を返すため L2 row-order は不変。
 
-#### 波及変更（Codex design-review Round 1 [Critical] 施策1-① 反映 — schema 扱いを一意化）
-- **`summary.json` のトップレベル `schema_version` は変更しない**（現行 `1.1` のまま）。`*_uss_mb` 等の計測出力は既存キーに混ぜず、**`--mem-profile` 有効時のみ存在する単一の optional ブロック `memory_profile` 配下**にまとめる。`memory_profile` は自身の `memory_profile_schema_version`（初版 `1`）を持つ。
-- これにより: (a) 既存 consumer は `schema_version` 分岐不要・既存キー集合不変、(b) 計測 consumer は `"memory_profile" in summary` で明示分岐、(c) 転記漏れ事故の起点を作らない。
-- `test_summary_contains_parallel_config_and_schema_version` は `schema_version == "1.1"` のまま据え置き（変更不要）。`memory_profile` ブロックの検証は施策 1-3 の専用テストで行う。
+#### 決定論への影響: なし
+- リサイクルされた worker は Pool が保持する同一 initargs で `_init_worker` を再実行 → `ensure_registered()` + module-global 再設定で**状態は完全同一**。
+- `evaluate_genome` は純粋関数。`pool.map` は worker のリサイクル有無・`chunksize` に関わらず**入力順で結果を返す**（L2 row-order 保持）。
+- `_PROC_AUX_CACHE` はリサイクル後の新 worker で空から再構築されるが、整列結果の**値は同一**（CPU 再計算のみ、L1/L2 不変）。
+- → L1 selection / L2 row-order 契約は維持される。決定論テストで verify する。
 
-### 1-2. 層 2: worker object 内訳計測（worker 側、broadcast 方式）
+### 1-2. config 配線
 
-#### 設計判断: hot path に置かない
-`evaluate_genome` は genome 単位の純粋関数で 1 世代あたり population 回（最大 96 回）呼ばれる。ここに計測を挟むと (a) wall-time へ影響 (b) 計測コード自体のバグが評価経路に混入するリスク。
-→ **計測専用 worker タスクを別途用意**し、main プロセスが世代境界で `pool.map` 経由 broadcast 起動する（zenigame `_broadcast_hist_stats_worker` と同型パターン）。評価経路には一切触れない。
+#### `src/alpha_factory/config.py`
+- `GAConfig` に `max_tasks_per_child: int | None = None` を追加。
+- `__post_init__` に検証追加: `if self.max_tasks_per_child is not None and self.max_tasks_per_child < 1: raise ValueError(...)`。
+- `_build_ga` に `max_tasks_per_child=(int(v) if (v := raw.get("max_tasks_per_child")) is not None else None)` を追加。
 
-#### 変更箇所
-- `src/alpha_factory/parallel_eval.py`: 新規 module-level 関数 `_measure_worker_memory_task` / 新規公開関数 `recursive_sizeof` / `GenomeEvaluator.measure_worker_memory()`
+#### `scripts/alpha_factory/run_ga.py`
+- CLI `--max-tasks-per-child`（`type=int, default=None`）を追加。
+- `_args_to_overrides` の `"ga"` dict に `"max_tasks_per_child": args.max_tasks_per_child` を追加（`None` は `_deep_merge` が skip するため yaml 値を clobber しない）。
+- `GenomeEvaluator` 構築（L1846）の直前で**実効値を導出**:
+  - `cfg.ga.max_tasks_per_child` が非 None → その値
+  - None → **自動導出**: `max(1, (2 * cfg.ga.population_size) // max(1, cfg.ga.max_workers))`
+    （= 各 worker を「およそ 2 世代ごと」にリサイクルする。pop 96 / mw 2 → 96、pop 40 / mw 2 → 40）
+  - 起動時に `logger.info("ga.max_tasks_per_child", value=..., source="config"|"auto")` を 1 行出力（observability）。
+- `GenomeEvaluator(..., max_tasks_per_child=effective_value)` を渡す。
+- `max_workers == 1`（sequential、pool is None）のときは `maxtasksperchild` は無意味（Pool が無い）→ 導出値は持つが未使用、ログには出す。
 
-#### 新規コード（方針）
-```python
-# parallel_eval.py — module level
+#### `config/alpha_factory/default.yaml`
+- `ga.max_tasks_per_child:` キーを追加。値は `null`（= 自動導出）。コメントで「pymalloc アリーナ断片化対策の worker リサイクル間隔。null = 2*population_size//max_workers で自動導出。devnotes/20260514-2045-ga-worker-memory/ 参照」を明記。
 
-def _recursive_sizeof(obj: object, _seen: set[int] | None = None) -> int:
-    """主要コンテナの実バイト数を再帰集計する計測専用ヘルパ。
-    id() ベースで循環・共有参照を二重計上しない。"""
-    # _seen: id 集合で重複排除（共有 ref / 循環を二重計上しない）
-    # 走査ルール（Codex Round 1 [Warning] 施策1-③ / Round 2 [Warning] 反映 — 明示走査）:
-    #   分岐順を固定（先勝ち）:
-    #   1. id(obj) in _seen → 0 を返す（重複/循環カット）。以降 _seen.add(id(obj))
-    #   2. np.ndarray（Codex Round 3 [Warning] 反映 — header と buffer を分離）:
-    #        - owner 配列は sys.getsizeof(arr) がデータ領域を含む実装があり得るため、
-    #          getsizeof をそのまま使うと buffer を二重計上する。
-    #        - object_header_bytes := max(sys.getsizeof(arr) - arr.nbytes, 0)（view ごと計上）
-    #        - buffer は base chain を辿って owner（base が None）を特定し、別集合
-    #          seen_buffers に owner の id が未登録のときだけ owner.nbytes を 1 回計上
-    #          → owner 配列でも buffer 二重計上せず、複数 view が同一 owner を共有しても一度きり
-    #   3. dataclass（dataclasses.is_dataclass）: getsizeof(obj) + fields() の各値を再帰
-    #      （dataclass 判定を slots 判定より先に置き、二重走査を防ぐ）
-    #   4. __slots__ を持つ非 dataclass: getsizeof(obj) + 型 MRO の __slots__ 集約で各 slot 値を再帰
-    #   5. dict/list/tuple/set/frozenset: getsizeof(obj) + 各要素（dict は key/value 両方）を再帰
-    #   6. その他: sys.getsizeof(obj) のみ
-
-def _measure_memory_breakdown(
-    lane_contexts: dict[str, "LaneEvalContext"],
-    prim_evaluator: "RegistryEvaluator | None",
-    proc_aux_cache: dict[int, "AuxAlignmentCache"],
-) -> dict[str, float]:
-    """内訳集計の本体。**module-global に依存せず引数で受ける**
-    （Codex Round 2 [Critical] 施策1-② 反映 — sequential 経路の空計測を防ぐ）。"""
-    import os
-    breakdown: dict[str, float] = {"pid": float(os.getpid())}
-    # ① target pair bars: lane_contexts[*].bars_a/b/holdout
-    # ② aux_bundle: lane_contexts[*].aux_bundle (特に aux_pair_bars_index)
-    # ③ proc_aux_cache: entry 数 + recursive_sizeof
-    # ④ prim_evaluator
-    # ⑤ proc RSS/USS: psutil（自プロセス）
-    return breakdown  # MB 単位
-
-def _measure_worker_memory_task(_arg: None) -> dict[str, float]:
-    """計測専用 worker タスク。worker module-global を read-only で走査し
-    `_measure_memory_breakdown` に委譲する。spawn worker では `_init_worker` が
-    module-global を設定済みであることが前提。"""
-    return _measure_memory_breakdown(
-        _WORKER_LANE_CONTEXTS, _WORKER_PRIM_EVALUATOR, _PROC_AUX_CACHE
-    )
-
-class GenomeEvaluator:
-    def measure_worker_memory(self) -> list[dict[str, float]]:
-        """opt-in 計測。pool 経由で全 worker の内訳を集め、pid でユニーク化して返す。
-        max_workers==1 (pool is None) のときは in-process で同等の集計を返す。"""
-        if self._pool is None:
-            # Codex Round 2 [Critical] 施策1-② 反映:
-            # sequential 経路では _init_worker が呼ばれず _WORKER_LANE_CONTEXTS 等は空。
-            # GenomeEvaluator 自身が保持する lane_contexts / prim_evaluator を渡す。
-            # _PROC_AUX_CACHE は in-process 評価で main プロセスに蓄積されるため
-            # module-global をそのまま使う（同一プロセス）。
-            return [
-                _measure_memory_breakdown(
-                    self._lane_contexts, self._prim_evaluator, _PROC_AUX_CACHE
-                )
-            ]
-        # Codex Round 1 [Critical] 施策1-② 反映:
-        # pool.map([None]*N) は work-stealing のため全 worker 一意被覆を保証しない。
-        # pid をキーに収集し、self.pool_pids 全件が揃うまで追加 dispatch を繰り返す。
-        target_pids = self.pool_pids                       # 期待 worker pid 集合
-        collected: dict[int, dict[str, float]] = {}
-        for _attempt in range(_MEM_MEASURE_MAX_ATTEMPTS):  # 例: 8 回上限
-            # 余剰タスク（N*2 件等）を投げて被覆率を上げる
-            for r in self._pool.map(
-                _measure_worker_memory_task, [None] * (self._max_workers * 2)
-            ):
-                collected[int(r["pid"])] = r
-            if target_pids and target_pids.issubset(collected.keys()):
-                break
-        else:
-            # 未達は明示エラー（欠損内訳での Phase 1 判定を防ぐ）
-            raise RuntimeError(
-                f"measure_worker_memory: worker 被覆未達 "
-                f"covered={sorted(collected)} expected={sorted(target_pids)}"
-            )
-        return [collected[p] for p in sorted(target_pids)] if target_pids \
-            else list(collected.values())
-```
-
-- **決定論への影響なし**: `_measure_memory_breakdown` は渡された構造を read-only で走査するだけ。`pool.map` の broadcast は評価とは別呼び出しで、worker module-global を変更しない。`_PROC_AUX_CACHE` も読むだけ。
-- `_recursive_sizeof` の `_PROC_AUX_CACHE` 走査は entry 数も併記し、レバー A（cache 蓄積判定）の根拠にする。
-- **failure policy（Codex Round 2 [Warning] 反映 — 揺れの解消）**: `--mem-profile` 有効時の worker 被覆未達は **fail-closed**（`RuntimeError`。欠損内訳で Phase 1 判定に進ませない）。一方 `psutil.memory_full_info()` の USS 取得失敗のみ **fail-open**（RSS に fallback + warning、計測は続行）。`pool_pids` が空（CPython private API `Pool._pool` 取得失敗時の既存 fallback、`parallel_eval.py:584-601`）の場合のみ被覆検証をスキップし収集分を返す（pool_pids 自体が取れない既存制約への対応で、計測意図的 opt-in とは別経路）。
-- **coverage_status の明示（Codex Round 3 [Suggestion] 反映）**: `pool_pids` 空で被覆検証をスキップした場合、後続分析が完全被覆と誤解しないよう `memory_profile.coverage_status` を `"verified"` / `"unverified_pool_pids_unavailable"` で出力する。
-
-### 1-3. opt-in 配線（CLI / env）
-
-#### 変更箇所
-- `scripts/alpha_factory/run_ga.py`: CLI フラグ `--mem-profile` 追加（`action="store_true"`、default False）。env var `ZENIGAME_FX_MEM_PROFILE=1` でも有効化（autopilot / batch から環境変数で渡せるよう両対応）。
-- 有効時のみ:
-  - L1971 の `measure_peak_rss_mb(...)` を `with_uss=True` で呼ぶ。**ただし返り値のうち legacy `peak_rss_per_generation` には従来の RSS キーのみを格納し、`*_uss_mb` は格納しない**（Codex Round 2 [Warning] 反映 — legacy 構造を汚さない）。
-  - 世代境界で `genome_evaluator.measure_worker_memory()` を呼ぶ。**`*_uss_mb`（層 1）と `worker_object_breakdown`（層 2）は `peak_rss_per_generation` に一切マージせず、別 list `memory_profile_per_generation` に蓄積**し、summary 書き出し時に `memory_profile.per_generation` として出力する。
-- 無効時は現行と完全に同一経路（計測コードは 1 行も実行されない）。
-
-#### 成果物の出力
-- `summary.json` に `--mem-profile` 有効時のみ追加される **optional ブロック `memory_profile`**（トップレベル `schema_version` は `1.1` のまま不変）:
-  - `memory_profile.memory_profile_schema_version`: `1`
-  - `memory_profile.per_generation[*].process_rss_uss`: 層 1 のプロセス単位 RSS/USS（main / ga_worker / all_children、要素別に割らない）
-  - `memory_profile.per_generation[*].worker_object_breakdown`: 層 2 の要素別 object bytes（MB、worker ごと pid 付き）
-- 概念設計が要求する**内訳表は 2 種に分離**: (i) プロセス単位 RSS/USS（要素別に割らない）、(ii) 要素別 object bytes。resident の要素別帰属は計測マトリクス（後述）の差分で推定。
-
-### 1-4. 計測マトリクスの実行手順（運用）
-`docs/alpha_factory/runbook.md` に `--mem-profile` の実行レシピを追記する:
-- 対象 pair 代表例（最低 EUR_JPY）× aux あり / なし（`--allow-aux-missing` で aux なし経路）× `max_workers` 1 / 2 の 4〜8 条件
-- generations を短縮（例 `--generations 3`）して取得 — 計測目的は内訳構造の把握であり全世代不要
-- aux あり / なしの RSS 差分 → aux_bundle / `_PROC_AUX_CACHE` の resident 寄与の推定値
+### 1-3. パラメータ伝搬の 4 段接続チェック（禁止事項 8）
+`config (yaml) → GAConfig → run_ga 実効値導出 → GenomeEvaluator → Pool` の全段を接続する。archive スキーマ（GENOMES_SCHEMA）には影響しない（GA hyper-param であり genome 単位の記録対象ではない）。`summary.json` への記録は任意だが、observability のため `parallel_config.max_tasks_per_child`（実効値）を既存 `parallel_config` ブロック配下に追加する（トップレベルキー集合は不変）。
 
 ### テスト計画（施策 1）
 - `tests/alpha_factory/test_parallel_eval.py`:
-  - `test_measure_peak_rss_returns_uss_keys_when_requested`: `with_uss=True` で `*_uss_mb` キーが増え、`with_uss=False` で従来キー集合のみ（後方互換）
-  - `test_recursive_sizeof_dedupes_shared_references`: 共有参照・循環参照を二重計上しない
-  - `test_recursive_sizeof_handles_ndarray_view`: `ndarray` の view（`arr.base is not None`）を実体 1 回だけ計上、slots dataclass の各 slot を走査
-  - `test_measure_worker_memory_task_does_not_mutate_globals`: タスク実行前後で `_PROC_AUX_CACHE` / `_WORKER_LANE_CONTEXTS` の id・内容が不変
-  - `test_measure_worker_memory_covers_all_workers`: `max_workers=2` で返り list の pid 集合が `pool_pids` と一致（被覆検証）。被覆未達を強制した場合に `RuntimeError`
-  - `test_measure_worker_memory_sequential_path`: `max_workers=1`（pool is None）で 1 要素 list を返し、**かつ内容が空計測でない**ことを検証（`lane_context_count > 0` / `target_bars_mb > 0` 等の診断値 — Codex Round 3 [Suggestion] 反映、空計測の再発検知）
+  - `test_genome_evaluator_rejects_invalid_max_tasks_per_child`: `max_tasks_per_child=0` で `ValueError`
+  - `test_genome_evaluator_recycles_workers_after_max_tasks`: `max_workers=2, max_tasks_per_child=2` で構築 → `pool_pids` を記録 → 多数 genome を `evaluate_population` → `pool_pids` が変化（= リサイクル発生）したことを確認
+  - `test_genome_evaluator_no_recycle_when_none`: `max_tasks_per_child=None` で `pool_pids` が評価前後で不変（既存挙動）
 - `tests/scripts/test_run_ga_parallel.py`:
-  - `test_mem_profile_flag_adds_memory_profile_block`: `--mem-profile` 有効時に optional ブロック `memory_profile`（`memory_profile_schema_version` 付き）が summary に出る
-  - `test_mem_profile_disabled_keeps_summary_schema`: 無効時は `schema_version == "1.1"`・トップレベルキー集合が現行と完全一致、`memory_profile` キー不在
-  - **既存 `test_parallel_evaluation_preserves_l1_selection_determinism` / `_l2_row_order_determinism` が `--mem-profile` 有効・無効の両方で pass**（決定論ゲート）
+  - 既存テストヘルパに `max_tasks_per_child` 引数を追加（default None で既存テスト不変）
+  - `test_parallel_determinism_preserved_with_worker_recycling`: `max_tasks_per_child` を population より小さい値（例 3）にして `max_workers=2` で実行 → `max_workers=1` と **best.name / fitness / selection_score / live_criteria / L2 数値 column が完全一致**（リサイクルが決定論を壊さないことの verify）
+  - `test_summary_records_max_tasks_per_child`: `parallel_config.max_tasks_per_child` が summary に出力され、トップレベルキー集合は現行と一致
+- `uv run pytest tests/alpha_factory/test_parallel_eval.py tests/scripts/test_run_ga_parallel.py` / `uv run ruff check src/ tests/` / `uv run mypy src/`
 
 ### リスク（施策 1）
-- `psutil.memory_full_info()` は一部プラットフォームで遅い / 権限エラー。→ fallback + warning で fail-open（計測は best-effort、本番評価を止めない）。
-- `_recursive_sizeof` が巨大構造で時間を食う。→ opt-in 限定 + 世代境界のみ + generations 短縮運用で許容。
+- **spawn overhead**: リサイクルのたびに新 worker が initargs（`lane_contexts` = bars 実体を含む）を再 unpickle する。自動導出値（~2 世代ごと）なら、N 回の評価に対し 1 回の spawn コストで償却される。N を極端に小さくすると spawn thrash になるため、`__post_init__` での下限 1 は許すが、運用上は自動導出 or population 規模の値を推奨（default.yaml コメントに明記）。
+- **`chunksize=1` の dispatch 数増加**（Codex impl-review Round 3 [Suggestion] 反映）: `chunksize=1` で `pool.map` の task dispatch 数が population_size に等しくなる（default chunking 比で増加）。backtest 1 genome の評価コストが十分重い現状では IPC overhead は無視できるが、将来 smoke 用の極軽量評価経路を追加する場合は wall-time 監視対象として残す。
+- `pool_pids`（`Pool._pool` private API 経由）はリサイクルで pid が入れ替わるが、`measure_peak_rss_mb` は呼び出し時点で動的取得する設計のため整合する（best-effort RSS 計測、correctness には無関係）。
 
 ---
 
-## 施策 2: 4 項メモリモデル化 + per-worker 前提の一本化
+## 施策 2: per-worker メモリ前提コメントの実態修正
 
-### 目的
-`config.py` / `default.yaml` / `run_ga.py` / skill に散在する per-worker メモリ前提（400MB vs 3GB）を、単一の根拠ある **4 項モデル**に統一する。単一係数線形モデルは shared store 導入時に破綻するため（Codex Round 1 Critical #7）。
+`config.py:152` / `config/alpha_factory/default.yaml:63` / `scripts/alpha_factory/run_ga.py:1348` の「1 worker ~400MB」前提コメントは、実測（5.5〜8.7GB、root cause = pymalloc 断片化）と乖離している。本施策では:
 
-### 2-1. `_check_memory_budget` を 4 項モデルへ
-
-#### 変更箇所
-- `scripts/alpha_factory/run_ga.py` `_check_memory_budget` (L1344-1369)
-
-#### 現行コード
-```python
-def _check_memory_budget(max_workers: int, strict: bool) -> None:
-    ...
-    available_mb = psutil.virtual_memory().available / 1024 / 1024
-    worker_budget_mb = available_mb - 4096
-    recommended_max = max(1, int(worker_budget_mb // 400))
-    if max_workers > recommended_max:
-        logger.warning("run_ga.max_workers_exceeds_memory_budget", ...)
-        if strict:
-            raise SystemExit(...)
-```
-
-#### 変更後コード（方針）
-4 項モデル `required_mb = base_main_mb + shared_mb + private_worker_mb * N + headroom_mb` で推奨上限を逆算:
-
-```python
-# モジュール定数（Phase 0 実測で初期化、出典コメント必須）
-_MEM_BASE_MAIN_MB = ...      # main プロセスのベースフットプリント
-_MEM_PRIVATE_WORKER_MB = ... # 1 worker 専有メモリ（Phase 0 USS ベース実測）
-_MEM_SHARED_MB = 0           # shared store 未導入時は 0（施策 5 導入時に更新）
-def _mem_headroom_mb(total_mb: float) -> float:
-    """OS / DB / ログ / 同時走行プロセス用マージン。
-    「最低 4096MB または物理メモリの 20% の大きい方」。"""
-    return max(4096.0, total_mb * 0.20)
-
-def _recommended_max_workers(available_mb, total_mb) -> int:
-    budget = available_mb - _MEM_BASE_MAIN_MB - _MEM_SHARED_MB - _mem_headroom_mb(total_mb)
-    return max(1, int(budget // _MEM_PRIVATE_WORKER_MB))
-
-def _check_memory_budget(max_workers: int, strict: bool) -> None:
-    # psutil から available / total を取得 → _recommended_max_workers で逆算
-    # max_workers 超過時 warning（4 項の内訳も log に出す）/ strict 時 SystemExit
-```
-
-- **Phase 0 未完了時の暫定値**: 施策 2 は施策 1 の計測完了が前提。Phase 0 の内訳表が出るまでは `_MEM_PRIVATE_WORKER_MB` を**実測 `max_rss_mb_per_worker` の保守的上限（例: 直近 Run 実測の最大 8.7GB を切り上げた値）**で初期化し、出典コメントに「Phase 0 実測で再校正予定」と明記する。これにより少なくとも現行の誤った 400MB 前提は即座に廃止される。
-- **再校正の運用ノイズ対策（Codex Round 1 [Warning] 施策2 / Round 2 [Critical] 反映）**: 暫定 `_MEM_PRIVATE_WORKER_MB` を大きく置くと 24GB 環境で `max_workers=2` の推奨警告が常時出る。これを「警告ノイズ」で終わらせないため:
-  - **既存トップレベルキー `parallel_config` の配下に** `parallel_config.memory_model_inputs` を**常時出力**（`base_main_mb` / `shared_mb` / `private_worker_mb` / `headroom_mb` / `recommended_max_workers` / `source`（`"provisional"` or `"phase0_calibrated"`））。**トップレベルキー集合は変えない**（Codex Round 2 [Critical] — 施策 1 と同じ additive 互換問題の再発を回避。`parallel_config` は既存 `test_summary_contains_parallel_config_and_schema_version` が参照する既存ブロック）。`run_ga` 起動時に同内容を 1 行 log（`stage_gate.effective_threshold` log と同様の可観測性）。
-  - Phase 0 完了後の `_MEM_PRIVATE_WORKER_MB` 実測再校正を**フォローアップ TODO として必須化**（実装順序 step 4 に明記済み）。`source` フィールドで provisional / calibrated を判別可能にする。
-
-### 2-2. per-worker 前提の文言一本化
-
-#### 波及変更（すべて施策 2 のスコープ）
-- `src/alpha_factory/config.py` L150-155: `max_workers` コメントの「1 worker ~400MB」を削除し、4 項モデルと `_check_memory_budget` を参照する文言へ。**`max_workers` の default 値 `2` は変更しない**（概念設計スコープ外 = 値の決定は Phase 0 後の別判断）。
-- `config/alpha_factory/default.yaml` L62-67: `@default` / `@upper_bound` コメントを 4 項モデル参照へ書き換え。`max_workers: 2` の値は据え置き。
-- `.claude/skills/zenigame-fx-codex-review/SKILL.md`: Codex env note の「24GB × 6 ワーカー（1 ワーカー最大約 3GB）」を、4 項モデルベースの正確な記述へ修正（実態 max_workers=2 とも整合させる）。
-- `.claude/skills/zenigame-fx-alpha-design/SKILL.md` / `zenigame-fx-plan-and-design` 等、同じ「1 ワーカー約 3GB」を含む skill があれば併せて修正（要 grep 確認）。
-- `docs/alpha_factory/runbook.md`: メモリガード節を 4 項モデル + `--mem-profile` レシピで更新。
+- 上記 3 箇所のコメントを「実測 per-worker RSS は pymalloc 断片化により数 GB 規模になり得る。`maxtasksperchild`（施策 1）で頭打ちする。正確な per-worker 試算は施策 3 完了後に再評価」と実態整合させる。
+- **`max_workers` の default 値（2）は変更しない**。`_check_memory_budget` の `// 400` 式の本格修正（初版の 4 項モデル）は施策 3 とセットで別タスクに送る（本タスクのスコープは施策 1 の付随コメント修正まで）。
 
 ### テスト計画（施策 2）
-- `tests/scripts/test_run_ga_parallel.py`:
-  - `test_check_memory_budget_uses_four_term_model`: monkeypatch で `psutil.virtual_memory` を固定し、4 項モデルの推奨値が期待通り（線形 `//400` ではない）
-  - `test_check_memory_budget_strict_raises_on_exceed`: strict + 超過で `SystemExit`
-  - `test_check_memory_budget_headroom_floor`: 小メモリ環境で headroom が 4GB 下限を守る
-  - `test_summary_contains_memory_model_inputs`: `parallel_config.memory_model_inputs` が常時出力され `source` が `"provisional"`（Phase 0 前）。**トップレベルキー集合は現行と完全一致**（additive はあくまで `parallel_config` 配下）
-- `uv run ruff` / `mypy` 通過
-
-### リスク（施策 2）
-- Phase 0 前の暫定 `_MEM_PRIVATE_WORKER_MB`（保守的大きめ）により、メモリの小さい CI 環境で `_check_memory_budget` が `max_workers` を 1 推奨にする可能性。→ warning に留め（strict 時のみ SystemExit）、現行挙動と同じ fail-open。autopilot が `--strict-memory-guard` を使う箇所は要確認（grep）。
+コメントのみの変更のためテストなし。`ruff` / `mypy` 通過のみ確認。
 
 ---
 
-## 施策 3: レバー A — `_PROC_AUX_CACHE` ライフサイクル管理（Phase 0 ゲート）
+## 施策 3: バックテスト hot path の `Decimal` churn 削減（本丸・別タスク）
 
-### 着手条件（数値基準 — Codex Round 1 [Warning] 施策3 反映）
-Phase 0 層 2 計測で `_PROC_AUX_CACHE` の entry 数 / object bytes が世代を追って単調増加し、**worker object bytes の 15% 以上**を占めることが確認された場合のみ着手する。
-採否基準（a-1 / a-2 の選択、および実装完了判定）も数値化する: **worker USS を 15% 以上削減し、かつ CPU-only 比較（成功条件 3a）で wall-time 劣化が 5% 以内**。いずれかを満たさない案は採用しない。
+root cause の本丸。`run_backtest` / `compute_metrics` が生成する `equity_curve: list[tuple[datetime, Decimal]]` や `trades` の `Decimal` churn を構造的に減らす。候補方向（別タスクの概念設計で詰める）:
 
-### 設計仕様（具体コードは Phase 0 後に確定）
-- **全消去はしない**（Codex Round 1 Warning #5: 再整列の CPU コスト増）。Phase 0 の cache size 推移を見て次の 2 案を比較:
-  - (a-1) **stage 単位 bounded eviction**: Stage B の fold ループ終了時に、その stage で生成された cache entry のみ破棄。`AuxAlignmentCache` に stage スコープを持たせるか、`_PROC_AUX_CACHE` を stage キー付きにする。
-  - (a-2) **LRU 上限**: `_PROC_AUX_CACHE` の各 `AuxAlignmentCache._cache` に最大 entry 数を設け、超過時に LRU eviction。
-- `aux_loader.AuxAlignmentCache` には既に `reset()` あり / `parallel_eval._reset_proc_aux_cache()` あり。これらを基盤に、**整列結果の値は変えず破棄タイミング / 上限のみ変更**する（look-ahead 契約不変）。
-- インターフェース: `evaluate_genome` または `_eval_genome_worker` のシグネチャは変えない。cache 管理は parallel_eval / aux_loader 内部に閉じる。
+- `equity_curve` を `list[tuple[datetime, Decimal]]` → numpy 構造化配列 / 並列 ndarray 化（datetime は int64 epoch、equity は固定スケール int64 or float64）
+- backtest engine 内部の中間 `Decimal` 演算を、精度が要求される箇所（約定価格・手数料）と要求されない箇所（集計・統計）に分離し、後者を float / numpy 化
 
-### テスト計画（施策 3）
-- `tests/alpha_factory/test_aux_loader.py` / `test_parallel_eval.py`:
-  - `test_proc_aux_cache_bounded_under_repeated_stage_b`: 多数 fold を回しても cache entry 数が上限以下
-  - `test_aux_alignment_values_unchanged_after_eviction`: eviction 前後で同一 bars に対する整列結果が完全一致（値不変 = look-ahead 契約維持）
-- **決定論ゲート**: 4 条件比較（baseline/changed × mw 1/2）で L1/L2 一致
-
-### リスク（施策 3）
-- eviction により再整列が増え CPU 悪化。→ Phase 0 の cache size を見て上限を設定、施策 1 の wall-clock 計測（成功条件 3a）で非劣化を確認。
+これは backtest engine の広範な改修（`PriceBar` を消費する 36 ファイル波及の懸念あり）で correctness リスク（金額計算の精度）を伴うため、**独立した設計サイクル（概念設計 → Codex レビュー → 詳細設計）が必要**。本タスクでは扱わない。施策 1 で peak を頭打ちした上で、施策 3 を別タスクとして起票する。
 
 ---
-
-## 施策 4: レバー B — `PriceBar` / `Ohlc` `__slots__` 付与（Phase 0 ゲート）
-
-### 着手条件
-Phase 0 層 2 計測で `PriceBar` / `Ohlc` 自体（特に `bars_a/b/holdout` と `aux_pair_bars_index`）が worker object bytes の有意な割合を占めることが確認された場合のみ。B 単独で 14〜22 倍の乖離を埋めるとは想定しない（限定的軽量化）。
-
-### 事前検証の証跡（Codex Round 1 [Warning] 施策4 反映 — grep 実施済み・証跡を貼付）
-詳細設計時点（2026-05-14）で以下を実 grep し、`slots=True` 化の互換破壊リスクが無いことを確認した:
-
-| 検証項目 | grep パターン（対象: `src/` `tests/` `scripts/`） | 結果 |
-|---|---|---|
-| `__dict__` / `vars()` / `asdict` 依存 | `\.__dict__\|vars(\|asdict(` × `pricebar\|ohlc\|bar\|.bid\|.ask` | **0 件** |
-| `PriceBar` / `Ohlc` の継承 | `class +\w+\((PriceBar\|Ohlc)` | **0 件** |
-| `object.__setattr__` 回避経路 | `object.__setattr__`（`src/domain/` `src/ingest/` `src/broker/`） | **0 件** |
-| 動的属性付与 | `setattr(` × `bar\|ohlc` | **0 件** |
-| カスタム pickle | `__reduce__\|__getstate__\|__setstate__`（`price.py`） | **0 件** |
-| `dataclasses.replace` / `asdict` 対象 | `dataclasses.(replace\|asdict)` × `bar\|ohlc\|price` | **0 件** |
-| import 箇所総数 | `import.*PriceBar\|import.*Ohlc` | 80 ファイル（いずれも上記依存なし） |
-
-結論: `PriceBar` / `Ohlc` は継承されず、`__dict__` / 動的属性 / カスタム pickle / `object.__setattr__` 回避のいずれにも依存していない。`slots=True` 化は安全。**実装直前に上表 7 パターンの grep コマンドと結果を `devnotes/20260514-2045-ga-worker-memory/slots-grep-evidence.md` に固定保存**し（Codex Round 2 [Warning] 施策4 反映 — 証跡の固定）、差分が無いことを確認してから着手する。加えて施策 4 のテストで pickle / spawn 経路（`max_workers=2`）を必ず押さえる。
-
-### 設計仕様
-- `src/domain/price.py` の `PriceBar` / `Ohlc` を `@dataclass(frozen=True, slots=True)` へ。`__dict__` が消えるため 1 bar あたり Python オブジェクト 3 個分の dict overhead を削減。
-- **外部 API 不変**: フィールド名・frozen 性・`spread_close` プロパティを変えない。`slots=True` は Python 3.10+ の dataclass 標準機能。
-- pickle 互換性: `slots=True` の frozen dataclass は標準 pickle 可能。`parallel_eval` の spawn 経路（initargs 経由 pickle）で問題ないことをテストで確認。
-
-### テスト計画（施策 4）
-- `tests/test_domain_price.py`（無ければ新規）:
-  - `test_pricebar_has_no_instance_dict`: `__slots__` 有効（`hasattr(bar, "__dict__")` is False）
-  - `test_pricebar_pickle_roundtrip`: pickle/unpickle で全フィールド一致（spawn 経路の前提）
-  - `test_pricebar_external_api_unchanged`: フィールド・`spread_close` の挙動不変
-- **決定論ゲート**: 4 条件比較で L1/L2 一致（特に pickle 経路を通る spawn `max_workers=2`）
-
-### リスク（施策 4）
-- `slots=True` と継承・mixin の非互換。→ `PriceBar` / `Ohlc` は継承されていないことを grep 確認。
-- どこかが `__dict__` を暗黙利用していた場合 AttributeError。→ 事前 grep + テストで検出。
-
----
-
-## 施策 5: レバー C — mmap SoA 共有ストア導入（Phase 0 ゲート・着手条件厳格）
-
-### 着手条件（全て満たす場合のみ着手、満たさなければ別タスク起票）
-1. Phase 0 で「target / aux の bar フルコピーが worker resident の支配項」が定量確認されている
-2. 施策 3（A）・施策 4（B）適用後も成功条件 2（swap/OOM 解消）に届かない
-3. 本タスクのスコープ内で `live_criteria` / stage gate 閾値 / dataset window を一切変更しない
-4. **PoC ゲート（Codex Round 1 [Critical] 施策5 反映）**: 着手前に「**評価 hot path（`evaluate_stage_a/b/c` → backtest engine）が、worker 内 PriceBar 再構築なしで SoA を直接消費できるか**」の PoC を実施し成立を確認する。`list[PriceBar]` 境界を維持したまま mmap だけ入れると worker 内 PriceBar コピーが残り、メモリ削減目的が不達になる（高コスト実装で効果不確実）。PoC が不成立なら施策 5 は本タスクでは着手せず別タスク起票に回す。
-
-### 設計仕様（具体コードは PoC ゲート通過・着手判断後に本ファイルへ追記）
-- 新規 `src/alpha_factory/shared_bar_store.py`: zenigame `src/trading/alpha_factory/evaluation/shared_bar_store.py` を参考に、mmap-backed SoA ストア。main プロセスで build（write）→ 全 worker が read-only attach（ゼロコピー共有）。**コード共有はしない**（AGENTS.md 方針 — 実装パターンの参考にとどめ独立実装）。
-- **数値表現は固定小数点 scale-int を第一候補に固定（Codex Round 1/2 [Warning] 施策5 反映）**: 現行 `PriceBar` は `Decimal` ベース。mmap SoA を `float64` で持つと丸めが入り L1/L2 決定論（評価値の完全一致）を破壊する。よって SoA の価格列は **固定スケール整数（`int64`）** で格納し、消費側で同一スケールの `Decimal` / 整数演算に戻す。**`float64` 案は決定論破壊リスクのため不採用**と明記する。
-- **スケール係数の決定規則（Codex Round 2 [Warning] 反映 — pair 別固定 scale にしない）**: pair ごとに桁数を決め打ちせず、**dataset / instrument ごとに、入力 `Decimal` 群の exponent 最大値（最小桁）から lossless な共通スケールを算出**する（OANDA 由来の小数桁や USD_ZAR 等の桁差に対応）。PoC 条件に以下を必須で含める: (i) 算出スケールで全 bar が lossless に round-trip すること、(ii) `int64` overflow が起きないこと（最大価格 × スケール < `2^63`）、(iii) スケール算出自体が決定論的であること。いずれか不成立なら施策 5 着手不可。
-- PoC ゲートを通過した場合の `_init_worker` 改修方針: initargs から bars 実体を外し mmap パス文字列のみ渡す。worker は attach。`LaneEvalContext` の `bars_*` の扱いは PoC 結果に基づき確定。
-- 4 項モデルの `_MEM_SHARED_MB` を実測で更新（施策 2 と接続）。
-- RUN 終了時 mmap ファイル cleanup（zenigame `cleanup()` 相当）。一時ファイル配置先は要設計（tmp namespace、clear-cache skill との整合）。
-
-### テスト計画（施策 5）
-- 新規 `tests/alpha_factory/test_shared_bar_store.py`: build/attach roundtrip / ゼロコピー view の値一致 / cleanup / 不正 magic・version の fail-closed
-- **決定論ゲート**: 4 条件比較で L1/L2 完全一致（mmap 経路と従来経路で評価結果 bit 一致まで要求 — L1/L2 スコープ）
-- メモリ実測: 施策 1 の `--mem-profile` で導入前後の worker USS を比較、`_MEM_SHARED_MB` の妥当性確認
-
-### リスク（施策 5）
-- 数値表現: `float64` 化の丸めは L1/L2 決定論を破壊するため不可。固定小数点 scale-int で `Decimal` 値を losslessly 表現できることが前提。**スケール係数の選定と round-trip の決定論性が着手判断の最大の技術リスク**であり、PoC ゲートで成立確認できなければ別タスク化する。
-- `list[PriceBar]` 境界維持案では worker 内再構築が残り効果不達 → PoC ゲート（着手条件 4）で事前に排除。
-- spawn 経路・cleanup タイミング・並行 RUN（autopilot）でのファイル衝突。
-
----
-
-## 決定論ゲート（全レバー共通の必須通過条件）
-
-各施策（特に 1・3・4・5）の実装完了は以下を必須ゲートとする。概念設計「決定論ゲート」を実装レベルに具体化したもの:
-
-- **4 条件比較**: 同一 seed・config・dataset で baseline `max_workers=1` / baseline `max_workers=2` / changed `max_workers=1` / changed `max_workers=2` を実行。
-- **比較対象**（既存 `tests/scripts/test_run_ga_parallel.py` を基盤に拡張）:
-  - L1 selection: `best.name` / `best.fitness` / `best.selection_score` / `live_criteria.all_pass` / `live_criteria.checks[*]`
-  - L2 row-order: archive Parquet を `(lane_id, generation, genome_name)` ソートした数値 column
-  - **追加（Codex Round 1/2 [Warning] 決定論 反映）**: **`(lane_id, generation)` ごとの `selected_genome_names` 全量一致（順序込み）** — `best` 中心比較だけでは世代内選抜列の微小ドリフトを見逃すため、各 `(lane_id, generation)` で次世代へ選抜された genome 名列（順序込み）が 4 条件すべてで完全一致することを検証する。**この診断値の取得は選抜処理の出力を read-only で観測する形に限り、選抜ロジック・乱数消費に一切影響しないこと**を実装制約とする（観測が決定論を動かしては本末転倒）。
-- 1 つでも不一致が出た施策は実装完了としない（INCONCLUSIVE のまま別タスク化も可）。
 
 ## 実装モード
 
 | 項目 | 内容 |
 |------|------|
-| 推奨モード | **incremental**（施策 1 → 施策 2 → [Phase 0 計測実行] → 施策 3/4/5 を結果でゲート） |
-| 判断根拠 | 施策 1・2 は Phase 0 非依存で即実装可・互いに疎結合（施策 2 は施策 1 の USS キーを使うため施策 1 が先）。施策 3/4/5 は Phase 0 計測結果がインプットで、結果次第で着手有無・優先順位・具体設計が変わる。standalone な大改修ではなく、各施策が小さく独立検証可能なため incremental が適切。 |
-| 競合リスク | 施策 1・3・5 がいずれも `parallel_eval.py` を触る。施策 1 を先に確定 → 3/5 はその上に乗せる順序で競合回避。施策 4 は `domain/price.py` 単独で他と独立。 |
-| 想定実装時間 | 施策 1: 中 / 施策 2: 短 / 施策 3: 短〜中 / 施策 4: 短 / 施策 5: 長（着手判断込み） |
+| 推奨モード | incremental（施策 1 → 施策 2、いずれも小さく独立） |
+| 競合リスク | 施策 1 は `parallel_eval.py` / `config.py` / `run_ga.py` を触るが、いずれも局所的な引数追加。並行する他タスクとの干渉は低い |
+| 想定実装時間 | 施策 1: 短〜中 / 施策 2: 短 |
 
-## 実装順序と Phase ゲート
+## 実装順序
 
-1. **施策 1**（二層計測フック）を実装・テスト・マージ
-2. **施策 2**（4 項モデル化）を実装・テスト・マージ（暫定 `_MEM_PRIVATE_WORKER_MB` で 400MB 前提を即廃止）
-3. **Phase 0 計測実行**: `--mem-profile` で計測マトリクスを取得、内訳表を本 devnotes に追記
-4. 内訳表に基づき **施策 3/4/5 の着手有無・優先順位を決定** — 各レバーの「着手条件」を内訳表で判定。施策 2 の `_MEM_PRIVATE_WORKER_MB` を実測値で再校正
-5. 着手すると決めたレバーを incremental に実装。各レバーは**決定論ゲート（4 条件比較）必須通過**
-
-> Phase 0 結果が出た時点で本詳細設計の施策 3/4/5 セクションを実装レベルまで追記更新し、必要なら再度 Codex レビューにかける。
+1. 施策 1: `GenomeEvaluator` の `maxtasksperchild` 配線 → config / CLI / yaml 配線 → テスト
+2. 施策 2: コメント実態修正
+3. 決定論テスト（`test_run_ga_parallel.py`）+ `ruff` + `mypy` 全通過を確認
+4. Codex で実装差分レビュー（`parallel_eval.py` は L1/L2 決定論クリティカルなため必須）
+5. 施策 3 を別タスクとして起票（`/zenigame-fx-todo-add`）

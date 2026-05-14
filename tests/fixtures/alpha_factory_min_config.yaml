@@ -38,6 +38,12 @@ stage_gate:
     wf_embargo_days: 0
     median_oos_sharpe_min: 0.20
     positive_fold_min: 0.60
+    # smoke fixture スケール調整: 本 fixture の極小データセット (stage_b
+    # 約 6 unique dates) + wf_train=2/test=1/step=1 は max_folds=4。
+    # default.yaml の wf_min_safe_folds=5 を継承すると起動時 fail-closed で
+    # 全 smoke run テストが落ちる (production の WF 窓拡大に fixture が追従
+    # していなかった既存 drift)。smoke は code path 実行が目的のため 2 に下げる。
+    wf_min_safe_folds: 2
   stage_c:
     holdout_days: 1
     spread_stress_multiplier: 1.5

@@ -550,10 +550,32 @@ class GenomeEvaluator:
         cross_pair_cfg: CrossPairConfig,
         prim_evaluator: RegistryEvaluator,
         lane_contexts: Mapping[str, LaneEvalContext],
+        *,
+        max_tasks_per_child: int | None = None,
     ) -> None:
+        """``max_tasks_per_child``: worker が指定タスク数を処理したら
+        プロセスごと退役 → 新規 spawn でリサイクルする (``Pool`` の
+        ``maxtasksperchild``)。pymalloc アリーナ断片化 (``run_backtest`` の
+        ``Decimal`` churn 由来) で per-worker RSS が数 GB に肥大するのを、
+        退役時の OS への完全返却で頭打ちにする。``None`` (default) は
+        リサイクルなし (従来挙動)。
+        単位: ``evaluate_population`` が ``pool.map(..., chunksize=1)`` を使う
+        ため 1 タスク = 1 genome。よって ``max_tasks_per_child`` は
+        「何 genome 評価ごとに worker を退役させるか」を直接表す。
+        決定論契約: 退役 worker は同一 initargs で ``_init_worker`` を
+        再実行するため状態同一、``pool.map`` は入力順で結果を返すため
+        L1/L2 は不変。
+        @ref: devnotes/20260514-2045-ga-worker-memory/
+        """
         if max_workers < 1:
             raise ValueError(f"max_workers must be >= 1: {max_workers}")
+        if max_tasks_per_child is not None and max_tasks_per_child < 1:
+            raise ValueError(
+                "max_tasks_per_child must be >= 1 or None: "
+                f"{max_tasks_per_child}"
+            )
         self._max_workers = max_workers
+        self._max_tasks_per_child = max_tasks_per_child
         self._stage_gate_cfg = stage_gate_cfg
         self._cross_pair_cfg = cross_pair_cfg
         self._prim_evaluator = prim_evaluator
@@ -574,11 +596,18 @@ class GenomeEvaluator:
                     prim_evaluator,
                     dict(self._lane_contexts),
                 ),
+                # None = 従来通りリサイクルなし。int 指定で worker 定期退役。
+                maxtasksperchild=max_tasks_per_child,
             )
 
     @property
     def max_workers(self) -> int:
         return self._max_workers
+
+    @property
+    def max_tasks_per_child(self) -> int | None:
+        """worker リサイクル間隔 (None = リサイクルなし)。"""
+        return self._max_tasks_per_child
 
     @property
     def pool_pids(self) -> set[int]:
@@ -622,7 +651,13 @@ class GenomeEvaluator:
                 )
                 for g in population
             ]
-        return self._pool.map(_eval_genome_worker, args)
+        # chunksize=1: maxtasksperchild は Pool の「タスク」単位でカウントされ、
+        # default chunking では 1 タスク = 複数 genome の chunk になる。それでは
+        # worker リサイクル間隔 (max_tasks_per_child) が genome 数と乖離し、
+        # pymalloc 断片化の頭打ち効果が意図通り効かない。chunksize=1 で
+        # 1 タスク = 1 genome に固定し、リサイクル間隔を genome 数で制御する。
+        # L2 row-order: pool.map は chunksize に依らず入力順で結果を返す。
+        return self._pool.map(_eval_genome_worker, args, chunksize=1)
 
     def __enter__(self) -> GenomeEvaluator:
         return self
