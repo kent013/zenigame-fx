@@ -1,0 +1,484 @@
+# 詳細設計: backtest hot path の Decimal churn 削減 (T105)
+
+## 使命・制約（絶対遵守）
+
+### zenigame-fx Alpha Factory 使命
+live_criteria 全指標同時充足 + (ii-lite) 通過で使命達成。絶対制約: イントラデイ / ロング・ショート両方向 / スワップ・スプレッド反映。
+
+本 T105 は live_criteria を直接動かさない**探索基盤の制約解除**（pymalloc アリーナ断片化の発生源削減）。`live_criteria` / stage gate 閾値 / dataset window / fitness 関数 / 約定・margin・手数料計算は一切変更しない。決定論契約 L1 selection / L2 row-order を厳守する。
+
+### 禁止事項
+1. 評価期間延長 / 2. 見た目の数値改善 / 3. GA ハック / 4. live_criteria 緩和 / 5. 過度な複雑化 / 6. 取引回数削減 / 7. オーバーナイト保有前提 / 8. archive スキーマ変更時の値伝搬漏れ
+
+### コーディングルール
+- バグ修正はテストファースト / 全施策にテスト必須 / テスト命名は振る舞いベース / テストは対象モジュール対応ファイルに配置
+- `uv run pytest tests/` / `uv run ruff check src/ tests/` / `uv run mypy src/`
+- Python 3.13 + numpy
+
+## 概念設計リファレンス
+
+`devnotes/20260515-0827-backtest-decimal-churn/conceptual-design.md`（Codex 概念設計レビュー Round 2 APPROVED）。
+
+設計の根幹: `equity_curve: list[tuple[datetime, Decimal]]`（1 genome Stage B で約 90 万小オブジェクト、backtest 寿命中 retain）を専用型 `EquityCurve`（事前確保 numpy 配列 2 本 = UTC epoch int64 + scaled-int64 equity）に置換。保存表現は lossless、gate-feeding 指標は bit-exact 維持。
+
+## 施策一覧
+
+| # | 施策名 | 変更ファイル | 種別 |
+|---|--------|------------|------|
+| 1 | `EquityCurve` 型 + scaled-int encode/decode（fail-closed guard） | 新規 `src/backtest/equity_curve.py` | 本タスク |
+| 2 | `run_backtest` の equity_curve 構築を `EquityCurveBuilder` 経由に / `BacktestResult.equity_curve` 型変更 | `src/backtest/engine.py` | 本タスク |
+| 3 | `compute_metrics` の equity_curve 消費経路を `EquityCurve` 対応に（gate-feeding 指標 bit-exact） | `src/backtest/metrics.py` | 本タスク |
+| 4 | consumer 全箇所の `EquityCurve` 追従 | `canonical_adapter.py` / `stage_gate.py` / `cross_pair.py` / `ga/fitness.py` / `ensemble.py` / `grid_search.py` / `walk_forward.py` / `report.py` | 本タスク |
+| 5 | shadow test（serialized parity 含む）+ 効果検証 | 新規テスト + `devnotes/` 計測レポート | 本タスク |
+
+---
+
+## 施策 1: `EquityCurve` 型 + scaled-int encode/decode
+
+### 新規ファイル `src/backtest/equity_curve.py`
+
+#### モジュール定数と overflow 上界（Codex 概念 R2 [Warning] #1 反映 — 単位系確定）
+
+```python
+# equity の固定スケール小数桁数。
+# 根拠: AF 設定 (holding_cost_per_day_bps=0) では equity = cash + unrealized、
+# 両者とも Decimal(units:int) * price_diff(<=5 places) の積の和 → equity の
+# 小数桁数は price quote 桁数 (非 JPY <=5、JPY <=3) に bounded。
+# SCALE=8 は実需 (<=5) に 3 桁マージン。
+SCALE_DECIMAL_PLACES = 8
+_SCALE_FACTOR = 10 ** SCALE_DECIMAL_PLACES  # Python int
+
+# overflow 上界: max_abs_equity_bound * 10^SCALE < 2^63 - 1
+#   2^63 - 1 ≈ 9.22e18 / 10^8 = 9.22e10
+#   → max_abs_equity_bound < 9.22e10 (約 922 億)
+# 単位系: equity は home currency 建て。
+#   max_abs_equity_bound = initial_cash + Σ|unrealized|_max。
+#   unrealized_max ≈ 同時保有ポジション数 × |units| × price_range。
+#   AF 既定: initial_cash=1,000,000 / units=10,000 / leverage=3。
+#   price_range は dataset 内 max-min（FX で高々数百）。
+#   保守上界でも 1e8 オーダーに収まり、9.22e10 ceiling に 900x 以上マージン。
+# 実行時は encode guard が最後の防壁 (下記)。
+_INT64_MAX = 2 ** 63 - 1
+```
+
+#### encode / decode（fail-closed guard — Codex 概念 R1 [Critical 2] / [Warning 1] 反映）
+
+```python
+def encode_equity(value: Decimal) -> int:
+    """equity Decimal → scaled int。lossless でなければ fail-closed。
+
+    手順 (Codex 反映): Python int で生成 → 整数性検証 → overflow 検証 → 返却。
+    np.int64 への cast は呼び出し側 (配列代入時) で行う。
+    """
+    scaled = value * _SCALE_FACTOR          # Decimal
+    scaled_int = int(scaled)
+    if scaled_int != scaled:                # 整数性: 桁あふれ = silent loss を禁止
+        raise EquityScaleError(
+            f"equity {value} not representable at SCALE={SCALE_DECIMAL_PLACES} "
+            f"(holding_cost>0 等で桁数前提が崩れた可能性)"
+        )
+    if not -_INT64_MAX <= scaled_int <= _INT64_MAX:  # overflow
+        raise EquityScaleError(
+            f"equity {value} overflows int64 at SCALE={SCALE_DECIMAL_PLACES}"
+        )
+    return scaled_int
+
+
+def decode_equity(scaled_int: int) -> Decimal:
+    """scaled int → equity Decimal。encode の逆。lossless。"""
+    return Decimal(int(scaled_int)) / _SCALE_FACTOR
+```
+
+- `EquityScaleError(RuntimeError)` を新設。`holding_cost_per_day_bps > 0` 等で equity 桁数前提が崩れた場合に**静かに壊れず即座に検知**される。
+- `decode_equity` は `Decimal(int) / int` で `_SCALE_FACTOR` が 10 の冪のため lossless（有限小数）。
+
+#### SCALE 契約の起動時事前検証（Codex 詳細 R1 [Warning] 反映）
+
+`encode_equity` の per-bar fail-closed guard は「実行中」検知になる。実行前に弾くため、起動時チェックを追加:
+
+```python
+def validate_equity_scale_contract(config: BacktestConfig) -> None:
+    """SCALE=8 契約の前提が config で成立するか起動時に検証。
+    holding cost が有効だと equity に除算経路が入り桁数前提が崩れ得るため、
+    その場合は明示的な警告 / fail を出す (silent な実行中 fail を避ける)。
+    """
+    if config.holding_cost_per_day_bps > 0:
+        raise EquityScaleError(
+            "holding_cost_per_day_bps > 0 は equity の小数桁数前提 "
+            f"(SCALE={SCALE_DECIMAL_PLACES}) を崩す可能性がある。"
+            "T105 の追加設計が必要 (concept-design スコープ外参照)。"
+        )
+```
+
+`run_backtest` 冒頭（既存のイントラデイ絶対制約検証の隣）で呼ぶ（施策 2）。これにより holding cost 有効化時は backtest 開始前に fail-closed する。
+
+#### UTC epoch 変換（Codex 概念 R2 [Warning] #3 反映 — 整数 arithmetic）
+
+```python
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+def encode_epoch_ns(dt: datetime) -> int:
+    """UTC-aware datetime → epoch ナノ秒 int。float 経由禁止、整数 arithmetic のみ。"""
+    if dt.tzinfo is None:
+        raise EquityCurveError("bar_time must be tz-aware (UTC)")
+    delta = dt.astimezone(UTC) - _UNIX_EPOCH   # timedelta
+    return ((delta.days * 86_400 + delta.seconds) * 1_000_000
+            + delta.microseconds) * 1_000
+
+def decode_epoch_ns(epoch_ns: int) -> datetime:
+    """epoch ナノ秒 → UTC-aware datetime。ns 端数は黙って切り捨てず reject。"""
+    epoch_ns = int(epoch_ns)
+    if epoch_ns % 1_000 != 0:   # Codex 詳細 R1 [Warning] 反映: silent 切り捨て禁止
+        raise EquityCurveError(
+            f"epoch_ns {epoch_ns} has sub-microsecond component "
+            "(lossless 契約違反)"
+        )
+    return _UNIX_EPOCH + timedelta(microseconds=epoch_ns // 1_000)
+```
+
+- `timedelta` の `.days/.seconds/.microseconds` は全て int → float 丸めなし。M1 bar は秒精度のため `microseconds` は通常 0 だが一般化して保持。
+- 復元契約: 常に UTC-aware datetime を返す。`decode_epoch_ns` は ns 端数（1000 の非倍数）を黙って切り捨てず `EquityCurveError` で reject し lossless 契約を明示的に守る（Codex 詳細 R1 [Warning] 反映）。`encode_epoch_ns` は μs 精度入力から ns を生成するため常に 1000 倍数になり、この reject は「不正な epoch_ns が外部から混入した」場合の防壁。
+
+#### `EquityCurve` 型と `EquityCurveBuilder`
+
+```python
+@dataclass(frozen=True)
+class EquityCurve:
+    """backtest の equity 時系列。numpy 連続バッファ 2 本で小オブジェクト churn を排除。
+
+    不変条件 (__post_init__ で検証・fail-closed):
+      - 2 配列が同長
+      - dtype == np.int64 かつ C-contiguous
+      - epoch_ns が strict 昇順 (重複・逆順を reject)
+      - 検証後、両配列を **`setflags(write=False)` で物理的に read-only 化**
+        (Codex 詳細 R1 [Critical] 反映: 文言上の read-only 契約では破壊的
+         書き換えを防げない。frozen dataclass だが ndarray 中身は可変なため)
+    空 curve は許容 (len 0)。
+    """
+    epoch_ns: np.ndarray       # int64, UTC epoch ナノ秒, strict 昇順, read-only
+    equity_scaled: np.ndarray  # int64, equity * 10^SCALE_DECIMAL_PLACES, read-only
+
+    def __post_init__(self) -> None:
+        # Codex 詳細 R2 [Warning] 反映: setflags だけでは外部から渡された
+        # view の base 配列経由の書換を防げない。owned copy に正規化してから
+        # read-only 化する。copy は O(n) 1 回 / backtest で、削減する 20 万
+        # Decimal churn に対し無視できるコストのため builder 経路も含め一律 copy。
+        for name in ("epoch_ns", "equity_scaled"):
+            arr = getattr(self, name)
+            normalized = np.array(arr, dtype=np.int64, order="C", copy=True)
+            object.__setattr__(self, name, normalized)
+        if len(self.epoch_ns) != len(self.equity_scaled):
+            raise EquityCurveError("epoch_ns / equity_scaled length mismatch")
+        # strict 昇順検証: np.diff は int64 極値で overflow し得るため
+        # 要素比較で行う (Codex 詳細 R2 [Warning] 反映)
+        if len(self.epoch_ns) >= 2 and not np.all(
+            self.epoch_ns[1:] > self.epoch_ns[:-1]
+        ):
+            raise EquityCurveError("epoch_ns must be strictly increasing")
+        # 物理的 read-only 化 (検証通過後、owned copy に対して)
+        self.epoch_ns.setflags(write=False)
+        self.equity_scaled.setflags(write=False)
+
+    def __len__(self) -> int: ...
+    @property
+    def is_empty(self) -> bool: ...
+
+    # --- 復元 access (consumer 用、transient な Decimal/datetime を返す) ---
+    def equity_at(self, i: int) -> Decimal:        # decode_equity(equity_scaled[i])
+    def time_at(self, i: int) -> datetime:          # decode_epoch_ns(epoch_ns[i])
+    def final_equity(self) -> Decimal:              # 空なら Decimal(0)、else equity_at(-1)
+    def iter_decimal(self) -> Iterator[tuple[datetime, Decimal]]:  # 後方互換 (canonical_adapter 等)
+
+    # --- 高速 path 用 raw access ---
+    # equity_scaled / epoch_ns を直接公開 (read-only 契約)。
+
+    @classmethod
+    def from_decimal_points(
+        cls, points: Sequence[tuple[datetime, Decimal]]
+    ) -> "EquityCurve": ...   # shadow test / 旧経路互換構築用
+
+
+class EquityCurveBuilder:
+    """run_backtest 用の事前確保 incremental builder。
+
+    bar 数を起動時に確定できる前提 (run_backtest は bars_list = list(bars))。
+    np.empty(n, int64) を 2 本確保し index 代入で埋める → 小オブジェクト蓄積ゼロ。
+    """
+    def __init__(self, n: int) -> None:
+        self._epoch = np.empty(n, dtype=np.int64)
+        self._equity = np.empty(n, dtype=np.int64)
+        self._i = 0
+
+    def append(self, bar_time: datetime, equity: Decimal) -> None:
+        if self._i >= len(self._epoch):   # Codex 詳細 R2 [Suggestion] 反映: overfill 検出
+            raise EquityCurveError("EquityCurveBuilder overfill (append > n)")
+        self._epoch[self._i] = encode_epoch_ns(bar_time)
+        self._equity[self._i] = encode_equity(equity)   # int → int64 代入で範囲は encode が保証済
+        self._i += 1
+
+    def build(self) -> EquityCurve:
+        # self._i == n を検証 (埋め残し検出) → EquityCurve(epoch, equity)
+        # (__post_init__ が owned copy 化 + read-only 化を行う)
+```
+
+### 波及変更
+- `AGENTS.md`: なし（公開 CLI / 運用手順の変更なし）
+- skill ファイル: なし
+- `config/alpha_factory/default.yaml`: なし
+- `docs/alpha_factory/*.md`: backtest engine の equity_curve 表現に言及する箇所があれば追記（要 grep 確認、施策 4 で洗う）
+
+### テスト計画（施策 1）
+新規 `tests/backtest/test_equity_curve.py`:
+- `test_encode_decode_roundtrip_is_lossless`: 代表的 equity Decimal（≤5 places）で `decode_equity(encode_equity(x)) == x`
+- `test_encode_raises_on_excess_precision`: SCALE を超える小数桁の Decimal で `EquityScaleError`
+- `test_encode_raises_on_int64_overflow`: 巨大 equity で `EquityScaleError`
+- `test_epoch_roundtrip_is_lossless`: UTC-aware datetime（秒精度・μs 精度両方）で `decode_epoch_ns(encode_epoch_ns(dt)) == dt`
+- `test_epoch_rejects_naive_datetime`: naive datetime で `EquityCurveError`
+- `test_equity_curve_invariants`: 非昇順 epoch / 配列長不一致 / 非 int64 で `__post_init__` が raise
+- `test_builder_detects_underfill`: `append` 回数 < n で `build()` が raise
+- `test_builder_detects_overfill`: `append` 回数 > n で `EquityCurveError`（Codex 詳細 R2 [Suggestion] 反映）
+- `test_equity_curve_is_owned_copy`: 入力 ndarray を後から書き換えても `EquityCurve` 内部が不変（copy 正規化の verify）
+- `test_empty_curve`: len 0 curve の `final_equity()` == `Decimal(0)`、`is_empty` True
+
+### リスク（施策 1）
+- `SCALE_DECIMAL_PLACES=8` の前提（equity ≤ 5 places）が `holding_cost_per_day_bps>0` 有効化で崩れる → `encode_equity` が fail-closed。**現行 AF 設定では holding cost 0**（前提として明記、概念設計参照）。
+
+---
+
+## 施策 2: `run_backtest` の equity_curve 構築
+
+### 変更箇所
+`src/backtest/engine.py`: `BacktestResult.equity_curve`（L79）と `run_backtest`（L125, L180, L210）
+
+### 現行コード
+```python
+@dataclass
+class BacktestResult:
+    config: BacktestConfig
+    trades: list[Trade]
+    equity_curve: list[tuple[datetime, Decimal]] = field(default_factory=list)
+    session_blocks: tuple[SessionBlock, ...] = field(default_factory=tuple)
+
+def run_backtest(...):
+    ...
+    equity_curve: list[tuple[datetime, Decimal]] = []
+    for i, bar in enumerate(bars_list):
+        ...
+        equity_curve.append((bar.bar_time, broker.snapshot().equity))
+    ...
+    return BacktestResult(config=config, trades=broker.trades,
+                          equity_curve=equity_curve, session_blocks=session_blocks)
+```
+
+### 変更後コード
+```python
+@dataclass
+class BacktestResult:
+    config: BacktestConfig
+    trades: list[Trade]
+    equity_curve: EquityCurve = field(default_factory=EquityCurve.empty)
+    session_blocks: tuple[SessionBlock, ...] = field(default_factory=tuple)
+
+def run_backtest(...):
+    ...
+    bars_list = list(bars)   # 既存: bar 数はここで確定
+    # 既存: イントラデイ絶対制約の事前検証
+    ...
+    validate_equity_scale_contract(config)   # 追加: SCALE 契約の起動時検証
+    ...
+    equity_builder = EquityCurveBuilder(len(bars_list))
+    for i, bar in enumerate(bars_list):
+        ...
+        equity_builder.append(bar.bar_time, broker.snapshot().equity)
+    ...
+    return BacktestResult(config=config, trades=broker.trades,
+                          equity_curve=equity_builder.build(),
+                          session_blocks=session_blocks)
+```
+
+- `EquityCurve.empty()` classmethod を追加（`default_factory` 用、len 0 curve）。
+- `broker.snapshot().equity`（Decimal）の per-bar 生成は変わらない（精度 load-bearing。`encode_equity` で int64 化して事前確保配列へ代入、**新規 Python オブジェクトは蓄積しない**）。
+- `validate_equity_scale_contract(config)` を `run_backtest` 冒頭で呼び、holding cost 有効化時は backtest 開始前に fail-closed（Codex 詳細 R1 [Warning] 反映）。
+
+### 波及変更
+施策 4 で全 consumer を追従（下記）。
+
+### テスト計画（施策 2）
+`tests/backtest/test_engine.py`（既存更新）:
+- `test_run_backtest_returns_equity_curve_as_equity_curve_type`: `result.equity_curve` が `EquityCurve` 型、`len == len(bars)`
+- `test_equity_curve_values_match_broker_snapshots`: 各 index の `equity_at(i)` が当該 bar の `broker.snapshot().equity` と一致（既存テストの equity_curve assertion を新 API に追従）
+
+### リスク（施策 2）
+- `BacktestResult.equity_curve` は公開フィールド。型変更で全 consumer が壊れる → 施策 4 で網羅追従、`mypy` で接続漏れ検出。
+
+---
+
+## 施策 3: `compute_metrics` の equity_curve 消費経路
+
+### 変更箇所
+`src/backtest/metrics.py`: `compute_metrics`（L147）/ `_bar_returns`（L46）/ `_calmar`（L131）
+
+### 設計方針（Codex 概念 R1 [Critical 1] 反映 — 保存表現 lossless と比率計算 bit-exact の分離）
+
+| metric | 現行 | 変更後 | bit-exact 根拠 |
+|---|---|---|---|
+| `max_drawdown`（絶対額） | Decimal peak/dd ループ | **scaled-int64 上の整数比較・整数減算**でループ → 最後に `decode_equity` で Decimal 化 | 整数演算は exact。decode は lossless |
+| `final_equity` | `equity_curve[-1][1]` | `equity_curve.final_equity()`（= `decode_equity(equity_scaled[-1])`） | decode lossless |
+| `max_drawdown_pct` | `dd / peak * Decimal(100)` | dd・peak の scaled-int を `decode_equity` で Decimal 復元 → **現行と同一の `dd_dec / peak_dec * Decimal(100)`** | 同一 Decimal 演算経路 + lossless 復元 |
+| `_calmar` | `equity_curve[0]` / `[-1]` の Decimal | 端点 2 点を `equity_at(0)` / `equity_at(-1)`、時刻を `time_at(0)` / `time_at(-1)` で復元 → **現行と同一演算** | 同一 Decimal 演算経路 + lossless 復元 |
+| `_bar_returns`（v1 sharpe 用、既に float 化） | `float((eq-prev)/prev)` (Decimal) | 各 bar `equity_at(i)` で Decimal 復元 → **現行と同一の `float((eq-prev)/prev)`** | 同一演算経路。復元は transient（retain せず） |
+
+### 現行コード（`max_drawdown` ループ抜粋）
+```python
+max_drawdown = Decimal(0); max_drawdown_pct = Decimal(0); peak = Decimal(0)
+for _, equity in equity_curve:
+    if equity > peak: peak = equity
+    if peak > 0:
+        dd = peak - equity
+        if dd > max_drawdown:
+            max_drawdown = dd
+            max_drawdown_pct = dd / peak * Decimal(100)
+final_equity = equity_curve[-1][1] if equity_curve else Decimal(0)
+```
+
+### 変更後コード（方針）
+```python
+# scaled-int64 配列上で peak/dd を整数演算 (exact)
+eq_scaled = equity_curve.equity_scaled            # np.ndarray[int64], read-only
+peak_s = 0; max_dd_s = 0; max_dd_peak_s = 0
+for equity_s in eq_scaled:                        # int64 スカラ反復
+    equity_s = int(equity_s)
+    if equity_s > peak_s: peak_s = equity_s
+    if peak_s > 0:
+        dd_s = peak_s - equity_s
+        if dd_s > max_dd_s:
+            max_dd_s = dd_s; max_dd_peak_s = peak_s
+max_drawdown = decode_equity(max_dd_s)            # Decimal、現行と bit-exact
+# 比率は decode 後に現行と同一 Decimal 経路
+if max_dd_peak_s > 0:
+    dd_dec = decode_equity(max_dd_s); peak_dec = decode_equity(max_dd_peak_s)
+    max_drawdown_pct = dd_dec / peak_dec * Decimal(100)
+else:
+    max_drawdown_pct = Decimal(0)
+final_equity = equity_curve.final_equity()
+```
+
+- ループは numpy ベクトル化も可能（`np.maximum.accumulate` で running peak、`peak - eq` で dd 配列、`argmax`）。ただし**「dd > max_drawdown」更新時に max_drawdown_pct を同時更新する現行の tie-break 挙動**（最初に最大 dd を達成した点の peak を使う）を保つこと。ベクトル化する場合は `argmax`（最初の最大 index）で同一挙動。bit-exact を最優先しベクトル化は任意。
+
+### `_bar_returns` / `_calmar` の引数型
+`equity_curve: list[tuple[datetime, Decimal]]` → `EquityCurve`。内部は `equity_at` / `time_at` で Decimal/datetime を復元し現行演算をそのまま適用。
+
+### テスト計画（施策 3）
+`tests/backtest/test_metrics.py`（既存更新 + 新規）:
+- **shadow test（必須）** `test_compute_metrics_equity_curve_repr_parity`: ランダム / 代表 equity 列を `list[tuple[datetime,Decimal]]`（旧）と `EquityCurve`（新）の両方で構築し、`compute_metrics` の**全出力フィールドが完全一致**。特に `max_drawdown` / `max_drawdown_pct` / `final_equity` / `calmar`。
+- **serialized parity（Codex 概念 R2 [Warning] #2 反映）** `test_compute_metrics_serialized_parity`: 旧/新の `BacktestMetrics` を summary/archive と同じ文字列化経路（`_fitness_to_str` 等の既存 serializer、要 grep 特定）に通し、**文字列表現も一致**することを確認（`Decimal("1.23")` vs `Decimal("1.2300")` の表現差を検出）。
+- `test_max_drawdown_integer_path_matches_decimal`: drawdown が発生する系列で整数経路と現行 Decimal 経路の一致
+- `test_max_drawdown_tie_break_equal_dd_different_peak`（Codex 詳細 R1 [Warning] 反映）: **同一 `max_dd` 絶対額が異なる peak で複数回出現する系列**を固定ケースとして用意し、整数経路が「最初に最大 dd を達成した点の peak」を選ぶ現行挙動と一致することを固定化（`max_drawdown_pct` の peak 選択同値性）
+- 既存 `compute_metrics` テストを `EquityCurve` 入力に追従
+
+### リスク（施策 3）
+- `max_drawdown` ループの整数化で tie-break 挙動が変わると `max_drawdown_pct` が変化 → shadow test で検出。
+- serialized 表現差（数値 equal だが文字列差）→ serialized parity test で検出。
+
+---
+
+## 施策 4: consumer 全箇所の `EquityCurve` 追従
+
+### consumer 機械抽出証跡（Codex 詳細 R1 [Critical] 反映 — 4 段接続漏れの未証明を解消）
+
+基準 commit: **`8d2c86a`**（`git rev-parse HEAD` 時点）。`grep -rn "equity_curve" src/ --include="*.py"` の機械抽出結果（コメント除く）:
+
+```
+src/backtest/engine.py:79      BacktestResult.equity_curve フィールド定義 [producer]
+src/backtest/engine.py:125,180,210   run_backtest 構築・append・返却 [producer]
+src/backtest/metrics.py:46,49  _bar_returns(equity_curve) 反復
+src/backtest/metrics.py:131,132,134,135  _calmar(equity_curve) 端点アクセス・len
+src/backtest/metrics.py:149,170,179,181,186  compute_metrics 引数・dd ループ・final・_bar_returns・_calmar 呼出
+src/backtest/grid_search.py:69       compute_metrics(result.trades, result.equity_curve)
+src/backtest/report.py:123           compute_metrics(result.trades, result.equity_curve)
+src/backtest/walk_forward.py:128     compute_metrics(result.trades, result.equity_curve)
+src/backtest/ensemble.py:43          StrategyRun.equity_curve dataclass フィールド
+src/backtest/ensemble.py:119         compute_metrics(result.trades, result.equity_curve)
+src/backtest/ensemble.py:125         StrategyRun(equity_curve=result.equity_curve)
+src/backtest/ensemble.py:133,135,136 combined_equity 自前構築 (len / [i][0] / [i][1])
+src/backtest/ensemble.py:144         _returns(r.equity_curve) private helper
+src/ga/fitness.py:69                 compute_metrics(..., result.equity_curve, ...)
+src/alpha_factory/cross_pair.py:164,173  compute_metrics 呼出・dataclass へ代入
+src/alpha_factory/canonical_adapter.py:133,134,150  equity_curve_to_bar_equity_series 定義・反復
+src/alpha_factory/stage_gate.py:39   equity_curve_to_bar_equity_series import
+src/alpha_factory/stage_gate.py:116,886  typed param / dataclass フィールド
+src/alpha_factory/stage_gate.py:152  equity_curve_to_bar_equity_series(equity_curve) 呼出
+src/alpha_factory/stage_gate.py:1014,1045,1315,1330,1403,1429,1457,1844,1867,1967,1995,2018,2168  res.equity_curve / fold_equity / stress_equity / sidecar.equity_curve の pass・代入
+```
+
+`BacktestResult` 参照: `src/backtest/__init__.py`（re-export）/ `engine.py`（定義）/ `report.py`。`paper_trading` は `BacktestResult` / `equity_curve` を**非参照**（grep 0 件）。実装時は base commit を起点に同 grep を再実行し差分が無いことを確認する。
+
+### 変更箇所（上記証跡に基づく consumer 全数）
+
+| ファイル | 現行の使い方 | 追従方針 |
+|---|---|---|
+| `src/ga/fitness.py` (L69) | `compute_metrics(result.trades, result.equity_curve, ...)` | 型変更のみ（pass-through）。`compute_metrics` が `EquityCurve` 受けに対応すれば変更不要に近い |
+| `src/alpha_factory/cross_pair.py` (L164,173) | `compute_metrics(...)` + `equity_curve=result.equity_curve` を dataclass へ | pass-through。受け側 dataclass の型注釈を `EquityCurve` に |
+| `src/alpha_factory/canonical_adapter.py` (L133) | `equity_curve_to_bar_equity_series`: `for ts, eq in equity_curve: BarEquityPoint(ts, float(eq))` | `equity_curve.iter_decimal()` で `(ts, eq)` 反復、または `iter_float()` を `EquityCurve` に追加して直接 float 取得 |
+| `src/alpha_factory/stage_gate.py` (L116 typed param / L886 dataclass field / L152 canonical 変換呼出 / L1014,1045,1315,1330,1403,1429,1457,1844,1867,1967,1995,2018 res.equity_curve pass・代入 / L1429 `fold_equity` / L1995 `stress_equity` ローカル ref / L2168 `sidecar.equity_curve`) | `equity_curve: list[tuple[datetime, Decimal]]` 型注釈・dataclass フィールド / pass・代入多数 | typed param と dataclass フィールド（L886）を `EquityCurve` に。pass-through・代入箇所は型変更のみ。`equity_curve_to_bar_equity_series` 経由（L152）は canonical_adapter 追従でカバー。`fold_equity` / `stress_equity` / `sidecar.equity_curve` も `EquityCurve` 型として扱う |
+| `src/backtest/ensemble.py` (L43 `StrategyRun.equity_curve` field / L119,125 / combined_equity 構築 L133-136 / L144 `_returns`) | 各 run の `result.equity_curve` を `compute_metrics` へ / `StrategyRun` フィールド / `combined_equity` を `(ts, total)` で自前構築 / `_returns` private helper | `StrategyRun.equity_curve` の型注釈を `EquityCurve` に。`combined_equity` は **各 run の `equity_scaled[:length]` を Python `int` で要素和 → `abs <= 2^63-1` を範囲検証 → `np.int64` 配列化**して `EquityCurve` を直接構築（Codex 詳細 R1 [Warning] 反映: numpy int64 同士の `+` は silent overflow するため checked add 必須）。**合算前に各 run の `epoch_ns[:length]` が完全一致することを検証し、不一致は fail-closed**（Codex 詳細 R2 [Suggestion] 反映: 現行は index 合算で timestamp 一致を暗黙前提にしているため明示検証する）。`epoch` は `runs[0]` の先頭 length 分。`_returns` も `EquityCurve` 対応 |
+| `src/backtest/grid_search.py` (L69) | `compute_metrics(result.trades, result.equity_curve)` | pass-through、型変更のみ |
+| `src/backtest/walk_forward.py` (L116,128) | `compute_metrics([], [])` / `compute_metrics(result.trades, result.equity_curve)` | `compute_metrics([], [])` の空 list を `EquityCurve.empty()` に。pass-through |
+| `src/backtest/report.py` (L123) | `compute_metrics(result.trades, result.equity_curve)` | pass-through、型変更のみ |
+| `src/backtest/__init__.py` | `BacktestResult` 等の re-export | export 追加（`EquityCurve` / `EquityCurveBuilder`） |
+
+### 接続漏れ防止（禁止事項 8）
+- 型変更の追従漏れは `uv run mypy src/` で機械検出する（`BacktestResult.equity_curve` の型が変わるため、`list` 前提の箇所は型エラーになる）。
+- `_returns` 等 `equity_curve` を引数に取る private helper（`ensemble.py`）も追従対象。grep `equity_curve` で全数確認済み（概念設計「前提検証」参照）。
+- `tests/` 配下で `equity_curve` を `list[tuple]` 前提で構築している箇所も追従（`EquityCurve.from_decimal_points` を提供してテスト移行を容易にする）。
+
+### テスト計画（施策 4）
+- 各 consumer の既存テストが `EquityCurve` 入力で pass することを確認
+- `tests/backtest/test_ensemble.py`: `combined_equity` が scaled-int 和で構築され、旧 `(ts, Decimal)` 和経路と `compute_metrics` 出力一致（shadow）
+- `tests/alpha_factory/test_canonical_adapter.py`: `equity_curve_to_bar_equity_series` が `EquityCurve` 入力で旧 list 入力と同一 `BarEquitySeries` を返す
+
+### リスク（施策 4）
+- `stage_gate.py` の access 箇所が多い（13 箇所）。typed param と pass-through が大半だが、`fold_equity` / `stress_equity` のローカル ref 経路を見落とすと型エラー → mypy で検出。
+- テストコードの広範な追従が必要 → `from_decimal_points` で移行コストを下げる。
+
+---
+
+## 施策 5: shadow test + 効果検証
+
+### shadow test（施策 3 に内包、再掲）
+旧表現（`list[tuple[datetime, Decimal]]`）と新表現（`EquityCurve`）を同一入力で二重計算し、`compute_metrics` の全出力 + serialized 表現が完全一致。
+
+### 決定論ゲート（L1/L2）
+- 同一 seed・同一 config・同一 dataset で **改修前後の archive** を比較し、`max_drawdown_pct` / stage A・B・C pass-fail / live_criteria 判定 / `trade_sharpe_raw` が完全一致。
+- **archive diff の比較規約（Codex 詳細 R1/R2 [Warning] 反映）**: **raw Parquet file bytes は比較対象にしない**（Parquet writer metadata / row group 差分で偽陽性になるため）。改修前後の archive を **同一ソートキー（`(lane_id, generation, genome_name)`）でソートした canonical row stream**（または既存 serializer の正規化出力）に変換し、その上で値比較 / byte-level 比較して差分 0 を合格条件とする。L2 row-order 決定論の検証手順を曖昧にしない。
+- **NaN / None 比較規約（Codex 詳細 R1 [Warning] 反映）**: shadow test / serialized parity test のヘルパで以下を固定する — (a) NaN 同値規約: `NaN == NaN` を True 扱いする正規化（`"<nan>"` トークン化）、(b) Decimal 文字列化規約: 比較は `compute_metrics` 出力の数値 equality と、summary/archive に出る既存 serializer 通過後の文字列の**両方**で行う（`Decimal("1.23")` vs `Decimal("1.2300")` の表現差を検出）、(c) `None` フィールドは型・値ともに一致を要求。
+- 既存の `tests/scripts/test_run_ga_parallel.py` の決定論テストが改修後も pass。
+
+### 効果検証（Codex 概念 R2 [Suggestion] 反映 — 同一 artifact に集約）
+`devnotes/20260515-0827-backtest-decimal-churn/` に計測レポートを残す。同一 seed・同一 dataset・同一 worker 数で改修前後それぞれ **n ≥ 5 の worker lifecycle**:
+- `median / p95 per-worker RSS`（`--mem-profile` または `summary.json` の `max_rss_mb_per_worker`）
+- `swap 発生有無`
+- `genome/s`（throughput）
+- `stage pass-fail 完全一致`（決定論ゲート）
+- `archive serialized diff`（serialized parity）
+
+→ retained 小オブジェクトは減るが `compute_metrics` の transient decode churn は残る点も観測し、残差が大きければ概念設計の「受け入れ条件」に従い Phase 1（`MockBroker` 内部 churn 計測）の起票を判断。
+
+---
+
+## 実装モード
+
+| 項目 | 内容 |
+|------|------|
+| 推奨モード | **standalone** |
+| 判断根拠 | `BacktestResult.equity_curve` の公開型変更が `backtest/` + `alpha_factory/` + `ga/` の 9 ファイル + テスト群に波及。複数コンポーネント協調変更で autopilot の単一施策自動選定には不向き。施策 1→2→3→4 は順序依存（型定義→producer→consumer 中核→consumer 周辺）で incremental に分割実装するが、タスク全体は standalone 管理 |
+| 競合リスク | `backtest/engine.py` / `metrics.py` / `alpha_factory/stage_gate.py` は他タスクも触る中核。実装中は worktree 隔離、`maxtasksperchild`（実装済み・別経路）とは非干渉 |
+| 想定実装時間 | 中〜長（施策 1: 短、施策 2: 短、施策 3: 中、施策 4: 中〜長＝consumer 追従とテスト移行、施策 5: 中） |
+
+## 実装順序
+
+1. 施策 1（`EquityCurve` 型 + encode/decode + guard）→ テスト
+2. 施策 2（`engine.py` producer）→ テスト
+3. 施策 3（`compute_metrics`）→ **shadow test + serialized parity test**
+4. 施策 4（consumer 追従）→ `mypy` で接続漏れ全消し + 各 consumer テスト
+5. 施策 5（決定論ゲート + 効果検証 n≥5）→ 計測レポートを devnotes へ
