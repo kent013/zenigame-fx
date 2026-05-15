@@ -14,7 +14,6 @@ zenigame-fx Alpha Factory の改善タスク一覧。
 | T101 | Run 71/63 系統 warmstart 検討 (= 再現性検証) | ga-architecture | warmstart pool 注入 | Low | standalone | [設計](devnotes/20260513-1915-todo-run71-63-warmstart/) | 2026-05-13 19:15 |
 | T102 | Phase 2 統合 Step 3-7 (BCEvaluationResult / NSGA-II / CPPS / warmstart 配線) | ga-architecture | Phase 2 配線 5 sub-PR | Medium | standalone | [設計](devnotes/20260513-1915-todo-phase2-integration-step3-7/) | 2026-05-13 19:15 |
 | T103 | primitive 拡張 (zenigame 82 primitive 相当の FX 用拡充、 撤退条件 trigger) | primitives | primitive 30-50 個移植 | Low | standalone | [設計](devnotes/20260513-1915-todo-primitive-expansion/) | 2026-05-13 19:15 |
-| T105 | backtest hot path の Decimal churn 削減 | infrastructure | backtest の Decimal churn 削減 | Medium | standalone | [設計](devnotes/20260515-0827-backtest-decimal-churn/) | 2026-05-15 08:11 |
 
 ## Conditional
 

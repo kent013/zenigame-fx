@@ -97,6 +97,7 @@
 | T093 | PR3: canonical_metrics / mission_inf_gap shadow 配線 | stage-gate | Medium | 2026-05-13 15:09 | PR3-T093 |
 | T094 | PR4: legacy_pnl_smoke fitness opt-in + anti-luck guard | stage-gate | High | 2026-05-13 18:28 | PR4-T094 |
 | T099 | PR5: Stage B gate pfr_only opt-in A/B | stage-gate | High | 2026-05-13 21:05 | - |
+| T105 | backtest hot path の Decimal churn 削減 | infrastructure | Medium | 2026-05-15 10:57 | - |
 
 ## Obsoleted
 
