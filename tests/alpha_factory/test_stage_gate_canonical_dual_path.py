@@ -25,6 +25,7 @@ from src.alpha_factory.stage_gate import (
     StageGateConfig,
     _try_evaluate_canonical_five_safe,
 )
+from src.backtest.equity_curve import EquityCurve
 from src.broker.orders import Trade as BrokerTrade
 from src.domain.price import Ohlc, PriceBar
 
@@ -108,10 +109,12 @@ def test_dual_path_canonical_skipped_on_naive_datetime(
     naive_exit = datetime(2026, 1, 5, 12, 0)
     trades = [_bt(entry_time=naive_entry, exit_time=naive_exit)]
     bars = _make_bars_60d()
-    equity_curve = [
-        (datetime(2026, 1, 1, tzinfo=UTC), Decimal("1000000")),
-        (datetime(2026, 1, 2, tzinfo=UTC), Decimal("1000100")),
-    ]
+    equity_curve = EquityCurve.from_decimal_points(
+        [
+            (datetime(2026, 1, 1, tzinfo=UTC), Decimal("1000000")),
+            (datetime(2026, 1, 2, tzinfo=UTC), Decimal("1000100")),
+        ]
+    )
 
     result = _try_evaluate_canonical_five_safe(
         trades=trades,
@@ -138,7 +141,9 @@ def test_dual_path_disabled_mode_skips_canonical() -> None:
     """phase2_canonical_metrics_mode=disabled で canonical 計算 skip (None 返り)."""
     trades = _make_trades_50()
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
 
     result = _try_evaluate_canonical_five_safe(
         trades=trades,
@@ -161,7 +166,9 @@ def test_dual_path_empty_trades_returns_canonical_with_reason_codes() -> None:
     """trades 空でも evaluate_canonical_five が no-raise で reason 含む結果を返す."""
     trades: list[BrokerTrade] = []
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
 
     result = _try_evaluate_canonical_five_safe(
         trades=trades,
@@ -263,7 +270,9 @@ def test_log_canonical_dual_path_includes_interpretation_note(
 
     trades = _make_trades_50()
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
 
     canonical = _try_evaluate_canonical_five_safe(
         trades=trades,
@@ -620,7 +629,9 @@ def test_stage_b_is_canonical_disabled_mode_skips_calculation() -> None:
     """phase2_canonical_metrics_mode='disabled' で canonical 計算 skip (= None 返り)."""
     trades: list[BrokerTrade] = []
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
     result = _try_evaluate_canonical_five_safe(
         trades=trades, equity_curve=equity_curve, bars=bars,
         live_criteria=_make_default_live_criteria(),
@@ -672,7 +683,9 @@ def test_stage_b_is_canonical_succeeds_for_18m_window(
 def test_stage_b_is_canonical_handles_empty_trades_gracefully() -> None:
     """trades=[] でも _try_evaluate_canonical_five_safe が non-raise で動作."""
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
     result = _try_evaluate_canonical_five_safe(
         trades=[], equity_curve=equity_curve, bars=bars,
         live_criteria=_make_default_live_criteria(),
@@ -692,7 +705,9 @@ def test_stage_b_is_canonical_handles_single_trade() -> None:
             exit_time=base + timedelta(hours=12)),
     ]
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
     result = _try_evaluate_canonical_five_safe(
         trades=trades, equity_curve=equity_curve, bars=bars,
         live_criteria=_make_default_live_criteria(),
@@ -832,7 +847,9 @@ def test_stage_c_base_canonical_disabled_mode_skips_calculation() -> None:
     """phase2_canonical_metrics_mode='disabled' (= Stage C window_days=60) で skip."""
     trades: list[BrokerTrade] = []
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
     result = _try_evaluate_canonical_five_safe(
         trades=trades, equity_curve=equity_curve, bars=bars,
         live_criteria=_make_default_live_criteria(),
@@ -880,7 +897,9 @@ def test_stage_c_base_canonical_succeeds_for_60d_holdout(
 def test_stage_c_base_canonical_handles_empty_trades_gracefully() -> None:
     """Stage C base: trades=[] (= holdout で 0 trade) でも non-raise."""
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
     result = _try_evaluate_canonical_five_safe(
         trades=[], equity_curve=equity_curve, bars=bars,
         live_criteria=_make_default_live_criteria(),
@@ -899,7 +918,9 @@ def test_stage_c_base_canonical_handles_single_trade() -> None:
             exit_time=base + timedelta(hours=12)),
     ]
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
     result = _try_evaluate_canonical_five_safe(
         trades=trades, equity_curve=equity_curve, bars=bars,
         live_criteria=_make_default_live_criteria(),
@@ -922,7 +943,9 @@ def _golden_50_trades_fixture() -> tuple[list[BrokerTrade], list[PriceBar], list
         exit = base + timedelta(days=i // 10, hours=12, minutes=i % 10)
         trades.append(_bt(pid=i, entry_time=entry, exit_time=exit))
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
     return trades, bars, equity_curve
 
 
@@ -934,7 +957,9 @@ def _golden_single_trade_fixture() -> tuple[list[BrokerTrade], list[PriceBar], l
             exit_time=base + timedelta(hours=12)),
     ]
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
     return trades, bars, equity_curve
 
 
@@ -984,7 +1009,9 @@ def test_stage_b_is_canonical_golden_success_genome() -> None:
 def test_stage_b_is_canonical_golden_failure_genome() -> None:
     """Stage B IS: 失敗群 (= 0 trade) で feasibility=False + golden 値一致."""
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
     result = _try_evaluate_canonical_five_safe(
         trades=[], equity_curve=equity_curve, bars=bars,
         live_criteria=_make_default_live_criteria(),
@@ -1027,7 +1054,9 @@ def test_stage_c_base_canonical_golden_success_genome() -> None:
 def test_stage_c_base_canonical_golden_failure_genome() -> None:
     """Stage C base: 失敗群 (= 0 trade) で fixture-locked 値一致."""
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
     result = _try_evaluate_canonical_five_safe(
         trades=[], equity_curve=equity_curve, bars=bars,
         live_criteria=_make_default_live_criteria(),
@@ -1317,7 +1346,9 @@ def test_stage_b_per_fold_canonical_disabled_mode_skips_calculation() -> None:
     """
     trades: list[BrokerTrade] = []
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
     result = _try_evaluate_canonical_five_safe(
         trades=trades, equity_curve=equity_curve, bars=bars,
         live_criteria=_make_default_live_criteria(),
@@ -1414,7 +1445,9 @@ def test_stage_b_per_fold_canonical_golden_first_fold_succeeds() -> None:
         exit = base + timedelta(days=i // 10, hours=12, minutes=i % 10)
         trades.append(_bt(pid=i, entry_time=entry, exit_time=exit))
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
     result = _try_evaluate_canonical_five_safe(
         trades=trades, equity_curve=equity_curve, bars=bars,
         live_criteria=_make_default_live_criteria(),
@@ -1931,7 +1964,9 @@ def test_stage_c_stress_canonical_golden_first_evaluation_succeeds() -> None:
         exit = base + timedelta(days=i // 10, hours=12, minutes=i % 10)
         trades.append(_bt(pid=i, entry_time=entry, exit_time=exit))
     bars = _make_bars_60d()
-    equity_curve = [(b.bar_time, Decimal("1000000")) for b in bars]
+    equity_curve = EquityCurve.from_decimal_points(
+        [(b.bar_time, Decimal("1000000")) for b in bars]
+    )
     result = _try_evaluate_canonical_five_safe(
         trades=trades, equity_curve=equity_curve, bars=bars,
         live_criteria=_make_default_live_criteria(),

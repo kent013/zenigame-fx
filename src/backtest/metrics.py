@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 import structlog
 
+from src.backtest.equity_curve import EquityCurve, decode_equity
 from src.broker.orders import Trade
 
 logger = structlog.get_logger(__name__)
@@ -43,10 +44,13 @@ class BacktestMetrics:
     sharpe_calc_version: str = SHARPE_CALC_VERSION_V2
 
 
-def _bar_returns(equity_curve: list[tuple[datetime, Decimal]]) -> list[float]:
+def _bar_returns(equity_curve: EquityCurve) -> list[float]:
+    # T105: equity_curve は EquityCurve。iter_decimal() で transient な
+    # (datetime, Decimal) を復元し、現行と同一の Decimal 演算経路を保つ
+    # (v1 bar-level sharpe の値を bit-exact 維持)。
     rets: list[float] = []
     prev: Decimal | None = None
-    for _, eq in equity_curve:
+    for _, eq in equity_curve.iter_decimal():
         if prev is not None and prev > 0:
             rets.append(float((eq - prev) / prev))
         prev = eq
@@ -128,11 +132,12 @@ def _sortino(returns: list[float], periods_per_year: int = BARS_PER_YEAR_M1) -> 
     return (mean / dstd) * math.sqrt(periods_per_year)
 
 
-def _calmar(equity_curve: list[tuple[datetime, Decimal]], max_dd_pct: Decimal) -> Decimal | None:
+def _calmar(equity_curve: EquityCurve, max_dd_pct: Decimal) -> Decimal | None:
     if len(equity_curve) < 2 or max_dd_pct == 0:
         return None
-    start_time, start_equity = equity_curve[0]
-    end_time, end_equity = equity_curve[-1]
+    # T105: 端点 2 点のみ decode で Decimal/datetime 復元 → 現行と同一演算経路。
+    start_time, start_equity = equity_curve.time_at(0), equity_curve.equity_at(0)
+    end_time, end_equity = equity_curve.time_at(-1), equity_curve.equity_at(-1)
     if start_equity <= 0:
         return None
     period_days = (end_time - start_time).total_seconds() / 86400
@@ -146,7 +151,7 @@ def _calmar(equity_curve: list[tuple[datetime, Decimal]], max_dd_pct: Decimal) -
 
 def compute_metrics(
     trades: list[Trade],
-    equity_curve: list[tuple[datetime, Decimal]],
+    equity_curve: EquityCurve,
     *,
     trade_count_min_for_sharpe: int = DEFAULT_TRADE_COUNT_MIN_FOR_SHARPE,
 ) -> BacktestMetrics:
@@ -164,19 +169,37 @@ def compute_metrics(
     total_win = sum(wins, Decimal(0))
     profit_factor: Decimal | None = None if total_loss_abs == 0 else total_win / total_loss_abs
 
-    max_drawdown = Decimal(0)
-    max_drawdown_pct = Decimal(0)
-    peak = Decimal(0)
-    for _, equity in equity_curve:
-        if equity > peak:
-            peak = equity
-        if peak > 0:
-            dd = peak - equity
-            if dd > max_drawdown:
-                max_drawdown = dd
-                max_drawdown_pct = dd / peak * Decimal(100)
+    # T105: peak / drawdown を scaled-int64 上の整数演算で計算する。整数比較・
+    # 整数減算のため現行 Decimal ループと bit-exact。比率 (max_drawdown_pct)
+    # のみ最大 dd 確定後に decode → 現行と同一の Decimal 演算経路で算出する。
+    # tie-break: `dd > max_dd` の strict 比較で「最初に最大 dd を達成した点の
+    # peak」を採る現行挙動を維持。
+    max_dd_scaled = 0
+    max_dd_peak_scaled = 0
+    peak_scaled = 0
+    for equity_scaled_raw in equity_curve.equity_scaled:
+        # np.int64 のままだと減算が silent wrap し得るため Python int に変換し、
+        # 以降の peak / dd 演算は全て任意精度 int で行う (Codex impl-review
+        # Round 1 [Warning] 反映)。
+        equity_scaled = int(equity_scaled_raw)
+        if equity_scaled > peak_scaled:
+            peak_scaled = equity_scaled
+        if peak_scaled > 0:
+            dd_scaled = peak_scaled - equity_scaled
+            if dd_scaled > max_dd_scaled:
+                max_dd_scaled = dd_scaled
+                max_dd_peak_scaled = peak_scaled
+    max_drawdown = decode_equity(max_dd_scaled)
+    if max_dd_peak_scaled > 0:
+        max_drawdown_pct = (
+            decode_equity(max_dd_scaled)
+            / decode_equity(max_dd_peak_scaled)
+            * Decimal(100)
+        )
+    else:
+        max_drawdown_pct = Decimal(0)
 
-    final_equity = equity_curve[-1][1] if equity_curve else Decimal(0)
+    final_equity = equity_curve.final_equity()
 
     rets = _bar_returns(equity_curve)
     sharpe_f = _sharpe(rets)

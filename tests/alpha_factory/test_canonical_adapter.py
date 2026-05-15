@@ -27,9 +27,9 @@ from src.alpha_factory.canonical_adapter import (
     trade_to_trade_record,
 )
 from src.alpha_factory.canonical_metrics import (
-    BarEquityInvalidError,
     SessionBucket,
 )
+from src.backtest.equity_curve import EquityCurve
 from src.broker.orders import Trade as BrokerTrade
 from src.domain.price import Ohlc, PriceBar
 
@@ -151,12 +151,14 @@ def test_trade_to_trade_record_business_day_index_monotone_within_period() -> No
 
 
 def test_equity_curve_to_bar_equity_series_basic() -> None:
-    """equity_curve (timestamp UTC, equity Decimal) → BarEquitySeries 変換."""
-    equity_curve = [
-        (datetime(2026, 1, 5, 12, 0, tzinfo=UTC), Decimal("1000000")),
-        (datetime(2026, 1, 5, 12, 1, tzinfo=UTC), Decimal("1000100")),
-        (datetime(2026, 1, 5, 12, 2, tzinfo=UTC), Decimal("999900")),
-    ]
+    """equity_curve (EquityCurve) → BarEquitySeries 変換."""
+    equity_curve = EquityCurve.from_decimal_points(
+        [
+            (datetime(2026, 1, 5, 12, 0, tzinfo=UTC), Decimal("1000000")),
+            (datetime(2026, 1, 5, 12, 1, tzinfo=UTC), Decimal("1000100")),
+            (datetime(2026, 1, 5, 12, 2, tzinfo=UTC), Decimal("999900")),
+        ]
+    )
     series = equity_curve_to_bar_equity_series(equity_curve)
     assert len(series.points) == 3
     assert series.points[0].equity == 1000000.0
@@ -168,13 +170,22 @@ def test_equity_curve_to_bar_equity_series_basic() -> None:
 
 
 def test_equity_curve_to_bar_equity_series_strict_monotone_violation_raises() -> None:
-    """equity_curve に重複 / 逆順 timestamp があると BarEquityInvalidError raise."""
-    bad_curve = [
-        (datetime(2026, 1, 5, 12, 0, tzinfo=UTC), Decimal("1000000")),
-        (datetime(2026, 1, 5, 12, 0, tzinfo=UTC), Decimal("1000100")),  # 重複
-    ]
-    with pytest.raises(BarEquityInvalidError, match="strictly monotone"):
-        equity_curve_to_bar_equity_series(bad_curve)
+    """重複 / 逆順 timestamp は EquityCurve 構築時点で fail-closed する (T105)。
+
+    旧: equity_curve_to_bar_equity_series が BarEquityInvalidError を raise。
+    新: EquityCurve.__post_init__ の strict 昇順検証が EquityCurveError を raise
+    し、不正な curve は equity_curve_to_bar_equity_series に到達しない
+    (= 不変条件の検証が前段に移り fail-closed が早まった)。
+    """
+    from src.backtest.equity_curve import EquityCurveError
+
+    with pytest.raises(EquityCurveError, match="strictly increasing"):
+        EquityCurve.from_decimal_points(
+            [
+                (datetime(2026, 1, 5, 12, 0, tzinfo=UTC), Decimal("1000000")),
+                (datetime(2026, 1, 5, 12, 0, tzinfo=UTC), Decimal("1000100")),
+            ]
+        )
 
 
 # --- test 6: business_day_universe_from_bars all buckets --------------------

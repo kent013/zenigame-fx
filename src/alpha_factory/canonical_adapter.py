@@ -32,7 +32,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import date, datetime
-from decimal import Decimal
 from typing import Final
 
 from src.alpha_factory.canonical_metrics import (
@@ -41,6 +40,7 @@ from src.alpha_factory.canonical_metrics import (
     SessionBucket,
     TradeRecord,
 )
+from src.backtest.equity_curve import EquityCurve
 from src.backtest.session_block import (
     SessionBlockBucket,
     compute_bucket_for_bar,
@@ -131,13 +131,13 @@ def trade_to_trade_record(broker_trade: BrokerTrade) -> TradeRecord:
 
 
 def equity_curve_to_bar_equity_series(
-    equity_curve: list[tuple[datetime, Decimal]],
+    equity_curve: EquityCurve,
 ) -> BarEquitySeries:
     """backtest engine の equity_curve を canonical BarEquitySeries に変換.
 
     Args:
-        equity_curve: list[(timestamp_utc, equity)]、 backtest engine の出力契約で
-            時系列順 / 重複 timestamp なし / 全 UTC-aware が保証されている。
+        equity_curve: backtest engine の出力 (T105: EquityCurve)。時系列順 /
+            重複 timestamp なし / 全 UTC-aware が保証されている。
 
     Returns:
         BarEquitySeries (= __post_init__ で UTC-aware / strict monotone /
@@ -147,7 +147,8 @@ def equity_curve_to_bar_equity_series(
         BarEquityInvalidError: invariant 違反 (= naive timestamp / 重複 / 逆順 / NaN)。
     """
     points = tuple(
-        BarEquityPoint(timestamp_utc=ts, equity=float(eq)) for ts, eq in equity_curve
+        BarEquityPoint(timestamp_utc=ts, equity=float(eq))
+        for ts, eq in equity_curve.iter_decimal()
     )
     return BarEquitySeries(points=points)
 

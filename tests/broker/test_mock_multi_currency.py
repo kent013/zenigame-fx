@@ -26,6 +26,7 @@ from src.alpha_factory.cross_pair import (
     evaluate_cross_pair,
 )
 from src.backtest.engine import BacktestConfig, run_backtest
+from src.backtest.equity_curve import EquityCurve
 from src.backtest.metrics import compute_metrics
 from src.broker import InstrumentMeta, MockBroker, OrderSignal
 from src.domain.price import Ohlc, PriceBar
@@ -411,10 +412,11 @@ def test_scale_invariance_equity_returns_s3(
         meta=meta, bars=bars, cash_scale=10, units_scale=10
     )
 
-    def _returns(eq_curve: list[tuple[datetime, Decimal]]) -> list[float]:
+    def _returns(eq_curve: EquityCurve) -> list[float]:
+        # T105: equity_curve は EquityCurve。iter_decimal() で復元して反復。
         rets: list[float] = []
         prev: Decimal | None = None
-        for _, eq in eq_curve:
+        for _, eq in eq_curve.iter_decimal():
             if prev is not None and prev > 0:
                 rets.append(float((eq - prev) / prev))
             prev = eq

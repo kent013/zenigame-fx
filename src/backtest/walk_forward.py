@@ -9,6 +9,7 @@ from typing import Any, Literal
 import structlog
 
 from src.backtest.engine import BacktestConfig, run_backtest
+from src.backtest.equity_curve import EquityCurve
 from src.backtest.grid_search import GridSearchConfig, run_grid_search
 from src.backtest.metrics import BacktestMetrics, compute_metrics
 from src.broker.mock import InstrumentMeta, MockBroker
@@ -113,7 +114,7 @@ def _run_test(
     test_bars = _slice_bars(bars, slice_.test_start, slice_.test_end)
     if not test_bars:
         logger.warning("walk_forward.test_empty", fold=slice_.index)
-        return compute_metrics([], [])
+        return compute_metrics([], EquityCurve.empty())
     bconfig = BacktestConfig(
         instrument=config.instrument,
         start=slice_.test_start,

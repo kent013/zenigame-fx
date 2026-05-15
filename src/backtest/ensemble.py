@@ -5,9 +5,11 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+import numpy as np
 import structlog
 
 from src.backtest.engine import BacktestConfig, run_backtest
+from src.backtest.equity_curve import EquityCurve, decode_equity, encode_equity
 from src.backtest.metrics import BacktestMetrics, compute_metrics
 from src.broker.mock import InstrumentMeta, MockBroker
 from src.broker.orders import Trade
@@ -40,7 +42,7 @@ class StrategyRun:
     spec: EnsembleSpec
     capital_allocated: Decimal
     metrics: BacktestMetrics
-    equity_curve: list[tuple[datetime, Decimal]]
+    equity_curve: EquityCurve  # T105: lossless numpy 表現
     trades: list[Trade]
 
 
@@ -48,7 +50,7 @@ class StrategyRun:
 class EnsembleResult:
     config: EnsembleConfig
     per_strategy: list[StrategyRun] = field(default_factory=list)
-    combined_equity: list[tuple[datetime, Decimal]] = field(default_factory=list)
+    combined_equity: EquityCurve = field(default_factory=EquityCurve.empty)
     combined_metrics: BacktestMetrics | None = None
     correlation: dict[tuple[str, str], float | None] = field(default_factory=dict)
 
@@ -82,10 +84,12 @@ def _pearson(a: list[float], b: list[float]) -> float | None:
     return num / (denom_sq**0.5)
 
 
-def _returns(equity: list[tuple[datetime, Decimal]]) -> list[float]:
+def _returns(equity: EquityCurve) -> list[float]:
+    # T105: EquityCurve.iter_decimal() で transient な Decimal を復元し、
+    # 現行と同一の Decimal 演算経路を保つ。
     rets: list[float] = []
     prev: Decimal | None = None
-    for _, eq in equity:
+    for _, eq in equity.iter_decimal():
         if prev is not None and prev > 0:
             rets.append(float((eq - prev) / prev))
         prev = eq
@@ -128,13 +132,28 @@ def run_ensemble(
         )
 
     # 合成 equity: 同じタイムスタンプで合算（全 run は同じ bar 列から生成されるので timestamps 一致）
-    combined_equity: list[tuple[datetime, Decimal]] = []
+    # T105: scaled-int64 で checked-add 構築する。numpy int64 同士の + は silent
+    # overflow するため Python int で要素和 → int64 範囲検証 → np.int64 配列化。
+    # timestamp 一致を前提にしているため明示検証し不一致は fail-closed。
+    combined_equity: EquityCurve = EquityCurve.empty()
     if runs:
         length = min(len(r.equity_curve) for r in runs)
+        base_epoch = np.asarray(runs[0].equity_curve.epoch_ns[:length])
+        for r in runs[1:]:
+            if not np.array_equal(
+                np.asarray(r.equity_curve.epoch_ns[:length]), base_epoch
+            ):
+                raise ValueError(
+                    "ensemble combined_equity: run timestamps do not align"
+                )
+        combined_scaled = np.empty(length, dtype=np.int64)
         for i in range(length):
-            ts = runs[0].equity_curve[i][0]
-            total = sum((r.equity_curve[i][1] for r in runs), Decimal(0))
-            combined_equity.append((ts, total))
+            total = sum(
+                int(r.equity_curve.equity_scaled[i]) for r in runs
+            )
+            # encode_equity の guard を再利用して int64 範囲を fail-closed 検証
+            combined_scaled[i] = encode_equity(decode_equity(total))
+        combined_equity = EquityCurve(base_epoch, combined_scaled)
 
     combined_trades = [t for r in runs for t in r.trades]
     combined_trades.sort(key=lambda t: t.exit_time)

@@ -7,6 +7,11 @@ from decimal import Decimal
 
 import structlog
 
+from src.backtest.equity_curve import (
+    EquityCurve,
+    EquityCurveBuilder,
+    validate_equity_scale_contract,
+)
 from src.backtest.session_block import SessionBlock, aggregate_session_blocks
 from src.broker.mock import MockBroker
 from src.broker.orders import Trade
@@ -76,7 +81,11 @@ class BacktestConfig:
 class BacktestResult:
     config: BacktestConfig
     trades: list[Trade]
-    equity_curve: list[tuple[datetime, Decimal]] = field(default_factory=list)
+    # T105: equity_curve は lossless numpy 表現 (EquityCurve)。
+    # 旧 list[tuple[datetime, Decimal]] は 1 genome Stage B 評価で約 90 万個の
+    # 小オブジェクトを backtest 寿命中 retain し pymalloc アリーナを断片化させて
+    # いた。@ref: devnotes/20260515-0827-backtest-decimal-churn/
+    equity_curve: EquityCurve = field(default_factory=EquityCurve.empty)
     # T070: cascade port v2 Phase 2 配線. session_blocks は run_backtest 内で 1 回
     # 計算し、 caller は読むのみ (再計算禁止、 概念設計 §6.4 SSOT). default_factory で
     # backward-compat を維持 (= 既存 caller への影響なし).
@@ -112,6 +121,10 @@ def run_backtest(
                 "or ensure bars span multiple UTC dates."
             )
 
+    # T105: equity の scaled-int 表現 (SCALE 契約) が config 前提で成立するか
+    # backtest 開始前に検証する (holding cost 有効化時は fail-closed)。
+    validate_equity_scale_contract(config.holding_cost_per_day_bps)
+
     # Strategy が prepare() を提供する場合、backtest 全バーを 1 度だけ渡して
     # primitive 配列を事前計算させる (DslStrategy.prepare 参照: O(N²) → O(N))。
     # Live feed / 単純 Strategy は prepare を持たず、ここは NoOp になる。
@@ -122,7 +135,9 @@ def run_backtest(
     broker.deposit(config.initial_cash)
     broker.set_spread_filter(config.max_spread_bps)
 
-    equity_curve: list[tuple[datetime, Decimal]] = []
+    # T105: equity_curve を事前確保 numpy バッファ (EquityCurveBuilder) で構築。
+    # bar 数は bars_list で確定済み → index 代入で埋め、小オブジェクトを蓄積しない。
+    equity_builder = EquityCurveBuilder(len(bars_list))
 
     # ループ前に集計カウンタを初期化（per-bar log 削除に伴いサマリ集計に切り替え、T055）
     session_close_drop_open_count: int = 0
@@ -177,7 +192,7 @@ def run_backtest(
             broker.close_all(bar, reason="eod")
 
         # 7. equity curve 記録
-        equity_curve.append((bar.bar_time, broker.snapshot().equity))
+        equity_builder.append(bar.bar_time, broker.snapshot().equity)
 
     # 保険として端数決済
     if broker.open_positions and bars_list:
@@ -207,6 +222,6 @@ def run_backtest(
     return BacktestResult(
         config=config,
         trades=broker.trades,
-        equity_curve=equity_curve,
+        equity_curve=equity_builder.build(),
         session_blocks=session_blocks,
     )

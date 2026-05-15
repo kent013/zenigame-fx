@@ -47,6 +47,7 @@ from src.alpha_factory.canonical_metrics import (
 from src.alpha_factory.mission_inf_gap import evaluate_mission_inf_gap
 from src.alpha_factory.walk_forward import make_wf_folds
 from src.backtest.engine import BacktestConfig, run_backtest
+from src.backtest.equity_curve import EquityCurve
 from src.backtest.metrics import BacktestMetrics, compute_metrics
 from src.broker.mock import InstrumentMeta, MockBroker
 from src.broker.orders import Trade as BrokerTrade
@@ -113,7 +114,7 @@ def _build_canonical_thresholds_for_window(
 def _try_evaluate_canonical_five_safe(
     *,
     trades: list[BrokerTrade],
-    equity_curve: list[tuple[datetime, Decimal]],
+    equity_curve: EquityCurve,
     bars: list[PriceBar],
     live_criteria: Mapping[str, float | int],
     window_days: int,
@@ -883,7 +884,7 @@ class _PairSidecarInputs:
 
     bars: list[PriceBar]
     trades: list[BrokerTrade]
-    equity_curve: list[tuple[datetime, Decimal]]
+    equity_curve: EquityCurve
     bt: BacktestMetrics
 
 
@@ -1383,7 +1384,7 @@ def evaluate_stage_b(
         # (= 別 try ブロックに渡す、 acceptance D4 物理隔離契約)
         fold_bt: BacktestMetrics | None = None
         fold_trades: list[BrokerTrade] | None = None
-        fold_equity: list[tuple[datetime, Decimal]] | None = None
+        fold_equity: EquityCurve | None = None
         # === 既存 legacy fold 計算 (= fold_sharpe / fold_reason 確定、 完全不変) ===
         try:
             if _aux_supports_with_aux:
@@ -1956,7 +1957,7 @@ def evaluate_stage_c(
         # acceptance D4 物理隔離契約)
         stress_bt: BacktestMetrics | None = None
         stress_trades: list[BrokerTrade] | None = None
-        stress_equity: list[tuple[datetime, Decimal]] | None = None
+        stress_equity: EquityCurve | None = None
         # === 既存 legacy stress 計算 (= stress_payload / reasons 確定、 完全不変) ===
         try:
             strategy = DslStrategy(genome, primitive_evaluator)

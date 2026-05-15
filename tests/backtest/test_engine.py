@@ -399,6 +399,7 @@ def test_F4_default_session_blocks_is_empty_tuple() -> None:
     既存 caller が session_blocks を渡さない場合の default_factory 検証.
     """
     from src.backtest.engine import BacktestConfig, BacktestResult
+    from src.backtest.equity_curve import EquityCurve
 
     config = BacktestConfig(
         instrument="USD_JPY",
@@ -408,5 +409,7 @@ def test_F4_default_session_blocks_is_empty_tuple() -> None:
         leverage=10,
         session_close_utc_hours=frozenset({23}),
     )
-    result = BacktestResult(config=config, trades=[], equity_curve=[])
+    result = BacktestResult(
+        config=config, trades=[], equity_curve=EquityCurve.empty()
+    )
     assert result.session_blocks == ()

@@ -58,7 +58,10 @@ def test_run_ensemble_produces_per_strategy_and_combined() -> None:
     assert len(result.combined_equity) == len(bars)
     assert result.combined_metrics is not None
     # 2 戦略の equity 合算が総資金 + 合算 PnL に一致
-    per_equity_sum = sum(r.equity_curve[-1][1] for r in result.per_strategy)
-    assert result.combined_equity[-1][1] == per_equity_sum
+    per_equity_sum = sum(
+        (r.equity_curve.final_equity() for r in result.per_strategy),
+        Decimal(0),
+    )
+    assert result.combined_equity.final_equity() == per_equity_sum
     # 相関行列は 1 ペアのみ
     assert len(result.correlation) == 1

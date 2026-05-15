@@ -36,6 +36,7 @@ from src.alpha_factory.stage_gate import (
     evaluate_stage_c,
 )
 from src.backtest.engine import BacktestConfig
+from src.backtest.equity_curve import EquityCurve
 from src.domain.price import Ohlc, PriceBar
 from src.dsl.genome import (
     ClauseConfig,
@@ -94,9 +95,16 @@ def _make_continuous_bars(
     """連続 n_days 日 × bars_per_day bar の bars."""
     bars: list[PriceBar] = []
     base = datetime(base_year, base_month, base_day, 0, 0, 0, tzinfo=UTC)
+    # T105: bar 間隔は秒単位で算出する。旧 `hours=h*(24//bars_per_day)` は
+    # bars_per_day>24 で整数除算が 0 になり全 bar が同一タイムスタンプになる
+    # 退化バグがあった (EquityCurve の strict 昇順検証で顕在化)。
+    # `seconds=h*(86400//bars_per_day)` は bars_per_day が **24 の約数**のとき
+    # 旧 `hours=h*(24//bars_per_day)` と完全一致し、それ以外 (24 の非約数 /
+    # >24) でも strictly increasing を保つ。
+    step_seconds = 86400 // max(bars_per_day, 1)
     for d in range(n_days):
         for h in range(bars_per_day):
-            t = base + timedelta(days=d, hours=h * (24 // max(bars_per_day, 1)))
+            t = base + timedelta(days=d, seconds=h * step_seconds)
             bid_o = Decimal("154.00")
             ask_o = Decimal("154.01")
             bars.append(
@@ -116,10 +124,12 @@ def _make_oscillating_bars(n_days: int, bars_per_day: int = 4) -> list[PriceBar]
     """value が 1 bar ごとに up/down する bars（取引によって PnL が出やすい）."""
     bars: list[PriceBar] = []
     base = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    # T105: _make_continuous_bars と同じく秒単位間隔で strictly increasing を保証。
+    step_seconds = 86400 // max(bars_per_day, 1)
     n = 0
     for d in range(n_days):
         for h in range(bars_per_day):
-            t = base + timedelta(days=d, hours=h * (24 // max(bars_per_day, 1)))
+            t = base + timedelta(days=d, seconds=h * step_seconds)
             # 上下する価格パターン
             offset = (n % 4) - 2  # -2, -1, 0, 1, -2, ...
             base_price = Decimal("154.00") + Decimal(offset) * Decimal("0.05")
@@ -1056,14 +1066,16 @@ class TestStageC:
         # base evaluation 用 result（日跨ぎ trade を含む）
         # stress evaluation も同じ patch を共有するため、stress 側も同じ result を返す。
         # sharpe を None にしないため、equity curve は returns に variability を持たせる。
-        equity = [
-            (datetime(2026, 1, 1, 22, 0, tzinfo=UTC), Decimal("1000000")),
-            (datetime(2026, 1, 1, 22, 30, tzinfo=UTC), Decimal("1000100")),
-            (datetime(2026, 1, 1, 23, 0, tzinfo=UTC), Decimal("1000050")),
-            (datetime(2026, 1, 1, 23, 30, tzinfo=UTC), Decimal("1000200")),
-            (datetime(2026, 1, 2, 0, 30, tzinfo=UTC), Decimal("1000300")),
-            (datetime(2026, 1, 2, 1, 0, tzinfo=UTC), Decimal("1001000")),
-        ]
+        equity = EquityCurve.from_decimal_points(
+            [
+                (datetime(2026, 1, 1, 22, 0, tzinfo=UTC), Decimal("1000000")),
+                (datetime(2026, 1, 1, 22, 30, tzinfo=UTC), Decimal("1000100")),
+                (datetime(2026, 1, 1, 23, 0, tzinfo=UTC), Decimal("1000050")),
+                (datetime(2026, 1, 1, 23, 30, tzinfo=UTC), Decimal("1000200")),
+                (datetime(2026, 1, 2, 0, 30, tzinfo=UTC), Decimal("1000300")),
+                (datetime(2026, 1, 2, 1, 0, tzinfo=UTC), Decimal("1001000")),
+            ]
+        )
         result = BacktestResult(
             config=_backtest_config(),
             trades=[overnight_trade, overnight_trade2],
