@@ -11,8 +11,10 @@ import pytest
 
 from src.alpha_factory.diagnostics_collector import (
     VALID_METRIC_STAGES,
+    VALID_STAGE_C_GAP_CLASSES,
     DiagnosticsCollector,
     IndividualDiagnostics,
+    _derive_stage_c_gap,
 )
 from src.alpha_factory.stage_gate import StageResult
 
@@ -34,6 +36,48 @@ def _make_stage_a_result(
         stage="A",
         passed=passed,
         metrics={"stage": "A", "payload": payload},
+    )
+
+
+def _make_stage_c_result(
+    *,
+    passed: bool = True,
+    total_pnl: float = 51000.0,
+    trade_count: int = 60,
+    lc_pass: dict[str, bool] | None = None,
+    reason_codes: tuple[str, ...] = (),
+    stress: dict[str, Any] | None = None,
+    payload_override: Any = None,
+) -> StageResult:
+    """T109: Stage C StageResult を合成 (gap diagnostic テスト用)."""
+    if payload_override is not None:
+        payload: Any = payload_override
+    else:
+        if lc_pass is None:
+            lc_pass = {
+                "sharpe": True,
+                "total_pnl": True,
+                "max_drawdown": True,
+                "trade_count_min": True,
+                "trade_count_max": True,
+            }
+        if stress is None:
+            stress = {
+                "skipped": False,
+                "pnl_degradation": 1500.0,
+                "trade_count": trade_count - 5,
+            }
+        payload = {
+            "total_pnl": total_pnl,
+            "trade_count": trade_count,
+            "live_criteria_pass": lc_pass,
+            "stress": stress,
+        }
+    return StageResult(
+        stage="C",
+        passed=passed,
+        metrics={"stage": "C", "payload": payload},
+        reason_codes=reason_codes,
     )
 
 
@@ -123,7 +167,7 @@ class TestRecordStageBStageC:
 
     def test_record_stage_c_noop_without_stage_a(self) -> None:
         c = DiagnosticsCollector()
-        c.record_stage_c("lane", 0, "g0_i0", passed=True)
+        c.record_stage_c("lane", 0, "g0_i0", _make_stage_c_result(passed=True))
         assert len(c) == 0
 
     def test_record_stage_b_updates_existing(self) -> None:
@@ -138,9 +182,10 @@ class TestRecordStageBStageC:
         c = DiagnosticsCollector()
         c.record_stage_a("lane", 0, "g0_i0", _make_stage_a_result(passed=True))
         c.record_stage_b("lane", 0, "g0_i0", passed=True)
-        c.record_stage_c("lane", 0, "g0_i0", passed=True)
+        c.record_stage_c("lane", 0, "g0_i0", _make_stage_c_result(passed=True))
         rec = c._records[("lane", 0, "g0_i0")]
         assert rec.stage_c_pass is True
+        assert rec.stage_c_gap_class == "pass"
 
 
 class TestDeriveMetricStage:
@@ -229,6 +274,228 @@ class TestToRows:
         c = DiagnosticsCollector()
         c.record_stage_a("lane", 0, "g0_i0", _make_stage_a_result(passed=True))
         c.record_stage_b("lane", 0, "g0_i0", passed=True)
-        c.record_stage_c("lane", 0, "g0_i0", passed=True)
+        c.record_stage_c("lane", 0, "g0_i0", _make_stage_c_result(passed=True))
         rows = c.to_rows()
         assert rows[0]["metric_stage"] == "stage_c_evaluated"
+
+
+class TestDeriveStageCGap:
+    """T109: Stage B→C gap diagnostic v1 の分類ロジック."""
+
+    def _lc(
+        self,
+        *,
+        sharpe: bool = True,
+        total_pnl: bool = True,
+        max_drawdown: bool = True,
+        trade_count_min: bool = True,
+        trade_count_max: bool = True,
+    ) -> dict[str, bool]:
+        return {
+            "sharpe": sharpe,
+            "total_pnl": total_pnl,
+            "max_drawdown": max_drawdown,
+            "trade_count_min": trade_count_min,
+            "trade_count_max": trade_count_max,
+        }
+
+    def test_pass(self) -> None:
+        r = _make_stage_c_result(passed=True)
+        assert _derive_stage_c_gap(r)["gap_class"] == "pass"
+
+    def test_pnl_only(self) -> None:
+        r = _make_stage_c_result(
+            passed=False, lc_pass=self._lc(total_pnl=False)
+        )
+        assert _derive_stage_c_gap(r)["gap_class"] == "pnl_only"
+
+    def test_count_only_min(self) -> None:
+        r = _make_stage_c_result(
+            passed=False, lc_pass=self._lc(trade_count_min=False)
+        )
+        assert _derive_stage_c_gap(r)["gap_class"] == "count_only"
+
+    def test_count_only_max(self) -> None:
+        r = _make_stage_c_result(
+            passed=False, lc_pass=self._lc(trade_count_max=False)
+        )
+        assert _derive_stage_c_gap(r)["gap_class"] == "count_only"
+
+    def test_both_pnl_count(self) -> None:
+        r = _make_stage_c_result(
+            passed=False,
+            lc_pass=self._lc(total_pnl=False, trade_count_min=False),
+        )
+        assert _derive_stage_c_gap(r)["gap_class"] == "both_pnl_count"
+
+    def test_sharpe_involved(self) -> None:
+        r = _make_stage_c_result(
+            passed=False, lc_pass=self._lc(sharpe=False)
+        )
+        assert _derive_stage_c_gap(r)["gap_class"] == "sharpe_involved"
+
+    def test_sharpe_involved_with_pnl(self) -> None:
+        # sharpe ∧ pnl 両方 fail (count なし) → sharpe_involved 優先
+        r = _make_stage_c_result(
+            passed=False, lc_pass=self._lc(sharpe=False, total_pnl=False)
+        )
+        assert _derive_stage_c_gap(r)["gap_class"] == "sharpe_involved"
+
+    def test_mixed_dd_and_pnl(self) -> None:
+        # dd ∧ pnl fail (sharpe/count なし) → mixed
+        r = _make_stage_c_result(
+            passed=False,
+            lc_pass=self._lc(max_drawdown=False, total_pnl=False),
+        )
+        assert _derive_stage_c_gap(r)["gap_class"] == "mixed"
+
+    def test_stress_or_other(self) -> None:
+        # base lc 全通過だが passed=False (stress / intraday 等で fail)
+        r = _make_stage_c_result(
+            passed=False,
+            lc_pass=self._lc(),
+            reason_codes=("spread_stress.trade_count<min",),
+        )
+        assert _derive_stage_c_gap(r)["gap_class"] == "stress_or_other"
+
+    def test_system_fail_system_failure(self) -> None:
+        r = _make_stage_c_result(
+            passed=False,
+            lc_pass=self._lc(total_pnl=False),
+            reason_codes=("system_failure",),
+        )
+        assert _derive_stage_c_gap(r)["gap_class"] == "system_fail"
+
+    def test_system_fail_worker_error(self) -> None:
+        # 並列パスの worker_error 代替 StageResult: live_criteria_pass を
+        # 持たない payload + reason_codes=("worker_error",)。
+        r = StageResult(
+            stage="C",
+            passed=False,
+            metrics={
+                "stage": "C",
+                "payload": {
+                    "worker_error_code": "X",
+                    "worker_error_message": "boom",
+                },
+            },
+            reason_codes=("worker_error",),
+        )
+        assert _derive_stage_c_gap(r)["gap_class"] == "system_fail"
+
+    def test_raw_values_captured(self) -> None:
+        r = _make_stage_c_result(
+            passed=False,
+            total_pnl=1234.0,
+            trade_count=42,
+            lc_pass=self._lc(total_pnl=False),
+            stress={
+                "skipped": False,
+                "pnl_degradation": 800.0,
+                "trade_count": 37,
+            },
+        )
+        out = _derive_stage_c_gap(r)
+        assert out["base_total_pnl"] == pytest.approx(1234.0)
+        assert out["base_trade_count"] == 42
+        assert out["stress_pnl_degradation"] == pytest.approx(800.0)
+        assert out["stress_trade_count"] == 37
+
+    def test_stress_skipped_yields_none(self) -> None:
+        r = _make_stage_c_result(
+            passed=False,
+            lc_pass=self._lc(total_pnl=False),
+            stress={"skipped": True, "pnl_degradation": 0.0, "trade_count": 0},
+        )
+        out = _derive_stage_c_gap(r)
+        assert out["stress_pnl_degradation"] is None
+        assert out["stress_trade_count"] is None
+        assert out["gap_class"] == "pnl_only"
+
+    def test_inf_trade_count_does_not_collapse_diagnostic(self) -> None:
+        # trade_count=inf (壊れた payload) でも int(inf) の OverflowError を
+        # 握り、gap_class は live_criteria_pass から正しく算出される
+        # (Codex impl-review Round 1 [Suggestion])。
+        r = _make_stage_c_result(
+            passed=False,
+            total_pnl=1000.0,
+            lc_pass=self._lc(total_pnl=False),
+            payload_override={
+                "total_pnl": 1000.0,
+                "trade_count": float("inf"),
+                "live_criteria_pass": self._lc(total_pnl=False),
+                "stress": {
+                    "skipped": False,
+                    "pnl_degradation": 100.0,
+                    "trade_count": float("inf"),
+                },
+            },
+        )
+        out = _derive_stage_c_gap(r)
+        assert out["gap_class"] == "pnl_only"
+        assert out["base_trade_count"] is None
+        assert out["stress_trade_count"] is None
+        assert out["base_total_pnl"] == pytest.approx(1000.0)
+
+    def test_missing_payload_is_unknown(self) -> None:
+        r = StageResult(
+            stage="C",
+            passed=False,
+            metrics={"stage": "C", "payload": "not-a-dict"},
+            reason_codes=(),
+        )
+        assert _derive_stage_c_gap(r)["gap_class"] == "unknown"
+
+    def test_missing_live_criteria_pass_is_unknown(self) -> None:
+        r = _make_stage_c_result(
+            passed=False, payload_override={"total_pnl": 1.0, "trade_count": 2}
+        )
+        assert _derive_stage_c_gap(r)["gap_class"] == "unknown"
+
+    def test_all_gap_classes_in_enum(self) -> None:
+        # 代表ケースで返る gap_class が enum 集合内であること
+        for r in (
+            _make_stage_c_result(passed=True),
+            _make_stage_c_result(passed=False, lc_pass=self._lc(total_pnl=False)),
+        ):
+            assert _derive_stage_c_gap(r)["gap_class"] in VALID_STAGE_C_GAP_CLASSES
+
+
+class TestToRowsStageCGapColumns:
+    """T109: to_rows が gap diagnostic 列を出力すること."""
+
+    def test_stage_c_gap_columns_present(self) -> None:
+        c = DiagnosticsCollector()
+        c.record_stage_a("lane", 0, "g0_i0", _make_stage_a_result(passed=True))
+        c.record_stage_b("lane", 0, "g0_i0", passed=True)
+        c.record_stage_c(
+            "lane",
+            0,
+            "g0_i0",
+            _make_stage_c_result(
+                passed=False,
+                total_pnl=1000.0,
+                trade_count=20,
+                lc_pass={
+                    "sharpe": True,
+                    "total_pnl": True,
+                    "max_drawdown": True,
+                    "trade_count_min": False,
+                    "trade_count_max": True,
+                },
+            ),
+        )
+        row = c.to_rows()[0]
+        assert row["stage_c_gap_class"] == "count_only"
+        assert row["stage_c_base_total_pnl"] == pytest.approx(1000.0)
+        assert row["stage_c_base_trade_count"] == 20
+        assert "stage_c_stress_pnl_degradation" in row
+        assert "stage_c_stress_trade_count" in row
+
+    def test_stage_a_only_rows_have_null_gap_columns(self) -> None:
+        c = DiagnosticsCollector()
+        c.record_stage_a("lane", 0, "g0_i0", _make_stage_a_result(passed=False))
+        row = c.to_rows()[0]
+        assert row["stage_c_gap_class"] is None
+        assert row["stage_c_base_total_pnl"] is None
+        assert row["stage_c_base_trade_count"] is None
