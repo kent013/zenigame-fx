@@ -101,6 +101,7 @@
 | T106 | DB load yield_per ストリーム化 | infrastructure | High | 2026-05-20 11:43 | - |
 | T107 | aux_pair_bars columnar 化 | infrastructure | High | 2026-05-20 13:40 | - |
 | T108 | backtest-engine-numba | infrastructure | High | 2026-05-20 23:34 | - |
+| T109 | Stage B→C gap diagnostic v1 (sidecar に gap_class + stress劣化 + base/stress trade_count 追加、観測専用) | stage-gate | High | 2026-05-21 00:19 | - |
 
 ## Obsoleted
 
