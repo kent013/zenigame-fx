@@ -1943,16 +1943,20 @@ def evaluate_stage_c(
         "sharpe_degradation": None,
         "pnl_degradation": 0.0,
     }
-    if backtest_config.max_spread_bps is None:
+    # T110: cost-robustness stress。従来は max_spread_bps (spread フィルタ閾値) を
+    # 緩めるだけで per-trade コストを増やさず stress_pnl_degradation=0 だった
+    # (toothless)。本修正で realized fill の実効スプレッドを multiplier 倍に広げ
+    # (spread_cost_multiplier)、cost を実際に増やす。filter (max_spread_bps) の
+    # 有無に依らず常に実行 (cost robustness は filter と独立)。
+    multiplier_dec = Decimal(str(stage_config.spread_stress_multiplier))
+    if multiplier_dec <= 1:
         stress_payload["skipped"] = True
         reasons.append("spread_stress_skipped")
-        # B Phase 2 step 1.7: legacy stress skip → dual-path も skip (= 何も emit しない)
     else:
-        # Decimal × Decimal で型安全 (max_spread_bps が Decimal/float いずれでも安全)
-        base_max = Decimal(str(backtest_config.max_spread_bps))
-        multiplier_dec = Decimal(str(stage_config.spread_stress_multiplier))
-        new_max = base_max * multiplier_dec
-        stress_config = replace(backtest_config, max_spread_bps=new_max)
+        # T110: filter は base のまま据え置き、cost のみ stress (realized fill 割増)
+        stress_config = replace(
+            backtest_config, spread_cost_multiplier=multiplier_dec
+        )
         # B Phase 2 step 1.7: dual-path 経路用に legacy 結果を保持 (= 別 try に渡す、
         # acceptance D4 物理隔離契約)
         stress_bt: BacktestMetrics | None = None

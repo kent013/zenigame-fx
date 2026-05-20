@@ -70,11 +70,20 @@ class BacktestConfig:
     holding_cost_per_day_bps: Decimal = Decimal("0")
     session_close_utc_hours: frozenset[int] = field(default_factory=frozenset)
     bar_minutes: int = 1
+    # T110: stress 用 spread コスト倍率。default 1.0 = 現行挙動完全不変。
+    # >1.0 で realized fill (entry/exit 約定) の実効スプレッドを倍率分 adverse 方向へ
+    # 広げ cost robustness を stress する (MTM/margin は生価格のまま)。閾値緩和ではなく
+    # cost 要件の厳格化。Stage C stress 経路のみ >1 を設定 (stage_gate.py)。
+    spread_cost_multiplier: Decimal = Decimal("1.0")
 
     def __post_init__(self) -> None:
         if self.holding_cost_per_day_bps < 0:
             raise ValueError(
                 f"holding_cost_per_day_bps must be >= 0: {self.holding_cost_per_day_bps}"
+            )
+        if self.spread_cost_multiplier < 1:
+            raise ValueError(
+                f"spread_cost_multiplier must be >= 1.0: {self.spread_cost_multiplier}"
             )
         if self.max_spread_bps is not None and self.max_spread_bps < 0:
             raise ValueError(
@@ -167,6 +176,8 @@ def _run_backtest_decimal(
 
     broker.deposit(config.initial_cash)
     broker.set_spread_filter(config.max_spread_bps)
+    # T110: realized fill の実効スプレッド割増 (default 1.0 = 不変)
+    broker.set_spread_cost_multiplier(config.spread_cost_multiplier)
 
     # T105: equity_curve を事前確保 numpy バッファ (EquityCurveBuilder) で構築。
     # bar 数は bars_list で確定済み → index 代入で埋め、小オブジェクトを蓄積しない。
@@ -369,6 +380,10 @@ def _run_backtest_kernel(
         spread_active = True
         max_num, max_den = int(config.max_spread_bps), 1
 
+    # T110: spread_cost_multiplier を整数比 (num, den) に分解して kernel へ渡す。
+    # Decimal("1.0")→(1,1) で _fill_adj が 0 を返しビット同一。Decimal("1.5")→(3,2)。
+    spread_cost_num, spread_cost_den = config.spread_cost_multiplier.as_integer_ratio()
+
     initial_cash_scaled = encode_equity(config.initial_cash)
 
     out_entry_idx = np.empty(n, dtype=np.int64)
@@ -390,6 +405,7 @@ def _run_backtest_kernel(
         int(pos_cfg.time_stop_min), int(units), int(config.leverage),
         100, 1, spread_active, int(max_num), int(max_den),
         int(initial_cash_scaled), int(SCALE_RATIO), int(warmup),
+        int(spread_cost_num), int(spread_cost_den),
         out_entry_idx, out_exit_idx, out_side, out_entry_px, out_exit_px,
         out_reason, out_pos_id, out_equity_at_entry, out_equity_scaled,
     )

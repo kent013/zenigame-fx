@@ -97,6 +97,7 @@ def _cfg(
     *,
     max_spread_bps: Decimal | None = Decimal("10"),
     session_close_utc_hours: frozenset[int] = frozenset(),
+    spread_cost_multiplier: Decimal = Decimal("1.0"),
 ) -> BacktestConfig:
     return BacktestConfig(
         instrument="USD_JPY",
@@ -107,6 +108,7 @@ def _cfg(
         max_spread_bps=max_spread_bps,
         holding_cost_per_day_bps=Decimal("0"),
         session_close_utc_hours=session_close_utc_hours,
+        spread_cost_multiplier=spread_cost_multiplier,
     )
 
 
@@ -203,6 +205,57 @@ def test_parity_long_entry_exit_cycle() -> None:
     assert len(rk.trades) >= 1
 
 
+def _long_cycle_bars_and_ev():
+    """long entry→exit サイクルの bars + evaluator (m>1 stress 検証用、spread あり)."""
+    n = 80
+    base = datetime(2026, 4, 1, 0, 0, tzinfo=UTC)
+    bars = []
+    for day in range(2):
+        for m in range(40):
+            bt = base + timedelta(days=day, minutes=m)
+            px = Decimal("154.000") + Decimal(m) * Decimal("0.005")
+            # bid=px, ask=px+0.010 (spread あり) で cost stress が効く
+            bars.append(_bar(bt, str(px), str(px), str(px + Decimal("0.010")), str(px + Decimal("0.010"))))
+    d1 = [0.0] * n
+    for i in range(5, 15):
+        d1[i] = 0.8
+    for i in range(15, 25):
+        d1[i] = 0.0
+    for i in range(45, 55):
+        d1[i] = 0.9
+    for i in range(55, 65):
+        d1[i] = 0.0
+    return bars, _ScriptedAllBarsEvaluator({"D1": d1})
+
+
+def test_parity_spread_cost_multiplier_stress() -> None:
+    """T110: spread_cost_multiplier=1.5 でも kernel/Decimal parity が保たれる。"""
+    bars, ev = _long_cycle_bars_and_ev()
+    cfg = _cfg(spread_cost_multiplier=Decimal("1.5"))
+    (rk, bk), (rd, bd) = _run_both(bars, _genome(), cfg, ev)
+    _assert_trades_equal(rk.trades, rd.trades)
+    _assert_equity_equal(rk, rd)
+    assert bk.cash == bd.cash
+    assert len(rk.trades) >= 1
+
+
+def test_spread_cost_multiplier_worsens_pnl() -> None:
+    """T110: m=1.5 は m=1.0 比で realized PnL を悪化させる (cost stress が効く)。
+
+    realized fill の実効スプレッド割増が PnL に反映されることを確認 (degradation>0)。
+    """
+    bars, ev = _long_cycle_bars_and_ev()
+    (rk1, _bk1), _ = _run_both(bars, _genome(), _cfg(), ev)
+    (rk2, _bk2), _ = _run_both(
+        bars, _genome(), _cfg(spread_cost_multiplier=Decimal("1.5")), ev
+    )
+    # 同一 trade 数で realized PnL 合計が m=1.5 の方が小さい (cost 増)
+    assert len(rk1.trades) == len(rk2.trades) >= 1
+    pnl_base = sum(t.pnl for t in rk1.trades)
+    pnl_stress = sum(t.pnl for t in rk2.trades)
+    assert pnl_stress < pnl_base, (pnl_base, pnl_stress)
+
+
 def test_parity_short_entry_and_eod_close() -> None:
     n = 80
     base = datetime(2026, 4, 1, 0, 0, tzinfo=UTC)
@@ -268,6 +321,35 @@ def test_parity_margin_call() -> None:
     _assert_equity_equal(rk, rd)
     assert bk.cash == bd.cash
     assert any(t.exit_reason == "margin_call" for t in rk.trades)
+
+
+def test_spread_cost_multiplier_does_not_change_margin_behavior() -> None:
+    """T110 [impl-review Critical]: MTM/margin は raw 価格を使うため、m=1.0 と m=1.5 で
+    margin_call 発火タイミング (exit_reason 列・exit_idx) が不変であること。
+
+    realized PnL のみ stress cost を反映し、含み損益・証拠金判定は raw のまま、という
+    契約の直接検証。"""
+    n = 80
+    base = datetime(2026, 4, 1, 0, 0, tzinfo=UTC)
+    bars = []
+    for day in range(2):
+        for m in range(40):
+            bt = base + timedelta(days=day, minutes=m)
+            idx = day * 40 + m
+            px = Decimal("100.000") if idx >= 20 else Decimal("154.000")
+            bars.append(_bar(bt, str(px), str(px), str(px + Decimal("0.010")), str(px + Decimal("0.010"))))
+    d1 = [0.0] * n
+    for i in range(5, 40):
+        d1[i] = 0.8
+    ev = _ScriptedAllBarsEvaluator({"D1": d1})
+    (rk1, _b1), _ = _run_both(bars, _genome(), _cfg(), ev)
+    (rk2, _b2), _ = _run_both(
+        bars, _genome(), _cfg(spread_cost_multiplier=Decimal("1.5")), ev
+    )
+    # margin_call の発火タイミング (exit_reason 列・exit_time) は m に依らず不変
+    assert [t.exit_reason for t in rk1.trades] == [t.exit_reason for t in rk2.trades]
+    assert [t.exit_time for t in rk1.trades] == [t.exit_time for t in rk2.trades]
+    assert any(t.exit_reason == "margin_call" for t in rk1.trades)
 
 
 def test_parity_time_stop() -> None:

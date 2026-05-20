@@ -375,7 +375,10 @@ def test_fill_pending_l2_exception_continues_loop() -> None:
     class _L2InjectingBroker(MockBroker):
         """`_open_position` を hook して open_long のみ L2 例外を発生させる broker。"""
 
-        def _open_position(self, side, units, entry_price, entry_time, leverage, *, equity_at_entry):  # type: ignore[no-untyped-def]
+        def _open_position(  # type: ignore[no-untyped-def]
+            self, side, units, entry_price, entry_time, leverage,
+            *, equity_at_entry, entry_stress_adj=Decimal(0),
+        ):
             if side == "long":
                 # L1 を通過しても L2 が発火する経路を simulate
                 raise InsufficientEquityError(
@@ -383,7 +386,7 @@ def test_fill_pending_l2_exception_continues_loop() -> None:
                 )
             return super()._open_position(
                 side, units, entry_price, entry_time, leverage,
-                equity_at_entry=equity_at_entry,
+                equity_at_entry=equity_at_entry, entry_stress_adj=entry_stress_adj,
             )
 
     broker = _L2InjectingBroker(instrument_meta=usd_jpy_meta(), maintenance_margin_level_pct=Decimal("100"))

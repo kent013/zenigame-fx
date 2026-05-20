@@ -1856,12 +1856,15 @@ def test_stage_c_stress_canonical_succeeds_for_60d_holdout(
     assert "fold=" not in line
 
 
-def test_stage_c_stress_canonical_skipped_when_max_spread_bps_is_none(
+def test_stage_c_stress_canonical_runs_when_max_spread_bps_is_none(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """backtest_config.max_spread_bps is None のとき、
-    `stage='C_stress'` の dual_path event と canonical_five.skipped event が
-    両者 0 件 (= acceptance C5)."""
+    """T110: cost stress は max_spread_bps (filter) 非依存で常に実行される。
+
+    旧挙動 (max_spread_bps=None → spread_stress_skipped、C_stress event 0 件) は
+    filter 緩和ベースの toothless stress 由来。P2 で cost stress は realized fill
+    の実効スプレッド割増 (spread_cost_multiplier) に変更したため、filter が None でも
+    stress は走り C_stress dual-path event が出る。"""
     from dataclasses import replace as dc_replace
 
     from src.alpha_factory.stage_gate import evaluate_stage_c
@@ -1881,16 +1884,8 @@ def test_stage_c_stress_canonical_skipped_when_max_spread_bps_is_none(
         cfg, ev, StageGateConfig(),
     )
     assert res.stage == "C"
-    # spread_stress_skipped reason は legacy 経路で出る
-    assert "spread_stress_skipped" in res.reason_codes
-    captured = capsys.readouterr()
-    combined = captured.out + captured.err
-    c_stress_lines = [
-        line for line in combined.splitlines()
-        if "stage=C_stress" in line
-    ]
-    # dual_path / canonical_five.skipped event 両者 0 件
-    assert len(c_stress_lines) == 0
+    # cost stress は filter 非依存で実行 → skip されない
+    assert "spread_stress_skipped" not in res.reason_codes
 
 
 def test_stage_c_stress_canonical_skipped_when_stress_backtest_raises(
@@ -1915,18 +1910,11 @@ def test_stage_c_stress_canonical_skipped_when_stress_backtest_raises(
     from tests.dsl.conftest import ConstantPrimitiveEvaluator
 
     original_run = sg.run_backtest
-    base_max_spread = _backtest_config().max_spread_bps
-    assert base_max_spread is not None, "fixture must have max_spread_bps set"
-    base_max_dec = _Decimal(str(base_max_spread))
-    multiplier = _Decimal(str(StageGateConfig().spread_stress_multiplier))
-    stress_max_dec = base_max_dec * multiplier  # stress 経路のみ一致する値
 
     def _conditional_run(bars_in, strategy, broker, config):  # type: ignore[no-untyped-def]
-        # max_spread_bps が stress 値と一致するときだけ raise (= stress 経路同定)
-        if config.max_spread_bps is not None:
-            cur_dec = _Decimal(str(config.max_spread_bps))
-            if cur_dec == stress_max_dec:
-                raise RuntimeError("simulated stress backtest failure")
+        # T110: stress 経路は spread_cost_multiplier > 1 で同定 (旧: 緩和 max_spread_bps)。
+        if _Decimal(str(config.spread_cost_multiplier)) > 1:
+            raise RuntimeError("simulated stress backtest failure")
         return original_run(bars_in, strategy, broker, config)
 
     monkeypatch.setattr(sg, "run_backtest", _conditional_run)

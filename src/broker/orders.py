@@ -28,6 +28,9 @@ class Position:
     entry_margin: Decimal
     leverage: int
     equity_at_entry: Decimal = Decimal(0)  # T-sharpe: bar 開始時 pre-fill equity (SSOT)
+    # T110: entry 時の adverse stress 加算量 (per-unit, >=0)。entry_price は raw のまま
+    # (MTM/margin は raw 価格) で、realized PnL からのみ往復 stress cost を控除する。
+    entry_stress_adj: Decimal = Decimal(0)
 
 
 @dataclass(frozen=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
 from structlog.testing import capture_logs
 
 from src.backtest.engine import BacktestConfig, run_backtest
@@ -11,6 +12,31 @@ from src.broker import MockBroker, OrderSignal
 from src.broker.orders import PortfolioSnapshot
 from src.domain.price import PriceBar
 from tests._helpers import make_bar, usd_jpy_meta
+
+
+def test_backtest_config_spread_cost_multiplier_default_is_one() -> None:
+    """T110: spread_cost_multiplier の default は 1.0 (現行挙動不変)。"""
+    cfg = BacktestConfig(
+        instrument="USD_JPY",
+        start=datetime(2026, 4, 1, tzinfo=UTC),
+        end=datetime(2026, 4, 5, tzinfo=UTC),
+        initial_cash=Decimal("1000000"),
+        leverage=3,
+    )
+    assert cfg.spread_cost_multiplier == Decimal("1.0")
+
+
+def test_backtest_config_spread_cost_multiplier_below_one_raises() -> None:
+    """T110: spread_cost_multiplier < 1.0 は禁止 (cost を減らす方向は不許可)。"""
+    with pytest.raises(ValueError, match="spread_cost_multiplier must be"):
+        BacktestConfig(
+            instrument="USD_JPY",
+            start=datetime(2026, 4, 1, tzinfo=UTC),
+            end=datetime(2026, 4, 5, tzinfo=UTC),
+            initial_cash=Decimal("1000000"),
+            leverage=3,
+            spread_cost_multiplier=Decimal("0.9"),
+        )
 
 
 class _ScriptedStrategy:

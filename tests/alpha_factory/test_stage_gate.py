@@ -860,8 +860,14 @@ class TestStageC:
         # sharpe (None) も live_criteria.sharpe<min
         assert "live_criteria.sharpe<min" in res.reason_codes
 
-    def test_max_spread_bps_none_fails_closed(self) -> None:
-        """max_spread_bps=None → spread_stress_skipped で fail-closed."""
+    def test_max_spread_bps_none_does_not_skip_cost_stress(self) -> None:
+        """T110: cost stress は max_spread_bps (filter) に依らず常に実行される。
+
+        旧挙動 (max_spread_bps=None → spread_stress_skipped) は spread filter 緩和
+        ベースの toothless stress だった。P2 で cost stress は realized fill の実効
+        スプレッド割増 (spread_cost_multiplier) に変更し filter と独立化したため、
+        filter が None でも stress は skip されない。
+        """
         bars = _make_continuous_bars(3, bars_per_day=4)
         ev = ConstantPrimitiveEvaluator(value=0.0)
         cfg = _backtest_config(max_spread_bps=None)
@@ -874,9 +880,10 @@ class TestStageC:
             StageGateConfig(),
         )
         assert not res.passed
-        assert "spread_stress_skipped" in res.reason_codes
+        # cost stress は filter 非依存で実行 → skip されない
+        assert "spread_stress_skipped" not in res.reason_codes
         payload = _payload(res)
-        assert payload["stress"]["skipped"] is True
+        assert payload["stress"]["skipped"] is False
 
     def test_max_spread_bps_set_does_not_skip_stress(self) -> None:
         """max_spread_bps を明示設定すると spread_stress_skipped は出ず stress を実評価する.
