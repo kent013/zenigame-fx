@@ -33,3 +33,5 @@ config/alpha_factory/*.tmp
 config/alpha_factory/*.lock
 config/alpha_factory/default.yaml.tmp
 config/alpha_factory/default.yaml.lock
+# Added by code-review-graph
+.code-review-graph/

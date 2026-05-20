@@ -210,6 +210,15 @@ retroactive 検証 (`scripts/alpha_factory/audit_live_criteria_retroactive.py`):
 - `.claude/hooks/bash-permissions.py` は汎用的なので残す
 - 移植進捗は `devnotes/20260421-1850-fx-skill-port/master-plan.md` を参照
 
+### code-review-graph（構造マップ / blast-radius）
+
+コードベースを Tree-sitter で構造グラフ化し、変更の blast-radius（影響を受ける caller / dependent / test）を MCP 経由で提供するツール。レビュー・リファクタ・デバッグ時に全ファイルを読まず、影響範囲だけを最小コンテキストで読むために使う。
+
+- **導入**: `uv tool install code-review-graph`（`code-review-graph` / `crg-daemon`）。MCP は `.mcp.json`（`uvx code-review-graph serve`）。生成 skill: `review-changes` / `explore-codebase` / `refactor-safely` / `debug-issue`。グラフ実体は `.code-review-graph/`（gitignore 済み）
+- **使い方**: コードレビュー・影響調査では grep 全読みの前に MCP の blast-radius / impact を引く
+- **hook 排他（重要）**: グラフ更新は ① PostToolUse hook（`.claude/settings.json`、`Edit\|Write\|Bash`）と ② git pre-commit hook の 2 経路で `code-review-graph update` を発火する。並列ツール呼び出しで同時書き込みが起きると、overlay/fakeowner FS（Dev Container）上では SQLite の WAL 排他が壊れ `graph.db` が物理破損する。対策として両 hook を **flock 先勝ち非ブロッキング排他**（lock は必ず `/tmp` 配下、repo パス cksum 由来キー）でラップ済み。flock の無い macOS ホストでは SQLite 内蔵 lock が正常に効くため直接実行にフォールバック
+- **破損時の復旧**: `rm .code-review-graph/graph.db*` → `code-review-graph build`
+
 ---
 
 ## 次のアクション候補
