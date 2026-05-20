@@ -19,6 +19,7 @@ from src.alpha_factory.stage_gate import StageResult
 
 __all__ = [
     "VALID_METRIC_STAGES",
+    "VALID_STAGE_C_GAP_CLASSES",
     "DiagnosticsCollector",
     "IndividualDiagnostics",
 ]
@@ -37,6 +38,142 @@ VALID_METRIC_STAGES: Final[frozenset[str]] = frozenset(
     }
 )
 
+# T109: Stage B→C gap diagnostic v1。Stage C 評価で base live_criteria 失敗の
+# 組合せを固定コードで分類する enum (CI invariant 用)。観測専用、passed 判定や
+# GA 探索には一切影響しない。
+# - pass            : Stage C 通過
+# - pnl_only        : base live_criteria で total_pnl のみ未達
+# - count_only      : base live_criteria で trade_count のみ未達
+# - both_pnl_count  : total_pnl ∧ trade_count 両方未達
+# - sharpe_involved : sharpe を含む base live_criteria 未達 (上記以外)
+# - mixed           : 上記以外の base live_criteria 未達組合せ
+# - stress_or_other : base live_criteria 全通過だが stress/intraday 等で不通過
+# - system_fail     : system_failure / worker_error (実行時障害)
+# - unknown         : payload 不整合 (defensive)
+VALID_STAGE_C_GAP_CLASSES: Final[frozenset[str]] = frozenset(
+    {
+        "pass",
+        "pnl_only",
+        "count_only",
+        "both_pnl_count",
+        "sharpe_involved",
+        "mixed",
+        "stress_or_other",
+        "system_fail",
+        "unknown",
+    }
+)
+
+
+def _safe_float(value: Any) -> float | None:
+    """None/NaN/Inf/型不正を None に潰す finite ガード。"""
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def _safe_int(value: Any) -> int | None:
+    """None/型不正/非有限を None に潰す int ガード。
+
+    int(float("inf")) は OverflowError を送出するため捕捉する
+    (Codex impl-review Round 1 [Suggestion]: 壊れた payload で診断全体が
+    unknown に倒れるのを防ぐ)。
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _derive_stage_c_gap(result: StageResult) -> dict[str, Any]:
+    """Stage C StageResult から B→C gap 診断を抽出 (T109)。
+
+    新規 backtest は行わず、evaluate_stage_c が既に計算済みの payload を
+    defensive read するのみ。観測専用で、全例外を握り潰し fail-soft で
+    安全な default を返す (診断欠損が GA 評価を絶対に止めない契約)。
+
+    分類優先順位 (排他):
+      1. system_fail        : reason に system_failure / worker_error
+      2. pass               : result.passed
+      3. base live_criteria 失敗組合せ (both_pnl_count / pnl_only /
+                              count_only / sharpe_involved / mixed)
+      4. stress_or_other    : base lc 全通過だが stress/intraday 等で fail
+      5. unknown            : payload 不整合 (defensive)
+    """
+    out: dict[str, Any] = {
+        "gap_class": "unknown",
+        "base_total_pnl": None,
+        "base_trade_count": None,
+        "stress_pnl_degradation": None,
+        "stress_trade_count": None,
+    }
+    try:
+        # reason_codes を payload 型チェックより前に抽出。payload 自体が
+        # 壊れた system_failure / worker_error も確実に system_fail へ寄せる
+        # (Codex design-review Round 2 [Suggestion])。worker_error は並列
+        # パスの代替 StageResult (swim_lane.py:864-879) で live_criteria_pass
+        # を持たない実行時障害 (Round 1 [Critical])。
+        reasons = tuple(getattr(result, "reason_codes", ()) or ())
+        if ("system_failure" in reasons) or ("worker_error" in reasons):
+            out["gap_class"] = "system_fail"
+            return out
+        payload_obj: Any = (
+            result.metrics.get("payload", {})
+            if hasattr(result, "metrics")
+            else {}
+        )
+        if not isinstance(payload_obj, dict):
+            return out
+        payload = payload_obj
+        # raw 値 (finite 化)
+        out["base_total_pnl"] = _safe_float(payload.get("total_pnl"))
+        out["base_trade_count"] = _safe_int(payload.get("trade_count"))
+        stress = payload.get("stress")
+        if isinstance(stress, dict) and not stress.get("skipped", False):
+            out["stress_pnl_degradation"] = _safe_float(
+                stress.get("pnl_degradation")
+            )
+            out["stress_trade_count"] = _safe_int(stress.get("trade_count"))
+        if bool(result.passed):
+            out["gap_class"] = "pass"
+            return out
+        lcp = payload.get("live_criteria_pass", {})
+        if not isinstance(lcp, dict) or not lcp:
+            # live_criteria_pass が欠落/空 → 基底 lc 失敗を判定できず unknown
+            # (worker_error 等の payload は reason_codes で上流 system_fail 済)
+            out["gap_class"] = "unknown"
+            return out
+        pnl_fail = lcp.get("total_pnl") is False
+        count_fail = (lcp.get("trade_count_min") is False) or (
+            lcp.get("trade_count_max") is False
+        )
+        sharpe_fail = lcp.get("sharpe") is False
+        dd_fail = lcp.get("max_drawdown") is False
+        if not (pnl_fail or count_fail or sharpe_fail or dd_fail):
+            # base live_criteria は全通過 → stress / intraday 等で不通過
+            out["gap_class"] = "stress_or_other"
+            return out
+        if pnl_fail and count_fail:
+            out["gap_class"] = "both_pnl_count"
+        elif pnl_fail and not (count_fail or sharpe_fail or dd_fail):
+            out["gap_class"] = "pnl_only"
+        elif count_fail and not (pnl_fail or sharpe_fail or dd_fail):
+            out["gap_class"] = "count_only"
+        elif sharpe_fail:
+            out["gap_class"] = "sharpe_involved"
+        else:
+            out["gap_class"] = "mixed"
+        return out
+    except Exception:
+        # fail-soft: 診断は観測専用、絶対に評価経路を壊さない
+        return out
+
 
 @dataclass
 class IndividualDiagnostics:
@@ -51,6 +188,12 @@ class IndividualDiagnostics:
     stage_a_pass: bool = False
     stage_b_pass: bool | None = None  # None = not evaluated
     stage_c_pass: bool | None = None  # None = not evaluated
+    # T109: Stage B→C gap diagnostic v1 (Stage C 評価個体のみ非 None)
+    stage_c_gap_class: str | None = None
+    stage_c_base_total_pnl: float | None = None
+    stage_c_base_trade_count: int | None = None
+    stage_c_stress_pnl_degradation: float | None = None
+    stage_c_stress_trade_count: int | None = None
 
 
 class DiagnosticsCollector:
@@ -140,15 +283,26 @@ class DiagnosticsCollector:
         lane_id: str,
         generation: int,
         individual_name: str,
-        passed: bool,
+        result: StageResult,
     ) -> None:
-        """Stage C pass/fail を記録。Stage A 未記録なら no-op (defensive)."""
+        """Stage C 結果を記録。Stage A 未記録なら no-op (defensive).
+
+        T109: B→C gap diagnostic v1。base live_criteria 失敗の組合せを固定
+        コードで分類し、stress PnL 劣化量と base/stress trade_count を記録する
+        (観測のみ、passed 判定や GA 探索には一切影響しない)。
+        """
         rec = self._records.get(
             self._key(lane_id, generation, individual_name)
         )
         if rec is None:
             return
-        rec.stage_c_pass = bool(passed)
+        rec.stage_c_pass = bool(result.passed)
+        diag = _derive_stage_c_gap(result)
+        rec.stage_c_gap_class = diag["gap_class"]
+        rec.stage_c_base_total_pnl = diag["base_total_pnl"]
+        rec.stage_c_base_trade_count = diag["base_trade_count"]
+        rec.stage_c_stress_pnl_degradation = diag["stress_pnl_degradation"]
+        rec.stage_c_stress_trade_count = diag["stress_trade_count"]
 
     def derive_metric_stage(self, rec: IndividualDiagnostics) -> str:
         """post-hoc metric_stage 確定 (collector 側で flush 時に決定)."""
@@ -173,6 +327,14 @@ class DiagnosticsCollector:
                 f"metric_stage out of enum: {metric_stage!r} "
                 f"(rec={rec})"
             )
+            # T109: gap_class CI invariant (None または enum 内)
+            assert (
+                rec.stage_c_gap_class is None
+                or rec.stage_c_gap_class in VALID_STAGE_C_GAP_CLASSES
+            ), (
+                f"stage_c_gap_class out of enum: {rec.stage_c_gap_class!r} "
+                f"(rec={rec})"
+            )
             rows.append(
                 {
                     "lane_id": rec.lane_id,
@@ -185,6 +347,14 @@ class DiagnosticsCollector:
                     "stage_a_pass": rec.stage_a_pass,
                     "stage_b_pass": rec.stage_b_pass,
                     "stage_c_pass": rec.stage_c_pass,
+                    # T109: Stage B→C gap diagnostic v1
+                    "stage_c_gap_class": rec.stage_c_gap_class,
+                    "stage_c_base_total_pnl": rec.stage_c_base_total_pnl,
+                    "stage_c_base_trade_count": rec.stage_c_base_trade_count,
+                    "stage_c_stress_pnl_degradation": (
+                        rec.stage_c_stress_pnl_degradation
+                    ),
+                    "stage_c_stress_trade_count": rec.stage_c_stress_trade_count,
                 }
             )
         return rows

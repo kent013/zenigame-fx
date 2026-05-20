@@ -40,8 +40,31 @@ archive Parquet では Stage A 段階で `total_pnl` が転記されない設計
 | `stage_a_pass` | bool | NO | Stage A 通過 |
 | `stage_b_pass` | bool | YES | None = 未評価 |
 | `stage_c_pass` | bool | YES | None = 未評価 |
+| `stage_c_gap_class` | string | YES | T109: Stage B→C gap 分類 enum (下記)。Stage C 未評価個体は None |
+| `stage_c_base_total_pnl` | float64 | YES | T109: Stage C base(unstressed) holdout total_pnl |
+| `stage_c_base_trade_count` | int32 | YES | T109: Stage C base holdout trade 数 |
+| `stage_c_stress_pnl_degradation` | float64 | YES | T109: spread×1.5 stress の PnL 劣化量 (base - stress)。stress skip 時 None |
+| `stage_c_stress_trade_count` | int32 | YES | T109: stress 評価時の trade 数。stress skip 時 None |
 
 主キー: `(lane_id, generation, individual_name)` (archive と整合)。
+
+> T109 で追加した 5 列は全て nullable。`DIAGNOSTICS_SCHEMA_VERSION` は 2 のまま据え置く (v2 contract の required field 集合を変えない additive 拡張、`assert_diagnostics_v2` は required field のみ検証)。
+
+### `stage_c_gap_class` enum (T109)
+
+Stage C 評価個体の B→C 汎化ギャップ主因分類。`_derive_stage_c_gap` が base `live_criteria_pass` / `stress` / `reason_codes` から導出 (新規 backtest なし、観測専用、fail-soft)。
+
+| value | 条件 |
+|-------|------|
+| `pass` | Stage C 通過 |
+| `pnl_only` | base live_criteria で total_pnl のみ未達 |
+| `count_only` | base live_criteria で trade_count (min/max) のみ未達 |
+| `both_pnl_count` | total_pnl ∧ trade_count 両方未達 |
+| `sharpe_involved` | sharpe を含む base live_criteria 未達 (上記以外) |
+| `mixed` | 上記以外の base live_criteria 未達組合せ |
+| `stress_or_other` | base live_criteria 全通過だが stress/intraday 等で不通過 |
+| `system_fail` | system_failure / worker_error (実行時障害) |
+| `unknown` | payload 不整合 / live_criteria_pass 欠落 (defensive) |
 
 ### `metric_stage` enum
 
@@ -87,6 +110,7 @@ archive Parquet では Stage A 段階で `total_pnl` が転記されない設計
 - I1: sidecar 行数 == backtest 評価された個体数
 - I2: `metric_stage` の値が enum 内 (`to_rows` で assert)
 - I3: `total_pnl_stage_a` が finite (NaN/Inf は collector で 0.0 に正規化)
+- I4: `stage_c_gap_class` が None または `VALID_STAGE_C_GAP_CLASSES` 内 (`to_rows` で assert、T109)
 
 ## Phase A スコープ外 (将来 TODO)
 

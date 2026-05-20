@@ -684,12 +684,13 @@ class LaneManager:
                 c_result,
             )
             # T033: sidecar diagnostics に Stage C pass/fail を記録
+            # T109: record_stage_c は StageResult を受け取り gap 診断を抽出する
             if self._diagnostics is not None:
                 self._diagnostics.record_stage_c(
                     lane.lane_id,
                     lane.generation_count,
                     genome.name,
-                    bool(c_result.passed),
+                    c_result,
                 )
             if c_result.passed:
                 stage_c_pass += 1
@@ -885,11 +886,12 @@ class LaneManager:
                 genome, lane.lane_id, generation_index, c_result
             )
             if self._diagnostics is not None:
+                # T109: record_stage_c は StageResult を受け取り gap 診断を抽出
                 self._diagnostics.record_stage_c(
                     lane.lane_id,
                     generation_index,
                     genome.name,
-                    bool(c_result.passed),
+                    c_result,
                 )
             wts_c = c_result.metrics.get("wall_time_seconds")
             if isinstance(wts_c, (int, float)):

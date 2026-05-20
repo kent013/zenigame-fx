@@ -64,6 +64,15 @@ STAGE_A_PROVENANCE_SCHEMA: Final[pa.Schema] = pa.schema(
         pa.field("stage_a_pass", pa.bool_(), nullable=False),
         pa.field("stage_b_pass", pa.bool_(), nullable=True),
         pa.field("stage_c_pass", pa.bool_(), nullable=True),
+        # T109: Stage B→C gap diagnostic v1 (全 nullable, v2 互換の additive 拡張)。
+        # 追加は全て nullable で v2 contract の required field 集合を変えないため
+        # DIAGNOSTICS_SCHEMA_VERSION は 2 のまま据え置く (assert_diagnostics_v2 は
+        # required field のみ検証)。Stage A/B 止まり個体は本列 null。
+        pa.field("stage_c_gap_class", pa.string(), nullable=True),
+        pa.field("stage_c_base_total_pnl", pa.float64(), nullable=True),
+        pa.field("stage_c_base_trade_count", pa.int32(), nullable=True),
+        pa.field("stage_c_stress_pnl_degradation", pa.float64(), nullable=True),
+        pa.field("stage_c_stress_trade_count", pa.int32(), nullable=True),
     ]
 )
 

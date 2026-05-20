@@ -74,7 +74,22 @@ class TestBuildSidecarTable:
 
     def test_schema_field_count(self) -> None:
         # T058: 旧 10 列 + v2 必須 2 列 = 12 列
-        assert len(STAGE_A_PROVENANCE_SCHEMA.names) == 12
+        # T109: + Stage B→C gap diagnostic 5 列 = 17 列
+        assert len(STAGE_A_PROVENANCE_SCHEMA.names) == 17
+
+    def test_schema_includes_stage_c_gap_columns(self) -> None:
+        # T109: gap diagnostic 列が schema に含まれ、全て nullable であること
+        names = STAGE_A_PROVENANCE_SCHEMA.names
+        gap_cols = [
+            "stage_c_gap_class",
+            "stage_c_base_total_pnl",
+            "stage_c_base_trade_count",
+            "stage_c_stress_pnl_degradation",
+            "stage_c_stress_trade_count",
+        ]
+        for col in gap_cols:
+            assert col in names
+            assert STAGE_A_PROVENANCE_SCHEMA.field(col).nullable is True
 
 
 class TestWriteStageAProvenance:
