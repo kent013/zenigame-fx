@@ -236,12 +236,12 @@ class EvaluationContext:
                                   per-call strict」に拡張。
                                   production backtest runner はこの flag を True
                                   にして伝搬漏れを検知する規約。
-        aux_pair_bars: cross-pair primitive (P5 等) が参照する別ペアの
-                       bar 列。key は OANDA pair 名 ("EUR_USD" 等)、value は
-                       同一時刻軸 (bar_time) にアラインされた PriceBar 列。
-                       各要素は PriceBar または None（stale / 欠損）。loader が
-                       alignment 責務を持ち、primitive 側は bar_time 一致を
-                       fail-fast assert する規約。default は空 dict（T013 追加）。
+        aux_pair_mid_close: cross-pair primitive (P5 等) が参照する別ペアの
+                       mid close 整列配列 (T107)。key は OANDA pair 名
+                       ("EUR_USD" 等)、value は target bars と同一長の
+                       np.ndarray[float64] (欠番は NaN)。align_to が exact
+                       timestamp matching の唯一の権威 (SSOT) で、primitive 側は
+                       bar_time を再検証しない。default は空 dict。
 
     Note:
         pip_size / quote_currency などの pair metadata は将来拡張で追加する。
@@ -258,8 +258,8 @@ class EvaluationContext:
     event_snapshot: EconomicEventSnapshot | None = None
     vix_snapshot: VixSeriesSnapshot | None = None
     strict_snapshot_required: bool = False
-    # --- T013 追加（default 空 dict で後方互換） ---
-    aux_pair_bars: Mapping[str, Sequence[PriceBar | None]] = field(
+    # --- T013 追加（default 空 dict で後方互換）。T107 で columnar mid 配列に置換 ---
+    aux_pair_mid_close: Mapping[str, np.ndarray] = field(
         default_factory=dict
     )
 

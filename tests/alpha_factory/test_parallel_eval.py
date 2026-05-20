@@ -830,13 +830,15 @@ class TestRegistryEvaluatorPicklability:
         restored = pickle.loads(pickle.dumps(ev))
         assert restored._pair == "EUR_JPY"
 
-    def test_picklable_with_aux_pair_bars(self) -> None:
+    def test_picklable_with_aux_pair_mid_close(self) -> None:
         from src.alpha_factory.primitives import RegistryEvaluator
 
-        aux = {"USD_JPY": [_make_bars(2)[0]]}
-        ev = RegistryEvaluator(pair="EUR_JPY", aux_pair_bars=aux)
+        aux = {"USD_JPY": np.asarray([1.1, 1.2], dtype=np.float64)}
+        ev = RegistryEvaluator(pair="EUR_JPY", aux_pair_mid_close=aux)
         restored = pickle.loads(pickle.dumps(ev))
-        assert "USD_JPY" in restored._aux_pair_bars
+        assert "USD_JPY" in restored._aux_pair_mid_close
+        # unpickle 後も re-freeze で read-only 維持
+        assert restored._aux_pair_mid_close["USD_JPY"].flags.writeable is False
 
 
 class TestStageGateConfigPicklability:

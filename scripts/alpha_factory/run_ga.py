@@ -1883,12 +1883,16 @@ def main(argv: list[str] | None = None) -> int:
             logger.info(
                 "preflight.aux_bundle_built",
                 daily_series_count=len(aux_bundle.daily_series),
-                aux_pair_bars_count=sum(
-                    len(v) for v in aux_bundle.aux_pair_bars_index.values()
+                aux_pair_mid_count=sum(
+                    int(v.mid_close.size)
+                    for v in aux_bundle.aux_pair_mid_index.values()
                 ),
                 event_calendar_loaded=aux_bundle.event_calendar is not None,
                 vix_snapshot_loaded=aux_bundle.vix_snapshot is not None,
             )
+            # T107: raw columnar 構築直後の RSS (aux pair mid index 構築効果を観測)。
+            # align は worker 側で lazy に行われるため main では raw 構築が支配的。
+            _log_phase_marker("after_raw_aux_index_built")
     except Exception as exc:
         # preflight が effective_strict=True で失敗 → re-raise (fail-closed)
         # それ以外は WARN log を残して aux_bundle=None で継続 (safe default 経路)

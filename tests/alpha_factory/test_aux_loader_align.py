@@ -24,15 +24,25 @@ from src.alpha_factory.aux_loader import (
     AlignedAuxBundle,
     AuxAlignmentCache,
     AuxBundle,
+    AuxPairMidSeries,
     DailyObservation,
+    _to_epoch_ns,
     build_aux_bundle_from_db,
-    load_aux_pair_bars_index,
+    load_aux_pair_mid_index,
     load_daily_series_from_db,
     series_id_to_aux_key,
 )
 from src.db.connection import Base
 from src.db.models import CurrencyPair, MacroIndexDaily, PriceBarM1
 from src.domain.price import Ohlc, PriceBar
+
+
+def _mid_series(*ts_mid: tuple[datetime, float]) -> AuxPairMidSeries:
+    """(datetime, mid) ペアから AuxPairMidSeries を構築するテスト helper."""
+    ts = np.asarray([_to_epoch_ns(t) for t, _ in ts_mid], dtype=np.int64)
+    mid = np.asarray([m for _, m in ts_mid], dtype=np.float64)
+    return AuxPairMidSeries(ts_epoch_ns=ts, mid_close=mid)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -225,7 +235,7 @@ class TestAlignToStageAlignment:
         aligned = raw.align_to([])
         assert aligned.aux_series == {}
         assert aligned.event_snapshot is None
-        assert aligned.aux_pair_bars == {}
+        assert aligned.aux_pair_mid_close == {}
 
 
 class TestAlignToReturnsNdarray:
@@ -246,39 +256,88 @@ class TestAlignToReturnsNdarray:
         assert arr.dtype == np.float64
 
 
-class TestAlignToAuxPairBars:
-    def test_missing_returns_none(self) -> None:
-        """欠番は None で padding."""
+class TestAlignToAuxPairMidClose:
+    def test_exact_match_and_miss_is_nan(self) -> None:
+        """T107: exact-match は mid 値、 欠番は NaN."""
         ts1 = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)
         ts2 = datetime(2026, 1, 5, 13, 0, tzinfo=UTC)
         ts_missing = datetime(2026, 1, 5, 14, 0, tzinfo=UTC)
-        index = {
-            ts1: _make_bar(ts1, pair="EUR_USD"),
-            ts2: _make_bar(ts2, pair="EUR_USD"),
-        }
-        raw = AuxBundle(aux_pair_bars_index={"EUR_USD": index})
-        target_bars = [
-            _make_bar(ts1),
-            _make_bar(ts2),
-            _make_bar(ts_missing),
-        ]
+        raw = AuxBundle(
+            aux_pair_mid_index={"EUR_USD": _mid_series((ts1, 1.1), (ts2, 1.2))}
+        )
+        target_bars = [_make_bar(ts1), _make_bar(ts2), _make_bar(ts_missing)]
         aligned = raw.align_to(target_bars)
-        eu = aligned.aux_pair_bars["EUR_USD"]
-        assert eu[0] is not None
-        assert eu[1] is not None
-        assert eu[2] is None
+        eu = aligned.aux_pair_mid_close["EUR_USD"]
+        assert eu[0] == 1.1
+        assert eu[1] == 1.2
+        assert np.isnan(eu[2])
 
-    def test_misalign_treated_as_missing_via_dict_lookup(self) -> None:
-        """misalign: bar_time が完全一致しない → None (dict lookup なので採用しない).
+    def test_target_before_first_is_nan(self) -> None:
+        """T107: target_ns < raw 先頭 → NaN (pos=0 だが不一致)."""
+        ts_raw = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)
+        ts_before = datetime(2026, 1, 5, 11, 0, tzinfo=UTC)
+        raw = AuxBundle(aux_pair_mid_index={"EUR_USD": _mid_series((ts_raw, 1.1))})
+        aligned = raw.align_to([_make_bar(ts_before)])
+        assert np.isnan(aligned.aux_pair_mid_close["EUR_USD"][0])
 
-        実際の MISALIGNMENT 検出は primitive 側 (pair_specific.py:95) の責務.
-        """
+    def test_target_after_last_is_nan(self) -> None:
+        """T107: target_ns > raw 末尾 → NaN (pos==size, in_range で防御)."""
+        ts_raw = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)
+        ts_after = datetime(2026, 1, 5, 13, 0, tzinfo=UTC)
+        raw = AuxBundle(aux_pair_mid_index={"EUR_USD": _mid_series((ts_raw, 1.1))})
+        aligned = raw.align_to([_make_bar(ts_after)])
+        assert np.isnan(aligned.aux_pair_mid_close["EUR_USD"][0])
+
+    def test_equal_last_is_matched(self) -> None:
+        """T107: target_ns == raw 末尾 → mid 値 (境界一致)."""
+        ts1 = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)
+        ts2 = datetime(2026, 1, 5, 13, 0, tzinfo=UTC)
+        raw = AuxBundle(
+            aux_pair_mid_index={"EUR_USD": _mid_series((ts1, 1.1), (ts2, 1.2))}
+        )
+        aligned = raw.align_to([_make_bar(ts2)])
+        assert aligned.aux_pair_mid_close["EUR_USD"][0] == 1.2
+
+    def test_misalign_is_nan_not_forward_fill(self) -> None:
+        """T107: bar_time が完全一致しない → NaN (forward-fill 禁止)."""
         ts1 = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)
         ts1_off = datetime(2026, 1, 5, 12, 5, tzinfo=UTC)  # 5min ずれ
-        index = {ts1: _make_bar(ts1, pair="EUR_USD")}
-        raw = AuxBundle(aux_pair_bars_index={"EUR_USD": index})
+        raw = AuxBundle(aux_pair_mid_index={"EUR_USD": _mid_series((ts1, 1.1))})
         aligned = raw.align_to([_make_bar(ts1_off)])
-        assert aligned.aux_pair_bars["EUR_USD"][0] is None
+        assert np.isnan(aligned.aux_pair_mid_close["EUR_USD"][0])
+
+    def test_empty_raw_all_nan(self) -> None:
+        """T107: raw 空 (pair_not_found) → 全 NaN."""
+        from src.alpha_factory.aux_loader import _empty_aux_pair_mid_series
+
+        raw = AuxBundle(aux_pair_mid_index={"EUR_USD": _empty_aux_pair_mid_series()})
+        ts1 = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)
+        aligned = raw.align_to([_make_bar(ts1)])
+        assert np.isnan(aligned.aux_pair_mid_close["EUR_USD"][0])
+
+    def test_aligned_mid_is_read_only(self) -> None:
+        """T107: 整列後 mid 配列は read-only."""
+        ts1 = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)
+        raw = AuxBundle(aux_pair_mid_index={"EUR_USD": _mid_series((ts1, 1.1))})
+        aligned = raw.align_to([_make_bar(ts1)])
+        assert aligned.aux_pair_mid_close["EUR_USD"].flags.writeable is False
+
+    def test_empty_bars_returns_empty(self) -> None:
+        """T107: 空 bars → 空 aux_pair_mid_close."""
+        ts1 = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)
+        raw = AuxBundle(aux_pair_mid_index={"EUR_USD": _mid_series((ts1, 1.1))})
+        aligned = raw.align_to([])
+        assert aligned.aux_pair_mid_close == {}
+
+    def test_pickle_roundtrip_refreezes(self) -> None:
+        """T107: pickle 復元後も read-only が維持される (__setstate__ re-freeze)."""
+        ts1 = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)
+        series = _mid_series((ts1, 1.1), (datetime(2026, 1, 5, 13, 0, tzinfo=UTC), 1.2))
+        restored = pickle.loads(pickle.dumps(series))
+        assert np.array_equal(restored.ts_epoch_ns, series.ts_epoch_ns)
+        assert np.array_equal(restored.mid_close, series.mid_close)
+        assert restored.ts_epoch_ns.flags.writeable is False
+        assert restored.mid_close.flags.writeable is False
 
 
 # ---------------------------------------------------------------------------
@@ -507,11 +566,11 @@ class TestAuxPairBarsLoader:
         session.commit()
         return row
 
-    def test_returns_bar_time_indexed_dict(self, sqlite_session) -> None:
+    def test_returns_columnar_mid_series(self, sqlite_session) -> None:
         pair = self._add_pair(sqlite_session, "EUR_USD")
         ts = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)
         self._add_bar(sqlite_session, pair.id, ts)
-        index = load_aux_pair_bars_index(
+        index = load_aux_pair_mid_index(
             db_session=sqlite_session,
             pairs=["EUR_USD"],
             period=(
@@ -520,10 +579,16 @@ class TestAuxPairBarsLoader:
             ),
         )
         assert "EUR_USD" in index
-        assert ts in index["EUR_USD"]
+        series = index["EUR_USD"]
+        assert series.ts_epoch_ns.tolist() == [_to_epoch_ns(ts)]
+        # mid = (1.0 + 1.01)/2
+        assert series.mid_close.tolist() == [1.005]
+        # read-only 契約
+        assert series.ts_epoch_ns.flags.writeable is False
+        assert series.mid_close.flags.writeable is False
 
-    def test_missing_pair_returns_empty_dict(self, sqlite_session) -> None:
-        index = load_aux_pair_bars_index(
+    def test_missing_pair_returns_empty_series(self, sqlite_session) -> None:
+        index = load_aux_pair_mid_index(
             db_session=sqlite_session,
             pairs=["NOPE_NOPE"],
             period=(
@@ -531,17 +596,18 @@ class TestAuxPairBarsLoader:
                 datetime(2026, 1, 31, tzinfo=UTC),
             ),
         )
-        assert index == {"NOPE_NOPE": {}}
+        assert index["NOPE_NOPE"].ts_epoch_ns.size == 0
+        assert index["NOPE_NOPE"].mid_close.size == 0
 
     def test_duplicate_minute_raises(self, sqlite_session) -> None:
-        """V15: 同 minute に複数 row があれば fail-fast."""
+        """V15 + monotonic/unique: 同 minute に複数 row があれば fail-fast."""
         pair = self._add_pair(sqlite_session, "EUR_USD")
         ts1 = datetime(2026, 1, 5, 12, 0, 0, tzinfo=UTC)
         ts2 = datetime(2026, 1, 5, 12, 0, 30, tzinfo=UTC)  # 同 minute (秒違い)
         self._add_bar(sqlite_session, pair.id, ts1)
         self._add_bar(sqlite_session, pair.id, ts2)
-        with pytest.raises(ValueError, match="duplicate bar_time"):
-            load_aux_pair_bars_index(
+        with pytest.raises(ValueError, match="non-monotonic/duplicate"):
+            load_aux_pair_mid_index(
                 db_session=sqlite_session,
                 pairs=["EUR_USD"],
                 period=(
@@ -551,7 +617,7 @@ class TestAuxPairBarsLoader:
             )
 
     def test_no_identity_map_pollution(self, sqlite_session) -> None:
-        """T106: column-tuple streaming は caller session の identity map に
+        """T106/T107: column-tuple streaming は caller session の identity map に
         PriceBarM1 entity を積まない (ORM entity 経路廃止の契約)."""
         pair = self._add_pair(sqlite_session, "EUR_USD")
         for minute in range(5):
@@ -562,7 +628,7 @@ class TestAuxPairBarsLoader:
             )
         # add/commit 後の identity map を expire してクリーンにする
         sqlite_session.expunge_all()
-        load_aux_pair_bars_index(
+        load_aux_pair_mid_index(
             db_session=sqlite_session,
             pairs=["EUR_USD"],
             period=(
@@ -577,8 +643,8 @@ class TestAuxPairBarsLoader:
         ]
         assert loaded_bar_rows == []
 
-    def test_stream_aux_pair_bars_closes_result_on_v15_raise(self) -> None:
-        """T106 (Round 2 Suggestion): V15 早期 ValueError でも result.close()."""
+    def test_stream_aux_pair_mid_closes_result_on_v15_raise(self) -> None:
+        """T106/T107: V15 早期 ValueError でも result.close()."""
 
         class _SpyResult:
             def __init__(self, rows: list[object]) -> None:
@@ -618,10 +684,10 @@ class TestAuxPairBarsLoader:
 
         result = _SpyResult([_row(0), _row(30)])
         session = _SpySession(result)
-        from src.alpha_factory.aux_loader import _stream_aux_pair_bars
+        from src.alpha_factory.aux_loader import _stream_aux_pair_mid
 
-        with pytest.raises(ValueError, match="duplicate bar_time"):
-            _stream_aux_pair_bars(
+        with pytest.raises(ValueError, match="non-monotonic/duplicate"):
+            _stream_aux_pair_mid(
                 session,  # type: ignore[arg-type]
                 pair_db_id=1,
                 pair_name="EUR_USD",
@@ -659,6 +725,54 @@ class TestBuildAuxBundleFromDb:
         assert len(bundle.daily_series["VIXCLS"]) == 1
         # vix_snapshot は VIXCLS から自動生成される
         assert bundle.vix_snapshot is not None
+
+    def test_db_build_to_align_to_p5_integration(self, sqlite_session) -> None:
+        """T107 (Critical 1): DB build → align_to → P5 の end-to-end 統合。
+
+        aux pair (EUR_USD/USD_JPY) を DB に入れ、 build_aux_bundle_from_db で
+        columnar 構築 → align_to で EUR_JPY target bars に整列 → P5 が動くこと。
+        契約移行で経路が壊れていないことを保証する。
+        """
+        from src.alpha_factory.primitives._base import EvaluationContext
+        from src.alpha_factory.primitives.pair_specific import P5_SPEC
+
+        # aux pair を 2 本 (EUR_USD/USD_JPY) DB 登録
+        loader = TestAuxPairBarsLoader()
+        eu_pair = loader._add_pair(sqlite_session, "EUR_USD")
+        uj_pair = loader._add_pair(sqlite_session, "USD_JPY")
+        target_bars = _make_bars(
+            datetime(2026, 1, 5, 12, 0, tzinfo=UTC), count=80, step_minutes=60
+        )
+        for tb in target_bars:
+            loader._add_bar(sqlite_session, eu_pair.id, tb.bar_time)
+            loader._add_bar(sqlite_session, uj_pair.id, tb.bar_time)
+        bundle = build_aux_bundle_from_db(
+            db_session=sqlite_session,
+            period=(
+                datetime(2026, 1, 1, tzinfo=UTC),
+                datetime(2026, 2, 1, tzinfo=UTC),
+            ),
+            series_ids=[],
+            aux_pairs=["EUR_USD", "USD_JPY"],
+        )
+        assert "EUR_USD" in bundle.aux_pair_mid_index
+        aligned = bundle.align_to(target_bars)
+        eu = aligned.aux_pair_mid_close["EUR_USD"]
+        uj = aligned.aux_pair_mid_close["USD_JPY"]
+        assert len(eu) == len(target_bars)
+        # 全 bar exact-match (DB と target が同 bar_time) → NaN なし
+        assert not np.isnan(eu).any()
+        assert not np.isnan(uj).any()
+        # P5 が動く (mid = (1.0+1.01)/2 = 1.005 一定)
+        ctx = EvaluationContext(
+            bars=target_bars,
+            idx=79,
+            pair="EUR_JPY",
+            params={"z_n": 60, "scale": 2.0},
+            aux_pair_mid_close={"EUR_USD": eu, "USD_JPY": uj},
+        )
+        out = P5_SPEC.compute_all_bars(ctx)
+        assert out.shape == (len(target_bars),)
 
 
 # ---------------------------------------------------------------------------

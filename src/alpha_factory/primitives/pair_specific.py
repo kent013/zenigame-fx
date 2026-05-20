@@ -11,7 +11,7 @@ USD_ZAR 起点: P11 EmergingMarketStressGate / P12 GoldCorrelationBias
 
 look-ahead bias 回避:
 - 全 primitive は bar_time UTC 固定の時刻枠 + 過去 bar / 過去 publication のみ参照
-- aux_pair_bars は bar_time strict 一致 (misalign は ValueError fail-fast)
+- aux_pair_mid_close は align_to で bar_time exact-match 整列済 (欠番 NaN, T107)
 - VIX は publication_ts < bar_time の bisect_left lookup (M5 と同方針)
 - aux_series の stale は `_stale_mask` で前 finite 値からの距離が staleness_bars 超で NaN
 
@@ -70,43 +70,6 @@ def _bar_time_minutes_utc(b: PriceBar) -> float:
     """UTC 換算 hour*60 + minute + second/60 (分単位、float)。"""
     t = b.bar_time.astimezone(UTC)
     return t.hour * 60.0 + t.minute + t.second / 60.0
-
-
-def _aligned_pair_close(
-    target_bars: Sequence[PriceBar],
-    aux_bars: Sequence[PriceBar | None],
-) -> np.ndarray:
-    """aux_bars[i] が None なら NaN、そうでなければ mid close を返す。
-
-    bar_time strict 一致 / 長さ一致を assert（misalignment は ValueError fail-fast）。
-
-    Args:
-        target_bars: 比較先の bars（時刻軸の基準）
-        aux_bars: aligned 別ペア bar 列（None 要素は stale 扱い → NaN）
-
-    Returns:
-        len(target_bars) の float64 配列。stale (None) は NaN。
-
-    Raises:
-        ValueError: 長さ不一致 / bar_time 不一致 (data integrity bug)
-    """
-    if len(aux_bars) != len(target_bars):
-        raise ValueError(
-            f"aux_pair_bars length mismatch: aux={len(aux_bars)} != "
-            f"bars={len(target_bars)}"
-        )
-    out = np.empty(len(target_bars), dtype=np.float64)
-    for i, (tb, ab) in enumerate(zip(target_bars, aux_bars, strict=True)):
-        if ab is None:
-            out[i] = np.nan
-            continue
-        if ab.bar_time != tb.bar_time:
-            raise ValueError(
-                f"aux_pair_bars bar_time mismatch at i={i}: "
-                f"aux={ab.bar_time!r} != target={tb.bar_time!r}"
-            )
-        out[i] = (float(ab.bid.close) + float(ab.ask.close)) * 0.5
-    return out
 
 
 _ComputeAllFn = Callable[[EvaluationContext], np.ndarray]
@@ -403,22 +366,26 @@ def _p5_compute_all(ctx: EvaluationContext) -> np.ndarray:
     """target = EUR_JPY、aux = EUR_USD * USD_JPY の合成 mid との残差を z-score 化し、
     符号反転で mean-revert signal (`-tanh(z / scale)`) を返す。
 
-    aux_pair_bars["EUR_USD"] / aux_pair_bars["USD_JPY"] が両方そろっているとき動作。
+    aux_pair_mid_close["EUR_USD"] / ["USD_JPY"] が両方そろっているとき動作 (T107)。
     片方でも MISSING_KEY なら warning + safe default 0.0 全 bar 返却。
-    misalign は ValueError fail-fast。
+    align_to が exact-match 整列済 (欠番 NaN)。長さ不一致は MISALIGNMENT fail-fast。
     """
     n = len(ctx.bars)
-    eu = ctx.aux_pair_bars.get("EUR_USD")
-    uj = ctx.aux_pair_bars.get("USD_JPY")
-    if eu is None or uj is None:
+    eu_close = ctx.aux_pair_mid_close.get("EUR_USD")
+    uj_close = ctx.aux_pair_mid_close.get("USD_JPY")
+    if eu_close is None or uj_close is None:
         if ctx.strict_snapshot_required:
             raise RuntimeError(
-                "P5: aux_pair_bars EUR_USD/USD_JPY missing but strict mode"
+                "P5: aux_pair_mid_close EUR_USD/USD_JPY missing but strict mode"
             )
-        _warn_missing("P5", "aux_pair_bars EUR_USD/USD_JPY")
+        _warn_missing("P5", "aux_pair_mid_close EUR_USD/USD_JPY")
         return np.zeros(n, dtype=np.float64)
-    eu_close = _aligned_pair_close(ctx.bars, eu)
-    uj_close = _aligned_pair_close(ctx.bars, uj)
+    # 長さ整合は align_to が保証するが防御的に MISALIGNMENT を fail-fast
+    if len(eu_close) != n or len(uj_close) != n:
+        raise ValueError(
+            f"P5: aux_pair_mid_close length mismatch eu={len(eu_close)} "
+            f"uj={len(uj_close)} bars={n}"
+        )
     target_close = _bars_to_mid_close(ctx.bars)
     synth = eu_close * uj_close
     residual = target_close - synth

@@ -7,7 +7,7 @@
 - 3 状態テスト: MISSING_KEY / STALE_VALUE / MISALIGNMENT
 - preflight verify (RegistryEvaluator.strict_aux_required)
 - strict_snapshot_required で compute 内 fail-fast
-- 後方互換 (F1-F14 / M1-M6 が aux_pair_bars 未指定で動く)
+- 後方互換 (F1-F14 / M1-M6 が aux_pair_mid_close 未指定で動く)
 """
 
 from __future__ import annotations
@@ -165,6 +165,27 @@ def _build_aligned_aux_bars(
     return out
 
 
+def _build_aligned_aux_mid(
+    target_bars: list[PriceBar],
+    *,
+    ratio: float = 1.1,
+) -> np.ndarray:
+    """target_bars に整列した synthetic 別ペア mid close 配列 (T107)。
+
+    各要素 = target mid close * ratio。旧 _build_aligned_aux_bars (bid=ask=ratio*
+    target → mid=(bid+ask)/2=ratio*target) と数値等価。
+    """
+    mid = np.asarray(
+        [
+            (float(tb.bid.close) + float(tb.ask.close)) * 0.5 * ratio
+            for tb in target_bars
+        ],
+        dtype=np.float64,
+    )
+    mid.setflags(write=False)
+    return mid
+
+
 def _mock_event_snapshot(
     events: list[EconomicEvent] | None = None,
     as_of: datetime | None = None,
@@ -212,7 +233,7 @@ def _ctx(
     *,
     pair: str = "EUR_USD",
     aux_series: dict[str, list[float]] | None = None,
-    aux_pair_bars: dict[str, list[PriceBar | None]] | None = None,
+    aux_pair_mid_close: dict[str, np.ndarray] | None = None,
     event_snapshot: EconomicEventSnapshot | None = None,
     vix_snapshot: VixSeriesSnapshot | None = None,
     strict: bool = False,
@@ -224,7 +245,7 @@ def _ctx(
         pair=pair,
         params=params_override or _default_params(spec),
         aux_series=aux_series or {},
-        aux_pair_bars=aux_pair_bars or {},
+        aux_pair_mid_close=aux_pair_mid_close or {},
         event_snapshot=event_snapshot,
         vix_snapshot=vix_snapshot,
         strict_snapshot_required=strict,
@@ -240,14 +261,14 @@ ALL_PAIR_SPECS = (
 def _full_aux_for(spec: PrimitiveSpec, bars: list[PriceBar]) -> dict:
     """spec の required_data + optional_data_groups を満たす aux dict を生成。"""
     aux_series: dict[str, list[float]] = {}
-    aux_pair_bars: dict[str, list[PriceBar | None]] = {}
+    aux_pair_mid_close: dict[str, np.ndarray] = {}
     n = len(bars)
     for k in spec.required_data:
         if k.startswith("macro.") and k != "macro.vix":
             aux_series[k] = _bar_aligned_series(n, value=100.0)
         elif k.startswith("cross_pair."):
             pname = k[len("cross_pair."):]
-            aux_pair_bars[pname] = list(_build_aligned_aux_bars(bars, pair_name=pname))
+            aux_pair_mid_close[pname] = _build_aligned_aux_mid(bars)
     for group in spec.optional_data_groups:
         # 1 つ目だけ供給
         k = group[0]
@@ -255,7 +276,7 @@ def _full_aux_for(spec: PrimitiveSpec, bars: list[PriceBar]) -> dict:
             aux_series[k] = _bar_aligned_series(n, value=100.0, drift=0.01)
     return {
         "aux_series": aux_series,
-        "aux_pair_bars": aux_pair_bars,
+        "aux_pair_mid_close": aux_pair_mid_close,
     }
 
 
@@ -314,7 +335,7 @@ class TestEachPrimitiveCommon:
             71,
             spec,
             aux_series=aux["aux_series"],
-            aux_pair_bars=aux["aux_pair_bars"],
+            aux_pair_mid_close=aux["aux_pair_mid_close"],
             event_snapshot=_mock_event_snapshot(),
             vix_snapshot=_mock_vix_snapshot(bars),
         )
@@ -329,7 +350,7 @@ class TestEachPrimitiveCommon:
                 idx,
                 spec,
                 aux_series=aux["aux_series"],
-                aux_pair_bars=aux["aux_pair_bars"],
+                aux_pair_mid_close=aux["aux_pair_mid_close"],
                 event_snapshot=_mock_event_snapshot(),
                 vix_snapshot=_mock_vix_snapshot(bars),
             )
@@ -356,7 +377,7 @@ class TestEachPrimitiveCommon:
             71,
             spec,
             aux_series=aux["aux_series"],
-            aux_pair_bars=aux["aux_pair_bars"],
+            aux_pair_mid_close=aux["aux_pair_mid_close"],
             event_snapshot=_mock_event_snapshot(),
             vix_snapshot=_mock_vix_snapshot(bars),
         )
@@ -384,7 +405,7 @@ class TestEachPrimitiveCommon:
             71,
             spec,
             aux_series=aux["aux_series"],
-            aux_pair_bars=aux["aux_pair_bars"],
+            aux_pair_mid_close=aux["aux_pair_mid_close"],
             event_snapshot=snap_e,
             vix_snapshot=snap_v,
         )
@@ -415,7 +436,7 @@ class TestEachPrimitiveCommon:
             71,
             spec,
             aux_series=aux_mod["aux_series"],
-            aux_pair_bars=aux_mod["aux_pair_bars"],
+            aux_pair_mid_close=aux_mod["aux_pair_mid_close"],
             event_snapshot=snap_e,
             vix_snapshot=snap_v,
         )
@@ -433,7 +454,7 @@ class TestEachPrimitiveCommon:
             71,
             spec,
             aux_series=aux_keep["aux_series"],
-            aux_pair_bars=aux_keep["aux_pair_bars"],
+            aux_pair_mid_close=aux_keep["aux_pair_mid_close"],
             event_snapshot=snap_e,
             vix_snapshot=snap_v,
         )
@@ -450,7 +471,7 @@ class TestEachPrimitiveCommon:
                 71,
                 spec,
                 aux_series=aux_fixed["aux_series"],
-                aux_pair_bars=aux_fixed["aux_pair_bars"],
+                aux_pair_mid_close=aux_fixed["aux_pair_mid_close"],
                 event_snapshot=snap_e,
                 vix_snapshot=snap_v,
             )
@@ -629,54 +650,72 @@ class TestP5CrossPairTriangulation:
     def test_aux_missing_returns_zero_with_warning(self):
         bars = _build_bars(80, seed=50, pair_name="EUR_JPY")
         ctx = _ctx(bars, 79, P5_SPEC, pair="EUR_JPY")
-        with pytest.warns(RuntimeWarning, match="aux_pair_bars"):
+        with pytest.warns(RuntimeWarning, match="aux_pair_mid_close"):
             arr = P5_SPEC.compute_all_bars(ctx)
         assert np.allclose(arr, 0.0)
 
-    def test_aux_misalign_raises_value_error(self):
+    def test_aux_length_mismatch_raises_value_error(self):
+        """T107: mid 配列長が bars と不一致 → MISALIGNMENT fail-fast."""
         bars = _build_bars(80, seed=51, pair_name="EUR_JPY")
-        # 長さ違いの aux
-        eu_short = _build_aligned_aux_bars(bars[:50], pair_name="EUR_USD")
-        uj = _build_aligned_aux_bars(bars, pair_name="USD_JPY")
+        eu_short = _build_aligned_aux_mid(bars[:50])
+        uj = _build_aligned_aux_mid(bars)
         ctx = _ctx(
             bars, 79, P5_SPEC, pair="EUR_JPY",
-            aux_pair_bars={"EUR_USD": list(eu_short), "USD_JPY": list(uj)},
+            aux_pair_mid_close={"EUR_USD": eu_short, "USD_JPY": uj},
         )
         with pytest.raises(ValueError, match="length mismatch"):
             P5_SPEC.compute_all_bars(ctx)
 
-    def test_aux_bar_time_mismatch_raises(self):
-        bars = _build_bars(80, seed=52, pair_name="EUR_JPY")
-        eu = _build_aligned_aux_bars(bars, pair_name="EUR_USD")
-        # eu の最初の bar の bar_time を改ざん
-        eu_mod_first = PriceBar(
-            pair_name="EUR_USD",
-            bar_time=bars[0].bar_time + timedelta(hours=1),  # mismatch!
-            bid=eu[0].bid, ask=eu[0].ask, volume=eu[0].volume,
-            complete=eu[0].complete,
-        )
-        eu_mod = [eu_mod_first, *list(eu[1:])]
-        uj = _build_aligned_aux_bars(bars, pair_name="USD_JPY")
-        ctx = _ctx(
-            bars, 79, P5_SPEC, pair="EUR_JPY",
-            aux_pair_bars={"EUR_USD": eu_mod, "USD_JPY": list(uj)},
-        )
-        with pytest.raises(ValueError, match="bar_time mismatch"):
-            P5_SPEC.compute_all_bars(ctx)
-
-    def test_aux_with_none_returns_nan_for_that_bar(self):
+    def test_aux_with_nan_returns_nan_for_that_bar(self):
+        """T107: align で欠番 (NaN) になった bar は P5 でも NaN 伝播."""
         bars = _build_bars(80, seed=53, pair_name="EUR_JPY")
-        eu = list(_build_aligned_aux_bars(bars, pair_name="EUR_USD"))
-        eu[40] = None  # type: ignore[assignment]
-        uj = list(_build_aligned_aux_bars(bars, pair_name="USD_JPY"))
+        eu = _build_aligned_aux_mid(bars).copy()  # writable copy
+        eu[40] = np.nan
+        uj = _build_aligned_aux_mid(bars)
         ctx = _ctx(
             bars, 79, P5_SPEC, pair="EUR_JPY",
-            aux_pair_bars={"EUR_USD": eu, "USD_JPY": uj},
+            aux_pair_mid_close={"EUR_USD": eu, "USD_JPY": uj},
         )
         arr = P5_SPEC.compute_all_bars(ctx)
-        # idx 40 は NaN になる (zscore も NaN 伝播し得る)
-        # → 周辺も zscore window で NaN 化、少なくとも 40 は NaN
         assert np.isnan(arr[40])
+
+    def test_golden_equivalence_vs_legacy_priceBar_path(self):
+        """T107 一次判定 KPI: columnar mid 経路が旧 PriceBar 経路と数値一致.
+
+        旧 _aligned_pair_close は aux PriceBar の (bid.close+ask.close)/2 を mid と
+        したため、 _build_aligned_aux_bars(ratio) の mid = target_mid*ratio。
+        新 _build_aligned_aux_mid も同値。両者で P5 出力配列が完全一致することを
+        np.testing.assert_array_equal (NaN 同位置許容) で検証する。
+        """
+        bars = _build_bars(120, seed=77, pair_name="EUR_JPY")
+        # legacy 相当: PriceBar list から mid を手計算 (旧 _aligned_pair_close 同式)
+        eu_bars = _build_aligned_aux_bars(bars, ratio=1.07, pair_name="EUR_USD")
+        uj_bars = _build_aligned_aux_bars(bars, ratio=0.93, pair_name="USD_JPY")
+        eu_legacy = np.asarray(
+            [(float(b.bid.close) + float(b.ask.close)) * 0.5 for b in eu_bars],
+            dtype=np.float64,
+        )
+        uj_legacy = np.asarray(
+            [(float(b.bid.close) + float(b.ask.close)) * 0.5 for b in uj_bars],
+            dtype=np.float64,
+        )
+        # new: columnar helper
+        eu_new = _build_aligned_aux_mid(bars, ratio=1.07)
+        uj_new = _build_aligned_aux_mid(bars, ratio=0.93)
+        np.testing.assert_array_equal(eu_new, eu_legacy)
+        np.testing.assert_array_equal(uj_new, uj_legacy)
+        # P5 出力一致
+        ctx_legacy = _ctx(
+            bars, 119, P5_SPEC, pair="EUR_JPY",
+            aux_pair_mid_close={"EUR_USD": eu_legacy, "USD_JPY": uj_legacy},
+        )
+        ctx_new = _ctx(
+            bars, 119, P5_SPEC, pair="EUR_JPY",
+            aux_pair_mid_close={"EUR_USD": eu_new, "USD_JPY": uj_new},
+        )
+        out_legacy = P5_SPEC.compute_all_bars(ctx_legacy)
+        out_new = P5_SPEC.compute_all_bars(ctx_new)
+        np.testing.assert_array_equal(out_new, out_legacy)
 
     def test_strict_mode_raises_when_missing(self):
         bars = _build_bars(80, seed=54, pair_name="EUR_JPY")
@@ -1006,7 +1045,7 @@ class TestStaleValue:
 
 
 class TestPreflightVerify:
-    def test_missing_aux_pair_bars_raises(self):
+    def test_missing_cross_pair_mid_raises(self):
         # P5 requires both cross_pair.EUR_USD and cross_pair.USD_JPY.
         # set iteration order is non-deterministic — どちらが先に検出されても OK
         with pytest.raises(
@@ -1091,17 +1130,17 @@ class TestStrictSnapshotPerCall:
 
 
 # ---------------------------------------------------------------------------
-# 後方互換: F1-F14 / M1-M6 が aux_pair_bars 未指定で動く
+# 後方互換: F1-F14 / M1-M6 が aux_pair_mid_close 未指定で動く
 # ---------------------------------------------------------------------------
 
 
 class TestBackwardCompatibility:
-    def test_evaluation_context_without_aux_pair_bars_works(self):
+    def test_evaluation_context_without_aux_pair_mid_close_works(self):
         bars = _build_bars(50, seed=150)
         ctx = EvaluationContext(
             bars=bars, idx=49, pair="EUR_USD", params={"n": 14}
         )
-        assert ctx.aux_pair_bars == {}
+        assert ctx.aux_pair_mid_close == {}
 
     def test_existing_f_primitives_work(self):
         bars = _build_bars(80, seed=151)
@@ -1140,11 +1179,11 @@ class TestViaRegistryEvaluator:
         from src.dsl.genome import SignalConfig
 
         bars = _build_bars(80, seed=160, pair_name="EUR_JPY")
-        eu = list(_build_aligned_aux_bars(bars, pair_name="EUR_USD"))
-        uj = list(_build_aligned_aux_bars(bars, pair_name="USD_JPY"))
+        eu = _build_aligned_aux_mid(bars)
+        uj = _build_aligned_aux_mid(bars)
         ev = RegistryEvaluator(
             pair="EUR_JPY",
-            aux_pair_bars={"EUR_USD": eu, "USD_JPY": uj},
+            aux_pair_mid_close={"EUR_USD": eu, "USD_JPY": uj},
             event_snapshot=_mock_event_snapshot(),
             vix_snapshot=_mock_vix_snapshot(bars),
             aux_series={
