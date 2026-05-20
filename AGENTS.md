@@ -166,6 +166,15 @@ CLI override: `scripts/alpha_factory/run_ga.py --stage-b-gate-kind profit_safe_p
 
 根拠: archive 実測 Spearman ρ(median_oos_sharpe → trade_sharpe_stage_c)=-0.361 (curve-fit 逆予測)、Run 74 で Stage B 通過 96 個体全例赤字。
 
+### warmstart pool (T101)
+
+GA 初期集団に既知 mission/Stage-C 個体を注入し、mission 個体を **seed 非依存に保持** する再現性確保機構 (seed-locked 探索への対処)。評価関数・閾値・selection は不変。
+
+- `GAConfig.warmstart_ratio: float = 0.0` (default 0.0 = 完全行動不変)、`warmstart_motif_archive: str | None`。
+- CLI: `scripts/alpha_factory/run_ga.py --warmstart-ratio 0.1 --warmstart-motif-archive .cache/alpha_factory/runs/genomes_run_XXX.parquet`。
+- motif 抽出: archive から `stage_c_pass==True AND total_pnl>=20000` を mission_score 降順で最大 64 件。初期集団の先頭 1 個体は最良 motif の非 mutate アンカー (厳密保持)、残りは mutate 派生。
+- `warmstart_ratio=0.0` で initialize は random_genome のみ (rng 消費順・population 完全不変)。archive 不在/該当 0 は fail-soft (warmstart なしで継続)。
+
 詳細: `docs/alpha_factory/stage-gates.md` § "T099 cycle 22: Stage B gate profit_safe_pfr opt-in" / `devnotes/20260513-2007-fx-improve/detailed-design.md` (Codex Round 3 APPROVED)。
 
 ---

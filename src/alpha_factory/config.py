@@ -163,10 +163,19 @@ class GAConfig:
     # 決定論: 退役 worker は同一 initargs で再 init されるため L1/L2 不変。
     # @ref: devnotes/20260514-2045-ga-worker-memory/
     max_tasks_per_child: int | None = None
+    # T101: warmstart pool。初期集団の warmstart_ratio 分を既知 mission/Stage-C
+    # 個体 (warmstart_motif_archive の archive Parquet から抽出) で生成し、
+    # mission 個体を seed 非依存に保持する (再現性確保)。default 0.0 = 完全行動不変。
+    warmstart_ratio: float = 0.0
+    warmstart_motif_archive: str | None = None
 
     def __post_init__(self) -> None:
         if self.population_size < 1:
             raise ValueError("ga.population_size must be >= 1")
+        if not 0.0 <= self.warmstart_ratio <= 1.0:
+            raise ValueError(
+                f"ga.warmstart_ratio must be in [0, 1]: {self.warmstart_ratio}"
+            )
         if self.max_workers < 1:
             raise ValueError(
                 f"ga.max_workers must be >= 1: {self.max_workers}"
@@ -525,6 +534,8 @@ def _build_ga(raw: Mapping[str, Any]) -> GAConfig:
             if (mtpc := raw.get("max_tasks_per_child")) is not None
             else None
         ),
+        warmstart_ratio=float(raw.get("warmstart_ratio", 0.0)),
+        warmstart_motif_archive=raw.get("warmstart_motif_archive"),
     )
 
 
