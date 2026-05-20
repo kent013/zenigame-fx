@@ -75,6 +75,25 @@ __all__ = [
 DEFAULT_FRED_DIR: Final[Path] = Path("data/raw/fred")
 DEFAULT_CALENDAR_PATH: Final[Path] = Path("data/raw/calendar/events.csv")
 
+# T106: aux pair bars の server-side cursor streaming バッチサイズ
+# (run_ga._LOAD_BARS_BATCH_SIZE と同値で一貫させる)。
+_LOAD_BARS_BATCH_SIZE: Final[int] = 10_000
+
+# T106: PriceBar 構築に必要な列のみ取得 (ORM entity を identity map に載せない)。
+_PRICE_BAR_M1_COLUMNS: Final = (
+    PriceBarM1.bar_time,
+    PriceBarM1.open_bid,
+    PriceBarM1.high_bid,
+    PriceBarM1.low_bid,
+    PriceBarM1.close_bid,
+    PriceBarM1.open_ask,
+    PriceBarM1.high_ask,
+    PriceBarM1.low_ask,
+    PriceBarM1.close_ask,
+    PriceBarM1.volume,
+    PriceBarM1.complete,
+)
+
 
 # series_id → primitive 側の aux_series key (例: "VIXCLS" → "macro.vix")
 SERIES_ID_TO_AUX_KEY: Final[dict[str, str]] = {
@@ -570,39 +589,83 @@ def load_aux_pair_bars_index(
         欠番は None で padding される (caller 責務).
     """
     out: dict[str, dict[datetime, PriceBar]] = {}
-    for pair_id in pairs:
+    for pair_name in pairs:
         pair = db_session.scalars(
-            select(CurrencyPair).where(CurrencyPair.oanda_name == pair_id)
+            select(CurrencyPair).where(CurrencyPair.oanda_name == pair_name)
         ).one_or_none()
         if pair is None:
-            out[pair_id] = {}
+            out[pair_name] = {}
             logger.warning(
                 "aux_loader.aux_pair_bars.pair_not_found",
-                pair=pair_id,
+                pair=pair_name,
             )
             continue
-        rows = (
-            db_session.scalars(
-                select(PriceBarM1)
-                .where(PriceBarM1.pair_id == pair.id)
-                .where(PriceBarM1.bar_time >= period[0])
-                .where(PriceBarM1.bar_time < period[1])
-                .order_by(PriceBarM1.bar_time.asc())
-            )
-            .all()
+        out[pair_name] = _stream_aux_pair_bars(
+            db_session,
+            pair_db_id=pair.id,
+            pair_name=pair_name,
+            start=period[0],
+            end=period[1],
         )
-        index: dict[datetime, PriceBar] = {}
-        for r in rows:
-            key = _normalize_bar_time(r.bar_time)
+    return out
+
+
+def _stream_aux_pair_bars(
+    db_session: Session,
+    *,
+    pair_db_id: int,
+    pair_name: str,
+    start: datetime,
+    end: datetime,
+    batch_size: int = _LOAD_BARS_BATCH_SIZE,
+) -> dict[datetime, PriceBar]:
+    """server-side cursor で column tuple streaming し dict を構築する (T106).
+
+    caller-owned ``db_session`` を渡すが、 ORM entity ではなく必要列のみ取得する
+    ため identity map に bar が乗らない (caller に副作用を残さない)。 V15
+    fail-fast の早期 ValueError 時も ``result.close()`` で cursor を解放する。
+    row は属性アクセスのみで消費する (``row.bar_time`` 等)。
+    """
+    stmt = (
+        select(*_PRICE_BAR_M1_COLUMNS)
+        .where(PriceBarM1.pair_id == pair_db_id)
+        .where(PriceBarM1.bar_time >= start)
+        .where(PriceBarM1.bar_time < end)
+        .order_by(PriceBarM1.bar_time.asc())
+        .execution_options(yield_per=batch_size)
+    )
+    index: dict[datetime, PriceBar] = {}
+    result = db_session.execute(stmt)
+    try:
+        for row in result:
+            key = _normalize_bar_time(row.bar_time)
             if key in index:
                 # V15: 同 minute に複数 row → fail-fast (異常データ)
                 raise ValueError(
                     f"aux_pair_bars duplicate bar_time after normalize "
-                    f"for pair={pair_id} bar_time={key.isoformat()}"
+                    f"for pair={pair_name} bar_time={key.isoformat()}"
                 )
-            index[key] = _bar_row_to_price_bar(r, pair_id)
-        out[pair_id] = index
-    return out
+            index[key] = PriceBar(
+                pair_name=pair_name,
+                bar_time=row.bar_time,
+                bid=Ohlc(
+                    open=row.open_bid,
+                    high=row.high_bid,
+                    low=row.low_bid,
+                    close=row.close_bid,
+                ),
+                ask=Ohlc(
+                    open=row.open_ask,
+                    high=row.high_ask,
+                    low=row.low_ask,
+                    close=row.close_ask,
+                ),
+                volume=row.volume,
+                complete=row.complete,
+            )
+    finally:
+        result.close()
+    return index
 
 
 def _bar_row_to_price_bar(r: PriceBarM1, pair_name: str) -> PriceBar:
