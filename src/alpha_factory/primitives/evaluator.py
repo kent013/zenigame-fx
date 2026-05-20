@@ -7,7 +7,7 @@ src/dsl/strategy.py の `PrimitiveEvaluator` Protocol を structural に満た�
 （evaluate(bars, idx, signal) -> float）。
 
 T013 拡張:
-- aux_pair_bars / event_snapshot / vix_snapshot を kwarg で保持し、EvaluationContext に流す
+- aux_pair_mid_close / event_snapshot / vix_snapshot を kwarg で保持し、EvaluationContext に流す
 - strict_aux_required + selected_primitive_ids で起動時 preflight verify
 - preflight verify は selected primitive の required_data + optional_data_groups を
   union し、provider の有無を確認 (RuntimeError fail-fast)
@@ -29,6 +29,21 @@ from src.domain.price import PriceBar
 from src.dsl.genome import SignalConfig
 
 
+def _freeze_aux_pair_mid(
+    aux_pair_mid_close: Mapping[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    """各 mid 配列を read-only 化した新 dict を返す (T107).
+
+    pickle/unpickle 後に numpy 配列の writeable が True に戻るため、 evaluator
+    受領時に re-freeze して cross-evaluation contamination を防ぐ。
+    """
+    out: dict[str, np.ndarray] = {}
+    for key, arr in aux_pair_mid_close.items():
+        arr.setflags(write=False)
+        out[key] = arr
+    return out
+
+
 class RegistryEvaluator:
     """PrimitiveEvaluator Protocol (src/dsl/strategy.py) の実装。
 
@@ -38,7 +53,7 @@ class RegistryEvaluator:
     Attributes:
         pair: 評価対象の通貨ペア名（pair_specific primitive が参照）。
         aux_series: 補助時系列 Mapping（本 TODO では呼び出し側が直接用意）。
-        aux_pair_bars: cross-pair 別ペアの aligned bar 列（T013 追加）。
+        aux_pair_mid_close: cross-pair 別ペアの mid close 整列配列（T107）。
         event_snapshot/vix_snapshot: snapshot を流すためのフィールド (T012/T013)。
         strict_snapshot_required: True なら snapshot/aux 欠損時に compute 内で
                                   RuntimeError raise（per-call strict）。
@@ -59,7 +74,7 @@ class RegistryEvaluator:
         *,
         pair: str,
         aux_series: Mapping[str, Sequence[float]] | None = None,
-        aux_pair_bars: Mapping[str, Sequence[PriceBar | None]] | None = None,
+        aux_pair_mid_close: Mapping[str, np.ndarray] | None = None,
         event_snapshot: EconomicEventSnapshot | None = None,
         vix_snapshot: VixSeriesSnapshot | None = None,
         strict_snapshot_required: bool = False,
@@ -71,8 +86,11 @@ class RegistryEvaluator:
         self._aux_series: Mapping[str, Sequence[float]] = (
             dict(aux_series) if aux_series is not None else {}
         )
-        self._aux_pair_bars: Mapping[str, Sequence[PriceBar | None]] = (
-            dict(aux_pair_bars) if aux_pair_bars is not None else {}
+        # T107: mid close 整列配列。unpickle 後 writable に戻るため re-freeze。
+        self._aux_pair_mid_close: Mapping[str, np.ndarray] = (
+            _freeze_aux_pair_mid(aux_pair_mid_close)
+            if aux_pair_mid_close is not None
+            else {}
         )
         self._event_snapshot = event_snapshot
         self._vix_snapshot = vix_snapshot
@@ -86,6 +104,12 @@ class RegistryEvaluator:
                 )
             self._preflight_verify(tuple(selected_primitive_ids))
 
+    def __setstate__(self, state: dict) -> None:
+        # T107: unpickle 後に aux_pair_mid 配列を re-freeze (worker 経路で
+        # writable に戻るのを防ぐ。 cross-evaluation contamination 防御)。
+        self.__dict__.update(state)
+        self._aux_pair_mid_close = _freeze_aux_pair_mid(self._aux_pair_mid_close)
+
     def _is_aux_provided(self, key: str) -> bool:
         """単一 key が現 evaluator で provide されるか判定 (optional group 用)。"""
         if key in self._BARS_PROVIDED_KEYS:
@@ -98,7 +122,7 @@ class RegistryEvaluator:
                 and bool(self._vix_snapshot.observations)
             )
         if key.startswith("cross_pair."):
-            return key[len("cross_pair."):] in self._aux_pair_bars
+            return key[len("cross_pair."):] in self._aux_pair_mid_close
         if key.startswith("macro."):
             return key in self._aux_series
         return False
@@ -136,7 +160,7 @@ class RegistryEvaluator:
         self,
         *,
         aux_series: Mapping[str, Sequence[float]] | None = None,
-        aux_pair_bars: Mapping[str, Sequence[PriceBar | None]] | None = None,
+        aux_pair_mid_close: Mapping[str, np.ndarray] | None = None,
         event_snapshot: EconomicEventSnapshot | None = None,
         vix_snapshot: VixSeriesSnapshot | None = None,
     ) -> RegistryEvaluator:
@@ -149,8 +173,11 @@ class RegistryEvaluator:
         new = RegistryEvaluator.__new__(RegistryEvaluator)
         new._pair = self._pair
         new._aux_series = dict(aux_series) if aux_series is not None else dict(self._aux_series)
-        new._aux_pair_bars = (
-            dict(aux_pair_bars) if aux_pair_bars is not None else dict(self._aux_pair_bars)
+        # T107: 注入された mid 配列を re-freeze (unpickle 後 writable 復元対策)
+        new._aux_pair_mid_close = (
+            _freeze_aux_pair_mid(aux_pair_mid_close)
+            if aux_pair_mid_close is not None
+            else dict(self._aux_pair_mid_close)
         )
         new._event_snapshot = (
             event_snapshot if event_snapshot is not None else self._event_snapshot
@@ -180,7 +207,7 @@ class RegistryEvaluator:
             event_snapshot=self._event_snapshot,
             vix_snapshot=self._vix_snapshot,
             strict_snapshot_required=self._strict_snapshot_required,
-            aux_pair_bars=self._aux_pair_bars,
+            aux_pair_mid_close=self._aux_pair_mid_close,
         )
         return spec.compute(ctx)
 
@@ -207,6 +234,6 @@ class RegistryEvaluator:
             event_snapshot=self._event_snapshot,
             vix_snapshot=self._vix_snapshot,
             strict_snapshot_required=self._strict_snapshot_required,
-            aux_pair_bars=self._aux_pair_bars,
+            aux_pair_mid_close=self._aux_pair_mid_close,
         )
         return spec.compute_all_bars(ctx)

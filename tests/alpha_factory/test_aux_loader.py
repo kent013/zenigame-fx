@@ -179,7 +179,7 @@ class TestBuildAuxBundle:
         assert bundle.event_snapshot is None
         assert bundle.vix_snapshot is None
         assert bundle.aux_series == {}
-        assert bundle.aux_pair_bars == {}
+        assert bundle.aux_pair_mid_index == {}
 
     def test_full_bundle(self, tmp_path: Path) -> None:
         fred = tmp_path / "fred"

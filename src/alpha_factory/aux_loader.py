@@ -1,14 +1,14 @@
 """T057 Phase 2 Gate A/B: aux data loader (raw container + per-stage alignment).
 
 production GA で `RegistryEvaluator` に注入する `EconomicEventSnapshot` /
-`VixSeriesSnapshot` / `aux_series` / `aux_pair_bars` を構築する loader。
+`VixSeriesSnapshot` / `aux_series` / `aux_pair_mid_close` を構築する loader。
 
 設計の柱:
     - **AuxBundle (raw container)**: DB / CSV 由来の生データを保持する
-      `daily_series` / `event_calendar` / `aux_pair_bars_index` の dict を持つ。
+      `daily_series` / `event_calendar` / `aux_pair_mid_index` の dict を持つ。
     - **AlignedAuxBundle (per-stage)**: `AuxBundle.align_to(bars)` で bars と
       同じ長さに整列された `aux_series: dict[str, np.ndarray]` /
-      `aux_pair_bars: dict[str, list[PriceBar | None]]` 等を持つ。
+      `aux_pair_mid_close: dict[str, np.ndarray]` 等を持つ (T107 columnar)。
     - **AuxAlignmentCache**: stage 別 (Stage A 60d / Stage B 18m / holdout) に
       align 結果を 1 度だけ計算してキャッシュする。
 
@@ -16,9 +16,9 @@ look-ahead bias 防止:
     - `DailyObservation.effective_from_utc` (`src/ingest/effective_from.py`)
       でしか forward-fill を許さない。`bar.bar_time >= obs.effective_from_utc`
       を満たす最新 obs を採用する.
-    - aux_pair_bars は M1 解像度に正規化 (tz-aware UTC + 秒切り捨て) した上で
-      `dict[bar_time, PriceBar]` lookup を行い欠番は None を返す。
-    - 同一 minute に複数 PriceBar が DB にある場合は **fail-fast** (ValueError).
+    - aux pair は M1 解像度に正規化 (tz-aware UTC + 秒切り捨て) した epoch ns で
+      columnar 保持し、align_to が searchsorted exact-match で整列する (欠番 NaN)。
+    - 同一 minute に複数 row が DB にある場合は **fail-fast** (ValueError).
 
 詳細: devnotes/20260427-2234-aux-data-loader-phase2/
 """
@@ -43,7 +43,7 @@ from src.alpha_factory.primitives._base import (
     VixSeriesSnapshot,
 )
 from src.db.models import CurrencyPair, MacroIndexDaily, PriceBarM1
-from src.domain.price import Ohlc, PriceBar
+from src.domain.price import PriceBar
 from src.events.calendar import EconomicCalendar, EconomicEvent
 from src.ingest.effective_from import (
     EffectiveFromSource,
@@ -59,10 +59,11 @@ __all__ = [
     "AlignedAuxBundle",
     "AuxAlignmentCache",
     "AuxBundle",
+    "AuxPairMidSeries",
     "DailyObservation",
     "build_aux_bundle",
     "build_aux_bundle_from_db",
-    "load_aux_pair_bars_index",
+    "load_aux_pair_mid_index",
     "load_aux_series",
     "load_daily_series_from_db",
     "load_dxy_series",
@@ -93,6 +94,30 @@ _PRICE_BAR_M1_COLUMNS: Final = (
     PriceBarM1.volume,
     PriceBarM1.complete,
 )
+
+# T107: aux pair mid streaming に必要な列のみ (bid/ask close)。
+_AUX_PAIR_MID_COLUMNS: Final = (
+    PriceBarM1.bar_time,
+    PriceBarM1.close_bid,
+    PriceBarM1.close_ask,
+)
+
+# T107: epoch ナノ秒の単一権威 (float 経路を使わず整数算出)。
+_EPOCH_UTC: Final = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _to_epoch_ns(dt: datetime) -> int:
+    """tz-aware/naive datetime → UTC epoch ナノ秒 int (T107)。
+
+    epoch 単位の単一権威。float 経路 (timestamp()*1e9) は丸め誤差を生むため
+    使わず、 timedelta の整数フィールド (days/seconds/microseconds) から ns を
+    整数算出する。raw 構築と target 整列の双方が本関数のみを使う契約。
+    """
+    d = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    d = d.astimezone(UTC)
+    delta = d - _EPOCH_UTC
+    total_us = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+    return total_us * 1_000
 
 
 # series_id → primitive 側の aux_series key (例: "VIXCLS" → "macro.vix")
@@ -141,16 +166,72 @@ class DailyObservation:
 
 
 @dataclass(frozen=True)
+class AuxPairMidSeries:
+    """aux pair の bar_time → mid_close を columnar に保持する (T107).
+
+    契約 (構築時 fail-fast 検証):
+      - ts_epoch_ns: UTC epoch ナノ秒 int64、 strict monotonic increasing + unique
+      - mid_close: float64、 ts_epoch_ns と同一長
+      - mid_close[i] = (bid_close + ask_close)/2 (P5 と同一の float 演算)
+    両配列は read-only。pickle 復元後も __setstate__ で再 freeze する
+    (cross-evaluation contamination 防御)。
+    """
+
+    ts_epoch_ns: np.ndarray
+    mid_close: np.ndarray
+
+    def _validate_and_freeze(self) -> None:
+        """dtype/shape/strict monotonic を fail-fast 検証し read-only 化する。
+
+        searchsorted exact-match が依存する不変条件 (sorted/unique) を構築・
+        復元の両時点で保証する。setflags は in-place なので frozen でも可。
+        """
+        ts, mid = self.ts_epoch_ns, self.mid_close
+        if ts.dtype != np.int64 or mid.dtype != np.float64:
+            raise ValueError(
+                f"AuxPairMidSeries dtype invalid: ts={ts.dtype} mid={mid.dtype}"
+            )
+        if ts.ndim != 1 or mid.ndim != 1 or ts.shape != mid.shape:
+            raise ValueError(
+                f"AuxPairMidSeries shape invalid: ts={ts.shape} mid={mid.shape}"
+            )
+        if ts.size > 1 and not bool(np.all(np.diff(ts) > 0)):
+            raise ValueError(
+                "AuxPairMidSeries ts_epoch_ns must be strict monotonic + unique"
+            )
+        ts.setflags(write=False)
+        mid.setflags(write=False)
+
+    def __post_init__(self) -> None:
+        self._validate_and_freeze()
+
+    def __setstate__(self, state: dict) -> None:
+        # unpickle 後に検証 + read-only 再適用 (pickle は writable に戻すため)。
+        # slots 化耐性のため object.__setattr__ を使う。
+        object.__setattr__(self, "ts_epoch_ns", state["ts_epoch_ns"])
+        object.__setattr__(self, "mid_close", state["mid_close"])
+        self._validate_and_freeze()
+
+
+def _empty_aux_pair_mid_series() -> AuxPairMidSeries:
+    """read-only 空 AuxPairMidSeries (pair_not_found 等で使用)."""
+    ts = np.empty(0, dtype=np.int64)
+    mid = np.empty(0, dtype=np.float64)
+    return AuxPairMidSeries(ts_epoch_ns=ts, mid_close=mid)
+
+
+@dataclass(frozen=True)
 class AlignedAuxBundle:
     """bars と同じ長さに整列済みの aux bundle (per-stage instance).
 
     `aux_series` は `np.ndarray[float64]`、長さは bars と完全一致。
+    `aux_pair_mid_close` は cross-pair の mid close 整列配列 (欠番 NaN, read-only)。
     """
 
     aux_series: Mapping[str, np.ndarray]
     event_snapshot: EconomicEventSnapshot | None
     vix_snapshot: VixSeriesSnapshot | None
-    aux_pair_bars: Mapping[str, Sequence[PriceBar | None]]
+    aux_pair_mid_close: Mapping[str, np.ndarray]
 
     def as_evaluator_kwargs(self) -> dict[str, Any]:
         """RegistryEvaluator constructor に渡す dict."""
@@ -158,7 +239,7 @@ class AlignedAuxBundle:
             "aux_series": dict(self.aux_series),
             "event_snapshot": self.event_snapshot,
             "vix_snapshot": self.vix_snapshot,
-            "aux_pair_bars": dict(self.aux_pair_bars),
+            "aux_pair_mid_close": dict(self.aux_pair_mid_close),
         }
 
 
@@ -167,23 +248,25 @@ class AuxBundle:
     """Raw aux container — stage 別 bars に align される前.
 
     Phase 1 互換のため、後方互換のフィールド (`aux_series` / `event_snapshot` /
-    `vix_snapshot` / `aux_pair_bars`) も保持する。これらは「全 bars にわたって
-    pre-align された結果ではなく、生データそのもの」である。
+    `vix_snapshot`) も保持する。これらは「全 bars にわたって pre-align された
+    結果ではなく、生データそのもの」である。
+
+    T107: aux pair は重い `dict[datetime, PriceBar]` ではなく columnar
+    `AuxPairMidSeries` (ts_epoch_ns + mid_close) で保持する。
     """
 
     daily_series: dict[str, list[DailyObservation]] = field(default_factory=dict)
     event_calendar: EconomicCalendar | None = None
     vix_snapshot: VixSeriesSnapshot | None = None
-    aux_pair_bars_index: dict[str, dict[datetime, PriceBar]] = field(
+    aux_pair_mid_index: dict[str, AuxPairMidSeries] = field(
         default_factory=dict
     )
 
     # ---- Phase 1 後方互換 ----
     # build_aux_bundle (CSV 経路) は既存テスト互換のため `aux_series: list[float]`
-    # / `event_snapshot` / `aux_pair_bars: list[PriceBar | None]` を保持できる
+    # / `event_snapshot` を保持できる
     aux_series: dict[str, list[float]] = field(default_factory=dict)
     event_snapshot: EconomicEventSnapshot | None = None
-    aux_pair_bars: dict[str, list[PriceBar | None]] = field(default_factory=dict)
 
     def align_to(
         self,
@@ -203,7 +286,7 @@ class AuxBundle:
                 aux_series={},
                 event_snapshot=None,
                 vix_snapshot=None,
-                aux_pair_bars={},
+                aux_pair_mid_close={},
             )
 
         n = len(bars)
@@ -240,20 +323,36 @@ class AuxBundle:
         #    publication_ts 比較の bisect を行う既存契約)
         vix_snapshot = self.vix_snapshot
 
-        # 4. aux_pair_bars: bar_time strict 一致で取得、欠番は None
-        aux_pair_bars: dict[str, list[PriceBar | None]] = {}
-        for pair_id, bar_index in self.aux_pair_bars_index.items():
-            aligned: list[PriceBar | None] = []
-            for bar in bars:
-                key = _normalize_bar_time(bar.bar_time)
-                aligned.append(bar_index.get(key))
-            aux_pair_bars[pair_id] = aligned
+        # 4. aux_pair_mid_close: target bars の epoch に searchsorted で exact-match。
+        #    align_to is the sole authority for exact timestamp matching (SSOT)。
+        #    forward-fill 禁止 (exact-match のみ、 look-ahead 防止)。consumer は
+        #    bar_time を再検証しない。欠番は NaN。
+        # raw 側と同じ正規化 (秒/マイクロ秒切捨て) を target にも適用する。
+        # 非対称だと target に秒成分があるとき silent NaN になるため (T107 review)。
+        target_ns = np.fromiter(
+            (_to_epoch_ns(_normalize_bar_time(b.bar_time)) for b in bars),
+            dtype=np.int64,
+            count=n,
+        )
+        aux_pair_mid_close: dict[str, np.ndarray] = {}
+        for pair_name, series in self.aux_pair_mid_index.items():
+            out = np.full(n, np.nan, dtype=np.float64)
+            raw_ts = series.ts_epoch_ns
+            if raw_ts.size > 0:
+                pos = np.searchsorted(raw_ts, target_ns, side="left")
+                in_range = pos < raw_ts.size
+                valid = np.zeros(n, dtype=bool)
+                # exact-match 行のみ採用 (raw_ts[pos] == target_ns)
+                valid[in_range] = raw_ts[pos[in_range]] == target_ns[in_range]
+                out[valid] = series.mid_close[pos[valid]]
+            out.setflags(write=False)
+            aux_pair_mid_close[pair_name] = out
 
         return AlignedAuxBundle(
             aux_series=aux_series,
             event_snapshot=event_snapshot,
             vix_snapshot=vix_snapshot,
-            aux_pair_bars=aux_pair_bars,
+            aux_pair_mid_close=aux_pair_mid_close,
         )
 
 
@@ -301,7 +400,7 @@ def _bar_time_utc(ts: datetime) -> datetime:
 def _normalize_bar_time(ts: datetime) -> datetime:
     """M1 bar_time を正規化: tz-aware UTC + 秒・マイクロ秒を 0 に丸める.
 
-    aux_pair_bars の dict[bar_time] lookup で target bars と DB の datetime
+    aux pair の bar_time 整列で target bars と DB の datetime
     が完全一致するように、両側で同じ正規化を適用する。
     """
     ts_utc = _bar_time_utc(ts)
@@ -480,9 +579,9 @@ def build_aux_bundle(
 ) -> AuxBundle:
     """CSV 経路 (Phase 1 互換, test fixture 用)。
 
-    既存テストの後方互換のため、`aux_series` / `event_snapshot` / `vix_snapshot` /
-    `aux_pair_bars` をそのまま埋める。`daily_series` / `aux_pair_bars_index` は
-    空のままにする (新 align_to 経路はテスト fixture では未使用)。
+    既存テストの後方互換のため、`aux_series` / `event_snapshot` / `vix_snapshot`
+    をそのまま埋める。`daily_series` / `aux_pair_mid_index` は空のままにする
+    (CSV 経路は aux pair を持たない)。
     """
     event_snapshot = load_event_snapshot(
         as_of=as_of,
@@ -495,7 +594,6 @@ def build_aux_bundle(
         aux_series=aux_series,
         event_snapshot=event_snapshot,
         vix_snapshot=vix_snapshot,
-        aux_pair_bars={},
         event_calendar=load_event_calendar(calendar_path),
     )
 
@@ -572,35 +670,34 @@ def _row_source(r: MacroIndexDaily) -> Literal[
     return "policy_conservative"
 
 
-def load_aux_pair_bars_index(
+def load_aux_pair_mid_index(
     *,
     db_session: Session,
     pairs: Sequence[str],
     period: tuple[datetime, datetime],
-) -> dict[str, dict[datetime, PriceBar]]:
-    """aux pair の M1 bars を bar_time index で取得する.
+) -> dict[str, AuxPairMidSeries]:
+    """aux pair の M1 mid close を columnar (ts_epoch_ns + mid_close) で取得する (T107).
 
-    bar_time は M1 解像度に正規化 (tz-aware UTC + 秒切り捨て)。
-    同 minute に複数 PriceBar がある場合は **fail-fast** (V15 反映).
+    bar_time は M1 解像度に正規化 (tz-aware UTC + 秒切り捨て) し epoch ns へ変換。
+    同 minute に複数 row / 非単調がある場合は **fail-fast** (V15 + monotonic/unique).
 
     Returns:
-        pair_id → {normalized_bar_time: PriceBar} の dict.
-        align_to 側で target_bars をループしながら lookup する設計.
-        欠番は None で padding される (caller 責務).
+        pair_name → AuxPairMidSeries (ts_epoch_ns sorted/unique + mid_close).
+        align_to が searchsorted で exact-match 整列する (SSOT)。
     """
-    out: dict[str, dict[datetime, PriceBar]] = {}
+    out: dict[str, AuxPairMidSeries] = {}
     for pair_name in pairs:
         pair = db_session.scalars(
             select(CurrencyPair).where(CurrencyPair.oanda_name == pair_name)
         ).one_or_none()
         if pair is None:
-            out[pair_name] = {}
+            out[pair_name] = _empty_aux_pair_mid_series()
             logger.warning(
                 "aux_loader.aux_pair_bars.pair_not_found",
                 pair=pair_name,
             )
             continue
-        out[pair_name] = _stream_aux_pair_bars(
+        out[pair_name] = _stream_aux_pair_mid(
             db_session,
             pair_db_id=pair.id,
             pair_name=pair_name,
@@ -610,7 +707,7 @@ def load_aux_pair_bars_index(
     return out
 
 
-def _stream_aux_pair_bars(
+def _stream_aux_pair_mid(
     db_session: Session,
     *,
     pair_db_id: int,
@@ -618,75 +715,46 @@ def _stream_aux_pair_bars(
     start: datetime,
     end: datetime,
     batch_size: int = _LOAD_BARS_BATCH_SIZE,
-) -> dict[datetime, PriceBar]:
-    """server-side cursor で column tuple streaming し dict を構築する (T106).
+) -> AuxPairMidSeries:
+    """server-side cursor streaming で (ts_epoch_ns, mid_close) を構築する (T107).
 
-    caller-owned ``db_session`` を渡すが、 ORM entity ではなく必要列のみ取得する
-    ため identity map に bar が乗らない (caller に副作用を残さない)。 V15
-    fail-fast の早期 ValueError 時も ``result.close()`` で cursor を解放する。
-    row は属性アクセスのみで消費する (``row.bar_time`` 等)。
+    bid/ask close のみ取得 (PriceBar dataclass を作らない)。 caller-owned
+    ``db_session`` を渡すが ORM entity ではなく必要列のみ取得するため identity
+    map を汚さない。 ORDER BY asc + ns<=prev で strict monotonic + unique を
+    fail-fast 検証 (V15: 同 minute normalize 重複も検出)。 途中例外時も
+    ``result.close()`` で cursor を解放。 row は属性アクセスのみで消費する。
     """
     stmt = (
-        select(*_PRICE_BAR_M1_COLUMNS)
+        select(*_AUX_PAIR_MID_COLUMNS)
         .where(PriceBarM1.pair_id == pair_db_id)
         .where(PriceBarM1.bar_time >= start)
         .where(PriceBarM1.bar_time < end)
         .order_by(PriceBarM1.bar_time.asc())
         .execution_options(yield_per=batch_size)
     )
-    index: dict[datetime, PriceBar] = {}
+    ts_list: list[int] = []
+    mid_list: list[float] = []
+    seen_last_ns: int | None = None
     result = db_session.execute(stmt)
     try:
         for row in result:
-            key = _normalize_bar_time(row.bar_time)
-            if key in index:
-                # V15: 同 minute に複数 row → fail-fast (異常データ)
+            key = _normalize_bar_time(row.bar_time)  # tz-aware UTC, 秒切捨て
+            ns = _to_epoch_ns(key)
+            if seen_last_ns is not None and ns <= seen_last_ns:
+                # V15 + monotonic/unique: normalize 重複 or 非単調 → fail-fast
                 raise ValueError(
-                    f"aux_pair_bars duplicate bar_time after normalize "
-                    f"for pair={pair_name} bar_time={key.isoformat()}"
+                    f"aux_pair_mid non-monotonic/duplicate bar_time after "
+                    f"normalize for pair={pair_name} ns={ns} (prev={seen_last_ns})"
                 )
-            index[key] = PriceBar(
-                pair_name=pair_name,
-                bar_time=row.bar_time,
-                bid=Ohlc(
-                    open=row.open_bid,
-                    high=row.high_bid,
-                    low=row.low_bid,
-                    close=row.close_bid,
-                ),
-                ask=Ohlc(
-                    open=row.open_ask,
-                    high=row.high_ask,
-                    low=row.low_ask,
-                    close=row.close_ask,
-                ),
-                volume=row.volume,
-                complete=row.complete,
-            )
+            seen_last_ns = ns
+            ts_list.append(ns)
+            # P5 と同一の float 演算順序 (bid+ask)*0.5
+            mid_list.append((float(row.close_bid) + float(row.close_ask)) * 0.5)
     finally:
         result.close()
-    return index
-
-
-def _bar_row_to_price_bar(r: PriceBarM1, pair_name: str) -> PriceBar:
-    return PriceBar(
-        pair_name=pair_name,
-        bar_time=r.bar_time,
-        bid=Ohlc(
-            open=r.open_bid,
-            high=r.high_bid,
-            low=r.low_bid,
-            close=r.close_bid,
-        ),
-        ask=Ohlc(
-            open=r.open_ask,
-            high=r.high_ask,
-            low=r.low_ask,
-            close=r.close_ask,
-        ),
-        volume=r.volume,
-        complete=r.complete,
-    )
+    ts = np.asarray(ts_list, dtype=np.int64)
+    mid = np.asarray(mid_list, dtype=np.float64)
+    return AuxPairMidSeries(ts_epoch_ns=ts, mid_close=mid)
 
 
 def build_aux_bundle_from_db(
@@ -703,13 +771,13 @@ def build_aux_bundle_from_db(
         db_session: SQLAlchemy session.
         period: 取得対象期間 (UTC datetime range).
         series_ids: macro_index_daily から取得する series_id list.
-        aux_pairs: aux_pair_bars として取得する OANDA pair name list.
+        aux_pairs: aux pair mid として取得する OANDA pair name list.
             default は空 (P5 不要なら空のままでよい).
         calendar_path: economic_event は DB ではなく CSV 経路を維持
             (Phase 2 段階では DB ↔ CSV 経路の整合は別 TODO).
 
     Returns:
-        AuxBundle. `daily_series` / `aux_pair_bars_index` / `event_calendar` /
+        AuxBundle. `daily_series` / `aux_pair_mid_index` / `event_calendar` /
         `vix_snapshot` を埋めて返す.
     """
     daily_series: dict[str, list[DailyObservation]] = {}
@@ -737,8 +805,8 @@ def build_aux_bundle_from_db(
             )
             vix_snapshot = None
 
-    aux_pair_bars_index = (
-        load_aux_pair_bars_index(
+    aux_pair_mid_index = (
+        load_aux_pair_mid_index(
             db_session=db_session,
             pairs=aux_pairs,
             period=period,
@@ -753,5 +821,5 @@ def build_aux_bundle_from_db(
         daily_series=daily_series,
         event_calendar=event_calendar,
         vix_snapshot=vix_snapshot,
-        aux_pair_bars_index=aux_pair_bars_index,
+        aux_pair_mid_index=aux_pair_mid_index,
     )
