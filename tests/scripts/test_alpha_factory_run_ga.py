@@ -119,6 +119,25 @@ class _ScalarsResult:
         return []
 
 
+class _ExecuteResult:
+    """T106: SQLAlchemy ``session.execute(stmt)`` Result の薄い mock.
+
+    `_stream_bars` は属性アクセスのみで row を消費する契約なので、 row は
+    SimpleNamespace (bar_time / open_bid / ... 属性を持つ) をそのまま yield する。
+    `__iter__` + `close()` を実装し、 try/finally の close 契約をテスト可能にする。
+    """
+
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+        self.closed = False
+
+    def __iter__(self) -> Any:
+        return iter(self._rows)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _MockSession:
     """``SessionLocal`` 置換 mock。stmt の内容のみで分岐する (call-order 非依存)。
 
@@ -148,34 +167,36 @@ class _MockSession:
     def __exit__(self, *a: Any) -> None:
         return None
 
+    def _classify_bars_stmt(self, stmt: Any) -> tuple[str, list[Any]]:
+        """price_bar_m1 stmt を holdout / stage_b に振り分ける (共通ロジック)."""
+        try:
+            compiled = stmt.compile(compile_kwargs={"literal_binds": True})
+            compiled_str = str(compiled).lower()
+        except Exception:  # pragma: no cover - fallback
+            compiled_str = str(stmt).lower()
+        end_iso = self._dataset_end.isoformat(sep=" ").lower()
+        if f">= '{end_iso}'" in compiled_str or f">='{end_iso}'" in compiled_str:
+            return "holdout", self._holdout_rows
+        return "stage_b", self._stage_b_rows
+
     def scalars(self, stmt: Any) -> _ScalarsResult:
         stmt_str = str(stmt).lower()
         if "currency_pair" in stmt_str and "price_bar_m1" not in stmt_str:
             return _ScalarsResult("pair", [], self._pair)
         if "price_bar_m1" in stmt_str:
-            # whereclause から bar_time の境界を compile して取得
-            try:
-                compiled = stmt.compile(
-                    compile_kwargs={"literal_binds": True}
-                )
-                compiled_str = str(compiled).lower()
-            except Exception:  # pragma: no cover - fallback
-                compiled_str = stmt_str
-            end_iso = self._dataset_end.isoformat(sep=" ").lower()
-            # Stage B クエリは bar_time < dataset.end を含む
-            # holdout クエリは bar_time >= dataset.end を含む
-            # literal_binds で "bar_time >= '2026-01-08 00:00:00+00:00'" 形式
-            if f">= '{end_iso}'" in compiled_str or (
-                f">='{end_iso}'" in compiled_str
-            ):
-                kind = "holdout"
-                rows = self._holdout_rows
-            else:
-                kind = "stage_b"
-                rows = self._stage_b_rows
+            kind, rows = self._classify_bars_stmt(stmt)
             self.bars_calls.append(kind)
             return _ScalarsResult("bars", list(rows), None)
         return _ScalarsResult("unknown", [], None)
+
+    def execute(self, stmt: Any) -> _ExecuteResult:
+        """T106: column-tuple streaming 経路 (``session.execute(stmt)``)。"""
+        stmt_str = str(stmt).lower()
+        if "price_bar_m1" in stmt_str:
+            kind, rows = self._classify_bars_stmt(stmt)
+            self.bars_calls.append(kind)
+            return _ExecuteResult(list(rows))
+        return _ExecuteResult([])
 
 
 def _install_mock_session(
@@ -503,6 +524,205 @@ def test_load_lane_bars_raises_when_dataset_smaller_or_equal_to_stage_a(
         run_ga_module._load_lane_bars(
             cfg.dataset.instrument, cfg.dataset, cfg.stage_windows
         )
+
+
+# ---------------------------------------------------------------------------
+# T106: server-side cursor streaming
+# ---------------------------------------------------------------------------
+
+
+class _SpyExecuteResult:
+    """execute 結果 mock: rows を yield しつつ close 呼び出しを記録する."""
+
+    def __init__(self, rows: list[Any], *, raise_after: int | None = None) -> None:
+        self._rows = rows
+        self._raise_after = raise_after
+        self.closed = False
+
+    def __iter__(self) -> Any:
+        for i, row in enumerate(self._rows):
+            if self._raise_after is not None and i >= self._raise_after:
+                raise RuntimeError("simulated iteration error")
+            yield row
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _SpySession:
+    """execute(stmt) を 1 度だけ受ける spy。 stmt と result を保持する."""
+
+    def __init__(self, result: _SpyExecuteResult) -> None:
+        self.result = result
+        self.executed_stmt: Any = None
+
+    def execute(self, stmt: Any) -> _SpyExecuteResult:
+        self.executed_stmt = stmt
+        return self.result
+
+
+def test_load_lane_bars_streams_via_yield_per() -> None:
+    """T106: _stream_bars の stmt に yield_per が乗り、 result.close() が呼ばれる."""
+    pair = _make_currency_pair("EUR_JPY")
+    rows = _generate_bar_rows(
+        pair,
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 1, 1, 3, tzinfo=UTC),
+        step_minutes=60,
+    )
+    result = _SpyExecuteResult(rows)
+    session = _SpySession(result)
+
+    bars = run_ga_module._stream_bars(
+        session,  # type: ignore[arg-type]
+        pair_id=pair.id,
+        pair_name="EUR_JPY",
+        start=datetime(2026, 1, 1, tzinfo=UTC),
+        end=datetime(2026, 1, 1, 3, tzinfo=UTC),
+        batch_size=2,
+    )
+    assert len(bars) == len(rows)
+    # yield_per execution option が stmt に乗っていること
+    exec_opts = session.executed_stmt.get_execution_options()
+    assert exec_opts.get("yield_per") == 2
+    # try/finally で close されること
+    assert result.closed is True
+
+
+def test_stream_bars_closes_result_on_exception() -> None:
+    """T106 (Round 2 Suggestion): iteration 中の例外でも result.close() される."""
+    pair = _make_currency_pair("EUR_JPY")
+    rows = _generate_bar_rows(
+        pair,
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 1, 1, 5, tzinfo=UTC),
+        step_minutes=60,
+    )
+    result = _SpyExecuteResult(rows, raise_after=2)
+    session = _SpySession(result)
+
+    with pytest.raises(RuntimeError, match="simulated iteration error"):
+        run_ga_module._stream_bars(
+            session,  # type: ignore[arg-type]
+            pair_id=pair.id,
+            pair_name="EUR_JPY",
+            start=datetime(2026, 1, 1, tzinfo=UTC),
+            end=datetime(2026, 1, 1, 5, tzinfo=UTC),
+        )
+    assert result.closed is True
+
+
+def test_stream_bars_uses_attribute_access_only() -> None:
+    """T106: row は属性アクセスのみで消費する (row[0] / _mapping を使わない)."""
+
+    class _AttrOnlyRow:
+        def __init__(self, bar_time: datetime) -> None:
+            self.bar_time = bar_time
+            self.open_bid = Decimal("154.000")
+            self.high_bid = Decimal("154.000")
+            self.low_bid = Decimal("154.000")
+            self.close_bid = Decimal("154.000")
+            self.open_ask = Decimal("154.005")
+            self.high_ask = Decimal("154.005")
+            self.low_ask = Decimal("154.005")
+            self.close_ask = Decimal("154.005")
+            self.volume = 10
+            self.complete = True
+
+        def __getitem__(self, idx: Any) -> Any:  # index access は契約違反
+            raise AssertionError("row[...] index access is forbidden by contract")
+
+    rows = [_AttrOnlyRow(datetime(2026, 1, 1, tzinfo=UTC))]
+    result = _SpyExecuteResult(rows)
+    session = _SpySession(result)
+
+    bars = run_ga_module._stream_bars(
+        session,  # type: ignore[arg-type]
+        pair_id=1,
+        pair_name="EUR_JPY",
+        start=datetime(2026, 1, 1, tzinfo=UTC),
+        end=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    assert len(bars) == 1
+    assert bars[0].bid.open == Decimal("154.000")
+    assert result.closed is True
+
+
+def test_load_lane_bars_equivalent_to_legacy_via_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T106: streaming 化後の bars が ORM row 変換 (legacy) と digest 一致する."""
+    from src.alpha_factory.bars_digest import bars_digest
+
+    pair, stage_b_rows, holdout_rows = _prepare_smoke_inputs(
+        fallback_holdout=False
+    )
+    _install_mock_session(
+        monkeypatch,
+        pair,
+        stage_b_rows,
+        holdout_rows,
+        datetime(2026, 1, 8, tzinfo=UTC),
+    )
+    from src.alpha_factory.config import load_config as _load
+
+    cfg = _load(CONFIG_PATH)
+    bundle = run_ga_module._load_lane_bars(
+        cfg.dataset.instrument, cfg.dataset, cfg.stage_windows
+    )
+    # legacy 参照: 同じ rows を _bar_row_to_price_bar で変換した期待値
+    legacy_stage_b_full = [
+        run_ga_module._bar_row_to_price_bar(r, "EUR_JPY") for r in stage_b_rows
+    ]
+    legacy_holdout = [
+        run_ga_module._bar_row_to_price_bar(r, "EUR_JPY") for r in holdout_rows
+    ]
+    streamed_full = list(bundle.bars_stage_b) + list(bundle.bars_stage_a)
+    assert bars_digest(streamed_full) == bars_digest(legacy_stage_b_full)
+    assert bars_digest(bundle.bars_holdout) == bars_digest(legacy_holdout)
+
+
+def test_phase_rss_marker_emits_main_rss_mb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T106: _log_phase_marker が phase + main_rss_mb を logger.info に出す."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        run_ga_module.logger,
+        "info",
+        lambda event, **kw: events.append((event, kw)),
+    )
+    run_ga_module._log_phase_marker("after_stage_b_full_load", bar_count=42)
+    assert len(events) == 1
+    event, kw = events[0]
+    assert event == "run_ga.phase_rss_marker"
+    assert kw["phase"] == "after_stage_b_full_load"
+    assert kw["main_rss_mb"] >= 0.0
+    assert kw["error_type"] is None
+    assert kw["bar_count"] == 42
+
+
+def test_phase_rss_marker_records_error_type_on_psutil_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T106 (Round 2 Suggestion): psutil 例外時 main_rss_mb=-1.0 + error_type."""
+    import psutil
+
+    def _boom() -> Any:
+        raise psutil.Error("simulated psutil failure")
+
+    monkeypatch.setattr(psutil, "Process", _boom)
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        run_ga_module.logger,
+        "info",
+        lambda event, **kw: events.append((event, kw)),
+    )
+    run_ga_module._log_phase_marker("before_ga_loop")
+    assert len(events) == 1
+    _, kw = events[0]
+    assert kw["main_rss_mb"] == -1.0
+    assert kw["error_type"] == "Error"
 
 
 def test_smoke_run_holdout_ok(

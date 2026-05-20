@@ -550,6 +550,86 @@ class TestAuxPairBarsLoader:
                 ),
             )
 
+    def test_no_identity_map_pollution(self, sqlite_session) -> None:
+        """T106: column-tuple streaming は caller session の identity map に
+        PriceBarM1 entity を積まない (ORM entity 経路廃止の契約)."""
+        pair = self._add_pair(sqlite_session, "EUR_USD")
+        for minute in range(5):
+            self._add_bar(
+                sqlite_session,
+                pair.id,
+                datetime(2026, 1, 5, 12, minute, tzinfo=UTC),
+            )
+        # add/commit 後の identity map を expire してクリーンにする
+        sqlite_session.expunge_all()
+        load_aux_pair_bars_index(
+            db_session=sqlite_session,
+            pairs=["EUR_USD"],
+            period=(
+                datetime(2026, 1, 1, tzinfo=UTC),
+                datetime(2026, 1, 31, tzinfo=UTC),
+            ),
+        )
+        loaded_bar_rows = [
+            obj
+            for obj in sqlite_session.identity_map.values()
+            if isinstance(obj, PriceBarM1)
+        ]
+        assert loaded_bar_rows == []
+
+    def test_stream_aux_pair_bars_closes_result_on_v15_raise(self) -> None:
+        """T106 (Round 2 Suggestion): V15 早期 ValueError でも result.close()."""
+
+        class _SpyResult:
+            def __init__(self, rows: list[object]) -> None:
+                self._rows = rows
+                self.closed = False
+
+            def __iter__(self):
+                return iter(self._rows)
+
+            def close(self) -> None:
+                self.closed = True
+
+        class _SpySession:
+            def __init__(self, result: object) -> None:
+                self.result = result
+
+            def execute(self, stmt: object) -> object:
+                return self.result
+
+        # 同 minute (秒違い) の 2 row → normalize 後重複 → V15 raise
+        from types import SimpleNamespace
+
+        def _row(sec: int):
+            return SimpleNamespace(
+                bar_time=datetime(2026, 1, 5, 12, 0, sec, tzinfo=UTC),
+                open_bid=Decimal("1.0"),
+                high_bid=Decimal("1.0"),
+                low_bid=Decimal("1.0"),
+                close_bid=Decimal("1.0"),
+                open_ask=Decimal("1.01"),
+                high_ask=Decimal("1.01"),
+                low_ask=Decimal("1.01"),
+                close_ask=Decimal("1.01"),
+                volume=1,
+                complete=True,
+            )
+
+        result = _SpyResult([_row(0), _row(30)])
+        session = _SpySession(result)
+        from src.alpha_factory.aux_loader import _stream_aux_pair_bars
+
+        with pytest.raises(ValueError, match="duplicate bar_time"):
+            _stream_aux_pair_bars(
+                session,  # type: ignore[arg-type]
+                pair_db_id=1,
+                pair_name="EUR_USD",
+                start=datetime(2026, 1, 1, tzinfo=UTC),
+                end=datetime(2026, 1, 31, tzinfo=UTC),
+            )
+        assert result.closed is True
+
 
 # ---------------------------------------------------------------------------
 # Build aux bundle from db (smoke)

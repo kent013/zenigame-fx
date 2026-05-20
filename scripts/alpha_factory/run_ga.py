@@ -41,10 +41,11 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from scripts.alpha_factory.get_latest_run_number import get_latest_run_number
 from src.alpha_factory._registry_bridge import build_random_gen_registry
@@ -474,24 +475,140 @@ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _bar_row_to_price_bar(row: PriceBarM1, pair_name: str) -> PriceBar:
+# T106: server-side cursor streaming のバッチサイズ。 1 タスク = 1 row ではなく
+# DB → client への row 転送をこの単位でバッファする (psycopg3 server-side cursor)。
+# smoke で 5_000 とも比較する (devnotes/20260520-0954-db-load-yield-per/)。
+_LOAD_BARS_BATCH_SIZE: Final[int] = 10_000
+
+# T106: PriceBar 構築に必要な列のみ取得する (ORM entity を identity map に
+# 載せず、 ロード中の二重保持を回避する)。
+_PRICE_BAR_M1_COLUMNS: Final = (
+    PriceBarM1.bar_time,
+    PriceBarM1.open_bid,
+    PriceBarM1.high_bid,
+    PriceBarM1.low_bid,
+    PriceBarM1.close_bid,
+    PriceBarM1.open_ask,
+    PriceBarM1.high_ask,
+    PriceBarM1.low_ask,
+    PriceBarM1.close_ask,
+    PriceBarM1.volume,
+    PriceBarM1.complete,
+)
+
+
+def _construct_price_bar(
+    *,
+    pair_name: str,
+    bar_time: datetime,
+    open_bid: Decimal,
+    high_bid: Decimal,
+    low_bid: Decimal,
+    close_bid: Decimal,
+    open_ask: Decimal,
+    high_ask: Decimal,
+    low_ask: Decimal,
+    close_ask: Decimal,
+    volume: int,
+    complete: bool,
+) -> PriceBar:
+    """Row tuple / ORM row どちらからでも PriceBar を組み立てる共通関数 (T106)."""
     return PriceBar(
         pair_name=pair_name,
+        bar_time=bar_time,
+        bid=Ohlc(open=open_bid, high=high_bid, low=low_bid, close=close_bid),
+        ask=Ohlc(open=open_ask, high=high_ask, low=low_ask, close=close_ask),
+        volume=volume,
+        complete=complete,
+    )
+
+
+def _bar_row_to_price_bar(row: PriceBarM1, pair_name: str) -> PriceBar:
+    return _construct_price_bar(
+        pair_name=pair_name,
         bar_time=row.bar_time,
-        bid=Ohlc(
-            open=row.open_bid,
-            high=row.high_bid,
-            low=row.low_bid,
-            close=row.close_bid,
-        ),
-        ask=Ohlc(
-            open=row.open_ask,
-            high=row.high_ask,
-            low=row.low_ask,
-            close=row.close_ask,
-        ),
+        open_bid=row.open_bid,
+        high_bid=row.high_bid,
+        low_bid=row.low_bid,
+        close_bid=row.close_bid,
+        open_ask=row.open_ask,
+        high_ask=row.high_ask,
+        low_ask=row.low_ask,
+        close_ask=row.close_ask,
         volume=row.volume,
         complete=row.complete,
+    )
+
+
+def _stream_bars(
+    session: Session,
+    *,
+    pair_id: int,
+    pair_name: str,
+    start: datetime,
+    end: datetime,
+    batch_size: int = _LOAD_BARS_BATCH_SIZE,
+) -> list[PriceBar]:
+    """server-side cursor で column tuple を streaming し PriceBar list を構築する (T106).
+
+    実装契約:
+      - select は ORM entity ではなく必要列のみ (identity map に載せない =
+        caller-owned session を汚さない)
+      - ``execution_options(yield_per=batch_size)`` で server-side cursor 経由の
+        streaming を発動する (SQLAlchemy 2.x)
+      - row は **属性アクセスのみ** で消費する (``row.bar_time`` 等)。
+        ``row[0]`` / ``row._mapping`` は使わない (テストダブルを軽量にできる)
+      - 途中例外時も ``result.close()`` で cursor を確実に解放する
+    """
+    stmt = (
+        select(*_PRICE_BAR_M1_COLUMNS)
+        .where(PriceBarM1.pair_id == pair_id)
+        .where(PriceBarM1.bar_time >= start)
+        .where(PriceBarM1.bar_time < end)
+        .order_by(PriceBarM1.bar_time.asc())
+        .execution_options(yield_per=batch_size)
+    )
+    bars: list[PriceBar] = []
+    result = session.execute(stmt)
+    try:
+        for row in result:
+            bars.append(
+                _construct_price_bar(
+                    pair_name=pair_name,
+                    bar_time=row.bar_time,
+                    open_bid=row.open_bid,
+                    high_bid=row.high_bid,
+                    low_bid=row.low_bid,
+                    close_bid=row.close_bid,
+                    open_ask=row.open_ask,
+                    high_ask=row.high_ask,
+                    low_ask=row.low_ask,
+                    close_ask=row.close_ask,
+                    volume=row.volume,
+                    complete=row.complete,
+                )
+            )
+    finally:
+        result.close()
+    return bars
+
+
+def _log_phase_marker(phase: str, **extra: Any) -> None:
+    """main プロセス RSS を phase marker として記録する (T106)."""
+    error_type: str | None = None
+    try:
+        import psutil
+
+        rss_mb = psutil.Process().memory_info().rss / 1024 / 1024
+    except Exception as exc:  # psutil 不在 / sandbox 等
+        rss_mb = -1.0
+        error_type = type(exc).__name__
+    logger.info(
+        "run_ga.phase_rss_marker",
+        phase=phase,
+        main_rss_mb=rss_mb,
+        error_type=error_type,
+        **extra,
     )
 
 
@@ -527,32 +644,43 @@ def _load_lane_bars(
         if pair is None:
             raise RuntimeError(f"currency_pair for {instrument} not found")
         meta = _meta_from_pair(pair)
+        pair_id = pair.id
+        _log_phase_marker("after_pair_resolve", instrument=instrument)
 
-        rows_b = session.scalars(
-            select(PriceBarM1)
-            .where(PriceBarM1.pair_id == pair.id)
-            .where(PriceBarM1.bar_time >= dataset.start)
-            .where(PriceBarM1.bar_time < dataset.end)
-            .order_by(PriceBarM1.bar_time.asc())
-        ).all()
-        if not rows_b:
+        # T106: server-side cursor streaming (ORM entity を経由しない)。
+        bars_stage_b_full = _stream_bars(
+            session,
+            pair_id=pair_id,
+            pair_name=instrument,
+            start=dataset.start,
+            end=dataset.end,
+        )
+        _log_phase_marker(
+            "after_stage_b_full_load",
+            instrument=instrument,
+            bar_count=len(bars_stage_b_full),
+        )
+        if not bars_stage_b_full:
             raise RuntimeError(
                 f"no bars for {instrument} in "
                 f"[{dataset.start}, {dataset.end})"
             )
-        bars_stage_b_full = [_bar_row_to_price_bar(r, instrument) for r in rows_b]
 
         holdout_end = dataset.end + timedelta(
             days=stage_windows.stage_c_holdout_days
         )
-        rows_hold = session.scalars(
-            select(PriceBarM1)
-            .where(PriceBarM1.pair_id == pair.id)
-            .where(PriceBarM1.bar_time >= dataset.end)
-            .where(PriceBarM1.bar_time < holdout_end)
-            .order_by(PriceBarM1.bar_time.asc())
-        ).all()
-        bars_holdout = [_bar_row_to_price_bar(r, instrument) for r in rows_hold]
+        bars_holdout = _stream_bars(
+            session,
+            pair_id=pair_id,
+            pair_name=instrument,
+            start=dataset.end,
+            end=holdout_end,
+        )
+        _log_phase_marker(
+            "after_holdout_load",
+            instrument=instrument,
+            bar_count=len(bars_holdout),
+        )
 
     if not bars_holdout:
         # T087: fallback slice (Stage B 末尾を holdout に再利用) は廃止 (partition
@@ -1773,6 +1901,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         aux_bundle = None
 
+    _log_phase_marker(
+        "after_aux_bundle_built",
+        aux_bundle_present=aux_bundle is not None,
+    )
+
     primitive_evaluator = RegistryEvaluator(pair=cfg.dataset.instrument)
     bt_factory = _make_bt_factory(cfg.dataset, cfg.backtest)
 
@@ -1932,6 +2065,8 @@ def main(argv: list[str] | None = None) -> int:
         all_ab_b_evaluated_count = 0
         all_ab_excluded_preflight_count = 0
         ab_score_source: str | None = None  # run 内 mixing 検出用 (= None / "noop" 以外で固定)
+
+        _log_phase_marker("before_ga_loop", generations=cfg.ga.generations)
 
         for gen in range(cfg.ga.generations + 1):
             if gen == 0:
