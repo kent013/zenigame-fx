@@ -41,6 +41,7 @@ def _call(bid_c_val: int, ask_h_val: int, units: int = 10000, n: int = 3):
         0.5, 0.2, 0, units, 3,
         100, 1, True, 10, 1,
         1_000_000 * 10**8, 1000, 0,
+        1, 1,  # T110: spread_cost_num, spread_cost_den (1,1 = 不変)
         *outs,
     )
 

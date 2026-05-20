@@ -64,6 +64,7 @@ session close は engine 不変条件として fitness に反映される。
 
 - holdout 期間で live_criteria 全条件を AND 評価
 - spread × N stress test（コスト悪化耐性）
+  - **T110: stress は `spread_cost_multiplier`（default 1.0）で realized fill (entry/exit 約定) の実効スプレッドを N 倍に広げ per-trade コストを増やす方式**。旧実装は `max_spread_bps`（spread フィルタ閾値、broker が spread>閾値 の trade を skip）を緩めるだけで per-trade コストを増やさず stress_pnl_degradation が常時 0 の toothless だった。新実装は filter (max_spread_bps) 非依存で常時実行。MTM/margin は raw 価格（realized PnL のみに cost 反映）。kernel/Decimal 両経路でビット一致。
 - trade_count が `[trade_count_min, trade_count_max]` 範囲内
 - (ii-lite) 評価（Phase 2 shadow / Phase 6 hard）
 

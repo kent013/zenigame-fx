@@ -63,6 +63,21 @@ def _add_overflows(a, b):
 
 
 @njit(cache=True, fastmath=False)
+def _fill_adj(ask, bid, m_num, m_den):
+    """T110: realized fill の adverse 方向加算量 (PRICE_SCALE 整数)。
+
+    adj = (m-1) * half_spread = ((m_num - m_den) * (ask-bid)) // (2 * m_den)。
+    非負の spread_diff=(ask-bid) から floor 除算で計算し、符号は呼出側で side に
+    応じ適用 (負数除算を避け long/short 非対称を防ぐ)。bid>ask 異常時は 0。
+    m_num==m_den (=1.0) で 0 を返し realized fill は現行とビット同一。
+    """
+    spread_diff = ask - bid
+    if spread_diff <= 0:
+        return np.int64(0)
+    return (np.int64(m_num - m_den) * np.int64(spread_diff)) // np.int64(2 * m_den)
+
+
+@njit(cache=True, fastmath=False)
 def simulate(
     bid_o, bid_h, bid_l, bid_c,
     ask_o, ask_h, ask_l, ask_c,
@@ -78,6 +93,7 @@ def simulate(
     initial_cash_scaled,       # int64 (CASH_SCALE)
     scale_ratio,               # int (= CASH_SCALE/PRICE_SCALE)
     warmup,                    # int
+    spread_cost_num, spread_cost_den,  # T110: int, int (default 1,1 = 不変)
     # out 配列 (呼び出し側で n_bars 長を事前確保)
     out_entry_idx, out_exit_idx, out_side,
     out_entry_px, out_exit_px, out_reason, out_pos_id, out_equity_at_entry,
@@ -94,7 +110,10 @@ def simulate(
 
     has_pos = False
     pos_side = 0
-    pos_entry = 0       # PRICE_SCALE
+    pos_entry = 0       # PRICE_SCALE (raw entry fill: MTM/margin で使用)
+    # T110: entry 時の adverse 加算量 (PRICE_SCALE)。realized PnL 控除専用、
+    # MTM/margin には使わない (entry/exit raw 契約)。
+    pos_entry_adj = 0
     pos_entry_epoch = 0
     pos_entry_idx = 0
     pos_eq_at_entry = 0  # CASH_SCALE
@@ -182,7 +201,10 @@ def simulate(
         if pending_kind == 1 and not has_pos:
             has_pos = True
             pos_side = 1
+            # T110: pos_entry は raw (MTM/margin で使用)。adverse 加算量は別途保持し
+            # realized PnL からのみ控除 (entry/exit raw 契約)。
             pos_entry = ask_o[i]
+            pos_entry_adj = _fill_adj(ask_o[i], bid_o[i], spread_cost_num, spread_cost_den)
             pos_entry_epoch = epoch_ns[i]
             pos_entry_idx = i
             pos_eq_at_entry = equity_pre
@@ -192,6 +214,7 @@ def simulate(
             has_pos = True
             pos_side = -1
             pos_entry = bid_o[i]
+            pos_entry_adj = _fill_adj(ask_o[i], bid_o[i], spread_cost_num, spread_cost_den)
             pos_entry_epoch = epoch_ns[i]
             pos_entry_idx = i
             pos_eq_at_entry = equity_pre
@@ -199,19 +222,24 @@ def simulate(
             pos_id_cur = pos_id_counter
         elif pending_kind == 3 and has_pos:
             # close at OPEN price (exit_kind="open")
+            # T110: 記録/realized PnL は stressed fill (entry raw±adj, exit raw∓adj)。
+            # pos_entry (raw) は MTM/margin 専用で本 stressed 価格には使わない。
+            _exit_adj = _fill_adj(ask_o[i], bid_o[i], spread_cost_num, spread_cost_den)
             if pos_side == 1:
-                exit_px = bid_o[i]
-                pnl = pnl_factor * (exit_px - pos_entry)
+                s_entry = pos_entry + pos_entry_adj
+                exit_px = bid_o[i] - _exit_adj
+                pnl = pnl_factor * (exit_px - s_entry)
             else:
-                exit_px = ask_o[i]
-                pnl = pnl_factor * (pos_entry - exit_px)
+                s_entry = pos_entry - pos_entry_adj
+                exit_px = ask_o[i] + _exit_adj
+                pnl = pnl_factor * (s_entry - exit_px)
             if _add_overflows(cash, pnl):
                 return (STATUS_OVERFLOW, n_trades, neg_drop, sess_drop_open, sess_drop_pending)
             cash += pnl
             out_entry_idx[n_trades] = pos_entry_idx
             out_exit_idx[n_trades] = i
             out_side[n_trades] = pos_side
-            out_entry_px[n_trades] = pos_entry
+            out_entry_px[n_trades] = s_entry
             out_exit_px[n_trades] = exit_px
             out_reason[n_trades] = REASON_SIGNAL
             out_pos_id[n_trades] = pos_id_cur
@@ -246,19 +274,23 @@ def simulate(
             lhs = equity_post * margin_lhs_factor
             rhs = margin_rhs_factor * pos_entry
             if lhs < rhs:
+                # T110: 記録/realized PnL は stressed fill (close 価格)。pos_entry(raw) は margin 専用。
+                _exit_adj = _fill_adj(ask_c[i], bid_c[i], spread_cost_num, spread_cost_den)
                 if pos_side == 1:
-                    exit_px = bid_c[i]
-                    pnl = pnl_factor * (exit_px - pos_entry)
+                    s_entry = pos_entry + pos_entry_adj
+                    exit_px = bid_c[i] - _exit_adj
+                    pnl = pnl_factor * (exit_px - s_entry)
                 else:
-                    exit_px = ask_c[i]
-                    pnl = pnl_factor * (pos_entry - exit_px)
+                    s_entry = pos_entry - pos_entry_adj
+                    exit_px = ask_c[i] + _exit_adj
+                    pnl = pnl_factor * (s_entry - exit_px)
                 if _add_overflows(cash, pnl):
                     return (STATUS_OVERFLOW, n_trades, neg_drop, sess_drop_open, sess_drop_pending)
                 cash += pnl
                 out_entry_idx[n_trades] = pos_entry_idx
                 out_exit_idx[n_trades] = i
                 out_side[n_trades] = pos_side
-                out_entry_px[n_trades] = pos_entry
+                out_entry_px[n_trades] = s_entry
                 out_exit_px[n_trades] = exit_px
                 out_reason[n_trades] = REASON_MARGIN_CALL
                 out_pos_id[n_trades] = pos_id_cur
@@ -268,19 +300,23 @@ def simulate(
 
         # --- step7: session close (保有を全クローズ) ---
         if session_closed and has_pos:
+            # T110: 記録/realized PnL は stressed fill (close 価格)。pos_entry(raw) は MTM 専用。
+            _exit_adj = _fill_adj(ask_c[i], bid_c[i], spread_cost_num, spread_cost_den)
             if pos_side == 1:
-                exit_px = bid_c[i]
-                pnl = pnl_factor * (exit_px - pos_entry)
+                s_entry = pos_entry + pos_entry_adj
+                exit_px = bid_c[i] - _exit_adj
+                pnl = pnl_factor * (exit_px - s_entry)
             else:
-                exit_px = ask_c[i]
-                pnl = pnl_factor * (pos_entry - exit_px)
+                s_entry = pos_entry - pos_entry_adj
+                exit_px = ask_c[i] + _exit_adj
+                pnl = pnl_factor * (s_entry - exit_px)
             if _add_overflows(cash, pnl):
                 return (STATUS_OVERFLOW, n_trades, neg_drop, sess_drop_open, sess_drop_pending)
             cash += pnl
             out_entry_idx[n_trades] = pos_entry_idx
             out_exit_idx[n_trades] = i
             out_side[n_trades] = pos_side
-            out_entry_px[n_trades] = pos_entry
+            out_entry_px[n_trades] = s_entry
             out_exit_px[n_trades] = exit_px
             out_reason[n_trades] = REASON_EOD
             out_pos_id[n_trades] = pos_id_cur
@@ -318,19 +354,23 @@ def simulate(
 
         # --- step9: EOD 強制クローズ ---
         if is_eod[i] and has_pos:
+            # T110: 記録/realized PnL は stressed fill (close 価格)。pos_entry(raw) は MTM 専用。
+            _exit_adj = _fill_adj(ask_c[i], bid_c[i], spread_cost_num, spread_cost_den)
             if pos_side == 1:
-                exit_px = bid_c[i]
-                pnl = pnl_factor * (exit_px - pos_entry)
+                s_entry = pos_entry + pos_entry_adj
+                exit_px = bid_c[i] - _exit_adj
+                pnl = pnl_factor * (exit_px - s_entry)
             else:
-                exit_px = ask_c[i]
-                pnl = pnl_factor * (pos_entry - exit_px)
+                s_entry = pos_entry - pos_entry_adj
+                exit_px = ask_c[i] + _exit_adj
+                pnl = pnl_factor * (s_entry - exit_px)
             if _add_overflows(cash, pnl):
                 return (STATUS_OVERFLOW, n_trades, neg_drop, sess_drop_open, sess_drop_pending)
             cash += pnl
             out_entry_idx[n_trades] = pos_entry_idx
             out_exit_idx[n_trades] = i
             out_side[n_trades] = pos_side
-            out_entry_px[n_trades] = pos_entry
+            out_entry_px[n_trades] = s_entry
             out_exit_px[n_trades] = exit_px
             out_reason[n_trades] = REASON_EOD
             out_pos_id[n_trades] = pos_id_cur

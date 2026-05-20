@@ -132,6 +132,10 @@ class MockBroker:
         # T009: spread filter (前バー close spread で reject)
         self._max_spread_bps: Decimal | None = None
         self._last_close_spread_bps: Decimal | None = None
+        # T110: realized fill の実効スプレッド割増倍率 (default 1.0 = 不変)。
+        # entry/exit 約定価格を adverse 方向へ (m-1)*half_spread 分広げる。
+        # MTM/margin (含み損益・証拠金判定) は生価格のまま (本倍率を適用しない)。
+        self._spread_cost_multiplier: Decimal = Decimal("1.0")
         # T009: holding cost 累計（position_id → 累積 cost）
         self._holding_cost_by_position: dict[int, Decimal] = {}
         # T028: per-bar snapshot cache。単一 tuple slot (bar, snapshot) で atomic
@@ -167,6 +171,36 @@ class MockBroker:
         if max_spread_bps is not None and max_spread_bps < 0:
             raise ValueError(f"max_spread_bps must be >= 0 when set: {max_spread_bps}")
         self._max_spread_bps = max_spread_bps
+
+    def set_spread_cost_multiplier(self, multiplier: Decimal) -> None:
+        """T110: realized fill の実効スプレッド割増倍率を設定。
+
+        engine から config.spread_cost_multiplier を渡される。default 1.0 で挙動不変。
+        1.0 未満は cost を減らす方向のため禁止。
+        """
+        if multiplier < 1:
+            raise ValueError(
+                f"spread_cost_multiplier must be >= 1.0: {multiplier}"
+            )
+        self._spread_cost_multiplier = multiplier
+
+    @staticmethod
+    def _spread_cost_adj(ask: Decimal, bid: Decimal, multiplier: Decimal) -> Decimal:
+        """T110: realized fill の adverse 方向加算量 = (m-1) * half_spread。
+
+        kernel (_sim_kernel._fill_adj) と**ビット一致**させるため PRICE_SCALE 整数空間で
+        floor 除算する: adj_scaled = ((m_num-m_den)*spread_diff_scaled)//(2*m_den)。
+        非負の spread_diff=(ask-bid) から計算し符号は呼出側で side に応じ適用。
+        bid>ask 異常時は 0。m=1.0 (m_num==m_den) で 0 を返し現行と完全同一。
+        """
+        from src.backtest.columnar import price_to_scaled, scaled_to_price
+
+        diff_scaled = price_to_scaled(ask) - price_to_scaled(bid)
+        if diff_scaled <= 0:
+            return Decimal(0)
+        m_num, m_den = multiplier.as_integer_ratio()
+        adj_scaled = ((m_num - m_den) * diff_scaled) // (2 * m_den)
+        return scaled_to_price(adj_scaled)
 
     def drop_pending_open(self) -> int:
         """pending の open_long / open_short を drop して件数を返す。
@@ -227,19 +261,28 @@ class MockBroker:
         for signal, leverage in self._pending:
             if signal.kind == "open_long":
                 # T056 L2: L1 を通り抜けた異常経路の最終防御。drop 扱いで継続
+                # T110: entry_price は raw (MTM/margin は raw)。adverse 量は
+                # entry_stress_adj に保持し realized PnL からのみ控除。
+                _adj = self._spread_cost_adj(
+                    bar.ask.open, bar.bid.open, self._spread_cost_multiplier
+                )
                 try:
                     self._open_position(
                         "long", cast(int, signal.units), bar.ask.open, bar.bar_time, leverage,
-                        equity_at_entry=pre_fill_equity,
+                        equity_at_entry=pre_fill_equity, entry_stress_adj=_adj,
                     )
                 except InsufficientEquityError:
                     self._negative_equity_drop_count += 1
                     continue
             elif signal.kind == "open_short":
+                # T110: entry_price は raw、adverse 量は entry_stress_adj に保持
+                _adj = self._spread_cost_adj(
+                    bar.ask.open, bar.bid.open, self._spread_cost_multiplier
+                )
                 try:
                     self._open_position(
                         "short", cast(int, signal.units), bar.bid.open, bar.bar_time, leverage,
-                        equity_at_entry=pre_fill_equity,
+                        equity_at_entry=pre_fill_equity, entry_stress_adj=_adj,
                     )
                 except InsufficientEquityError:
                     self._negative_equity_drop_count += 1
@@ -369,6 +412,7 @@ class MockBroker:
         leverage: int,
         *,
         equity_at_entry: Decimal,
+        entry_stress_adj: Decimal = Decimal(0),
     ) -> Position:
         # T056 L2: defensive guard（L1 を通り抜ける経路があれば fail-fast）
         # `fill_pending` ループ内で InsufficientEquityError を捕捉して drop 扱いに統一
@@ -389,6 +433,7 @@ class MockBroker:
             entry_margin=margin,
             leverage=leverage,
             equity_at_entry=equity_at_entry,
+            entry_stress_adj=entry_stress_adj,
         )
         self._next_position_id += 1
         self._positions[pos.id] = pos
@@ -401,8 +446,30 @@ class MockBroker:
         pos = self._positions.pop(position_id, None)
         if pos is None:
             return None
-        exit_price = self._exit_price(pos.side, bar, exit_kind)
-        raw_pnl = self._realized_pnl(pos, exit_price)
+        # T110: 記録/realized PnL は stressed fill (entry raw±adj, exit raw∓adj)。
+        # entry_price/exit_price (生) は MTM/margin (_unrealized_pnl) 専用で、本経路の
+        # stressed 価格は使わない (= parity 契約: MTM/margin は raw)。kernel と一致。
+        raw_exit = self._exit_price(pos.side, bar, exit_kind)
+        if self._spread_cost_multiplier != Decimal(1):
+            if exit_kind == "open":
+                _ask, _bid = bar.ask.open, bar.bid.open
+            else:
+                _ask, _bid = bar.ask.close, bar.bid.close
+            _exit_adj = self._spread_cost_adj(_ask, _bid, self._spread_cost_multiplier)
+            if pos.side == "long":
+                stressed_entry = pos.entry_price + pos.entry_stress_adj
+                exit_price = raw_exit - _exit_adj
+            else:
+                stressed_entry = pos.entry_price - pos.entry_stress_adj
+                exit_price = raw_exit + _exit_adj
+        else:
+            stressed_entry = pos.entry_price
+            exit_price = raw_exit
+        # realized PnL は stressed entry/exit から (cost が pnl に反映)
+        if pos.side == "long":
+            raw_pnl = Decimal(pos.units) * (exit_price - stressed_entry)
+        else:
+            raw_pnl = Decimal(pos.units) * (stressed_entry - exit_price)
         # T009: 累積 holding cost を pnl から差し引いて Trade.pnl に net_pnl として記録
         # cash は apply_bar_holding_cost で既に cost を減算済みなので、raw_pnl のみ加算
         # （二重控除を回避）。
@@ -418,7 +485,7 @@ class MockBroker:
             instrument=pos.instrument,
             side=pos.side,
             units=pos.units,
-            entry_price=pos.entry_price,
+            entry_price=stressed_entry,  # T110: stressed fill (kernel out_entry_px と一致)
             entry_time=pos.entry_time,
             exit_price=exit_price,
             exit_time=bar.bar_time,
