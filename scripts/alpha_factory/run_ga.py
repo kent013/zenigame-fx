@@ -123,6 +123,7 @@ from src.alpha_factory.walk_forward import (
     n_unique_dates,
     wf_min_unique_dates,
 )
+from src.alpha_factory.warmstart import load_warmstart_motifs
 from src.backtest.engine import BacktestConfig
 from src.broker import InstrumentMeta
 from src.db.connection import SessionLocal
@@ -322,6 +323,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
     )
     p.add_argument("--seed", type=int, default=None)
+    # T101: warmstart pool (既知 mission/Stage-C 個体を初期集団注入、再現性確保)
+    p.add_argument("--warmstart-ratio", type=float, default=None)
+    p.add_argument("--warmstart-motif-archive", type=str, default=None)
     p.add_argument(
         "--no-report",
         action="store_true",
@@ -461,6 +465,8 @@ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
             "seed": args.seed,
             "max_workers": args.max_workers,
             "max_tasks_per_child": args.max_tasks_per_child,
+            "warmstart_ratio": args.warmstart_ratio,
+            "warmstart_motif_archive": args.warmstart_motif_archive,
         },
         # PR4: --fitness-mode CLI override (= yaml phase4.fitness_mode より優先)。
         # None なら _build_phase4 が dataclass default を尊重する。
@@ -2074,7 +2080,48 @@ def main(argv: list[str] | None = None) -> int:
 
         for gen in range(cfg.ga.generations + 1):
             if gen == 0:
-                population = [
+                # T101: warmstart pool 注入。warmstart_ratio=0.0 (default) では
+                # n_ws=0 となり下記 warmstart 経路に入らず、population は random_genome
+                # のみ (name=g0_i*)・rng 消費順とも現行と完全同一 (挙動不変)。
+                ws_genomes: list = []
+                _n_ws = int(cfg.ga.population_size * cfg.ga.warmstart_ratio)
+                if cfg.ga.warmstart_ratio > 0.0 and not cfg.ga.warmstart_motif_archive:
+                    # 誤設定検知 (Codex impl-review Suggestion): ratio>0 だが archive 未指定
+                    logger.warning(
+                        "ga.warmstart.ratio_set_but_no_archive",
+                        warmstart_ratio=cfg.ga.warmstart_ratio,
+                    )
+                if _n_ws > 0 and cfg.ga.warmstart_motif_archive:
+                    _motifs = load_warmstart_motifs(cfg.ga.warmstart_motif_archive)
+                    for _i in range(_n_ws):
+                        if not _motifs:
+                            break
+                        if _i == 0:
+                            # 非 mutate アンカー: 最良 motif を厳密保持 (再現性の核)
+                            _cand = _motifs[0]
+                        else:
+                            _src = _motifs[rng.randrange(len(_motifs))]
+                            # n_edit_max も通常 breeding と同じく伝搬 (Codex impl-review
+                            # [Warning]: warmstart のみ編集強度がズレるのを防ぐ)
+                            _cand = mutate(
+                                _src,
+                                rng,
+                                cfg.ga.mutation_rate,
+                                max_clause=cfg.ga.max_clause,
+                                max_depth=cfg.ga.max_depth,
+                                registry=rg_registry,
+                                n_edit_max=cfg.ga.n_edit_max,
+                            )
+                        # genome_from_dict は archive 元 name を復元するため改名必須
+                        ws_genomes.append(
+                            replace(
+                                _cand,
+                                name=f"g0_ws{_i}",
+                                units=cfg.backtest.units,
+                            )
+                        )
+                _n_rand = cfg.ga.population_size - len(ws_genomes)
+                rand_genomes = [
                     random_genome(
                         rng,
                         name=f"g0_i{i}",
@@ -2083,8 +2130,19 @@ def main(argv: list[str] | None = None) -> int:
                         max_depth=cfg.ga.max_depth,
                         registry=rg_registry,
                     )
-                    for i in range(cfg.ga.population_size)
+                    for i in range(_n_rand)
                 ]
+                population = ws_genomes + rand_genomes
+                if ws_genomes:
+                    logger.info(
+                        "ga.warmstart.injected",
+                        n_warmstart=len(ws_genomes),
+                        n_anchor=1,
+                        n_mutated=max(0, len(ws_genomes) - 1),
+                        n_random=_n_rand,
+                        warmstart_ratio=cfg.ga.warmstart_ratio,
+                        motif_archive=cfg.ga.warmstart_motif_archive,
+                    )
                 provenance: dict[str, tuple[str | None, str | None]] = {
                     g.name: (None, None) for g in population
                 }
