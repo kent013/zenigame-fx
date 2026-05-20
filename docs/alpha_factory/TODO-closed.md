@@ -102,6 +102,7 @@
 | T107 | aux_pair_bars columnar 化 | infrastructure | High | 2026-05-20 13:40 | - |
 | T108 | backtest-engine-numba | infrastructure | High | 2026-05-20 23:34 | - |
 | T109 | Stage B→C gap diagnostic v1 (sidecar に gap_class + stress劣化 + base/stress trade_count 追加、観測専用) | stage-gate | High | 2026-05-21 00:19 | - |
+| T110 | Stage C stress の cost-robustness 化 (spread_cost_multiplier、realized fill のみ・kernel+MockBroker両経路) | stage-gate | High | 2026-05-21 05:22 | - |
 
 ## Obsoleted
 
