@@ -191,6 +191,19 @@ retroactive 検証 (`scripts/alpha_factory/audit_live_criteria_retroactive.py`):
 
 ---
 
+## T108: backtest engine の numba njit kernel 化 (wall-time 削減)
+
+`src/backtest/engine.py` の `run_backtest` は、preflight を満たす場合に broker per-bar simulation を **numba njit kernel** (`src/backtest/_sim_kernel.py::simulate` + columnar scaled-int 表現 `src/backtest/columnar.py`) で実行する。**selection-invariant performance-only change** であり GA 結果は bit-identical (seed=9999 smoke で best=g2_i2 / fitness_pen=-0.02894014223533147 不変)。
+
+- **数値表現**: price=PRICE_SCALE(1e5) / cash・equity=CASH_SCALE(1e8) の scaled-int64。signal/composite は既に float64 (T030/T053) で本件不変、Decimal 厳密性は broker に閉じる。約定数に逆流する 2 gate (margin call / spread filter) は商を作らず整数 cross-multiply で判定 (finite-granularity 証明で Decimal と bit-identical)。
+- **preflight (kernel 適用条件)**: `holding_cost_per_day_bps==0` / `maintenance==100` / `max_spread が整数 bps` / `leverage==3` / DslStrategy (prepared path) かつ session_close なし。**不成立は現行 Decimal engine (`_run_backtest_decimal`) にフォールバック** (observable behavior 不変)。
+- **overflow**: kernel 内 runtime sentinel (積/加算の乗算前ガード) で検出し `STATUS_OVERFLOW` を返すと caller がその backtest だけ Decimal engine で再実行する (`backtest.kernel_overflow_fallback` ログ)。静的 hard gate は使わない。
+- **検証**: `tests/backtest/test_sim_kernel_parity.py` が kernel vs Decimal を同一入力で trades 全フィールド・equity 配列・broker cash・active_clause_indices まで bit 比較 (long/short/EOD/session/spread/margin/time_stop/同一bar競合/overflow-fallback を網羅)。`tests/backtest/test_sim_kernel.py` が overflow sentinel を直接検証。
+
+詳細: `devnotes/20260520-1949-handoff-backtest-engine-numba/` (概念設計 Codex Round 2 / 詳細設計 Codex Round 4 APPROVED) / `devnotes/20260520-2247-todo-T108/` (impl-review Round 4 APPROVED)。
+
+---
+
 ## .claude/ 設定の現状
 
 `.claude/skills/` 配下は以下の三層構成:
