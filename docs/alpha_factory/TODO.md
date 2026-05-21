@@ -13,7 +13,6 @@ zenigame-fx Alpha Factory の改善タスク一覧。
 | T100 | Stage C stratified allocation (PR3 shadow stratifier) | stage-gate | Stage C 評価集団 stratifier | Medium | standalone | [設計](devnotes/20260513-1915-todo-stage-c-stratified-allocation/) | 2026-05-13 19:15 |
 | T102 | Phase 2 統合 Step 3-7 (BCEvaluationResult / NSGA-II / CPPS / warmstart 配線) | ga-architecture | Phase 2 配線 5 sub-PR | Medium | standalone | [設計](devnotes/20260513-1915-todo-phase2-integration-step3-7/) | 2026-05-13 19:15 |
 | T103 | primitive 拡張 (zenigame 82 primitive 相当の FX 用拡充、 撤退条件 trigger) | primitives | primitive 30-50 個移植 | Low | standalone | [設計](devnotes/20260513-1915-todo-primitive-expansion/) | 2026-05-13 19:15 |
-| T112 | Phase2 step5a: NSGA-II only selection (_breed_next_gen 多目的化, default OFF) | ga-architecture | NSGA-II selection配線(flag OFF) | Critical | standalone | [設計](devnotes/20260521-0925-nsga2-cpps-selection-wiring/) | 2026-05-21 09:56 |
 | T113 | Phase2 step5b: CPPS only injection (archive多様性再注入, default OFF) | ga-architecture | CPPS injection配線(flag OFF) | High | standalone | [設計](devnotes/20260521-0925-nsga2-cpps-selection-wiring/) | 2026-05-21 09:56 |
 
 ## Conditional
