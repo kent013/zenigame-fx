@@ -618,6 +618,9 @@ def _build_cross_pair(raw: Mapping[str, Any]) -> CrossPairConfig:
         ),
         aggregator_lambda=float(raw.get("aggregator_lambda", 0.5)),
         mode=raw.get("mode", "shadow"),
+        # T114: default OFF=挙動不変。_strict_bool で "false" 等の文字列も正しく解釈
+        # (Codex impl-review [Warning]: bool("false") が True になる罠を回避)。
+        enable=_strict_bool(raw.get("enable"), default=False),
     )
 
 

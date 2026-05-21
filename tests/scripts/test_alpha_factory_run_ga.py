@@ -831,8 +831,9 @@ def test_smoke_run_holdout_ok(
     # per_generation に feasible_count
     for pg in summary["per_generation"]:
         assert isinstance(pg["feasible_count"], int)
-    # cross_pair_runtime_mode は単一 instrument なので skipped
-    assert summary["cross_pair_runtime_mode"] == "skipped_single_instrument"
+    # T114: cross_pair.enable default False → skipped_disabled (runtime_mode 細分化)。
+    # (旧: skipped_single_instrument。anchor 未供給でなく enable=False が skip 理由)
+    assert summary["cross_pair_runtime_mode"] == "skipped_disabled"
     # archive parquet が生成されている
     archive_path = Path(summary["archive_parquet"])
     assert archive_path.exists()
