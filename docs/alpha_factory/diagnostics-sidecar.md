@@ -45,10 +45,18 @@ archive Parquet では Stage A 段階で `total_pnl` が転記されない設計
 | `stage_c_base_trade_count` | int32 | YES | T109: Stage C base holdout trade 数 |
 | `stage_c_stress_pnl_degradation` | float64 | YES | T109: spread×1.5 stress の PnL 劣化量 (base - stress)。stress skip 時 None |
 | `stage_c_stress_trade_count` | int32 | YES | T109: stress 評価時の trade 数。stress skip 時 None |
+| `pareto_net_pnl_after_cost` | float64 | YES | T111: Pareto f1 (max)。Stage B pooled fold-CV(OOS) の net PnL。Stage B 未評価個体は None |
+| `pareto_pooled_dd_per_fold_max` | float64 | YES | T111: Pareto f2 (min, >=0)。per-fold max_dd の max |
+| `pareto_mission_inf_gap` | float64 | YES | T111: Pareto f3 (min)。`evaluate_mission_inf_gap(b_pooled_cf)` (Stage B 完結) |
+| `pareto_is_feasible_invariant` | bool | YES | T111: 全 fold feasible なら True |
+| `pareto_axis_usable` | bool | YES | T111: 軸算出可能 (b_pooled_cf 算出 ∧ 3 scalar finite ∧ feasible) |
+| `pareto_source_stage` | string | YES | T111: usable なら "B" (逆流監査用)、未算出は None |
 
 主キー: `(lane_id, generation, individual_name)` (archive と整合)。
 
-> T109 で追加した 5 列は全て nullable。`DIAGNOSTICS_SCHEMA_VERSION` は 2 のまま据え置く (v2 contract の required field 集合を変えない additive 拡張、`assert_diagnostics_v2` は required field のみ検証)。
+> T109 で追加した 5 列、T111 で追加した 6 列 (`pareto_*`) は全て nullable。`DIAGNOSTICS_SCHEMA_VERSION` は 2 のまま据え置く (v2 contract の required field 集合を変えない additive 拡張、`assert_diagnostics_v2` は required field のみ検証)。
+>
+> **T111 ParetoFeaturesLite** は T112 (NSGA-II selection) が消費する Stage B 完結軸の観測機構。pooled fold-CV(OOS) の per-fold canonical artifact を直消費して算出 (`pareto_features.py`)。selection/gate/judgment/archive は不変 (LOG_ONLY, bit-exact)。`pareto_axis_usable=True ⇒ pareto_source_stage=="B"` を `to_rows` で assert (CI invariant)。`win_rate_min` 欠落 config は 0.45 fallback (stage_gate dual-path と同値)。
 
 ### `stage_c_gap_class` enum (T109)
 
@@ -111,6 +119,7 @@ Stage C 評価個体の B→C 汎化ギャップ主因分類。`_derive_stage_c_
 - I2: `metric_stage` の値が enum 内 (`to_rows` で assert)
 - I3: `total_pnl_stage_a` が finite (NaN/Inf は collector で 0.0 に正規化)
 - I4: `stage_c_gap_class` が None または `VALID_STAGE_C_GAP_CLASSES` 内 (`to_rows` で assert、T109)
+- I5: `pareto_axis_usable=True` なら `pareto_source_stage=="B"` かつ 3 scalar が finite (`to_rows` で assert、T111)
 
 ## Phase A スコープ外 (将来 TODO)
 
@@ -122,3 +131,4 @@ Stage C 評価個体の B→C 汎化ギャップ主因分類。`_derive_stage_c_
 ## 変更履歴
 
 - 2026-04-26: T033 Phase A 初期実装。collector + sidecar writer + run_ga 統合 + run-report 拡張 + テスト 28 件。
+- 2026-05-21: T111 ParetoFeaturesLite 6 列追加 (NSGA-II selection 用 Stage B 完結軸、観測専用)。`pareto_features.py` の pooled fold-CV 直消費 helper + collector/sidecar 拡張 + stage_gate/swim_lane 配線。default OFF 不要 (観測のみ bit-exact)。Codex design-review 7round + impl-review 3round APPROVED。

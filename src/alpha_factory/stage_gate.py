@@ -45,6 +45,11 @@ from src.alpha_factory.canonical_metrics import (
     evaluate_canonical_five,
 )
 from src.alpha_factory.mission_inf_gap import evaluate_mission_inf_gap
+from src.alpha_factory.pareto_features import (
+    FoldCanonicalArtifact,
+    ParetoFeaturesLite,
+    try_build_pareto_lite_from_stage_b_fold_artifacts,
+)
 from src.alpha_factory.walk_forward import make_wf_folds
 from src.backtest.engine import BacktestConfig, run_backtest
 from src.backtest.equity_curve import EquityCurve
@@ -1289,6 +1294,12 @@ def evaluate_stage_b(
     # cycle 21: fold ごとの trade_count を観測 (= time-concentrated 仮説検証用、
     # diagnostics sidecar に出力するため payload に追加。 archive 列拡張なし)
     fold_trade_counts: list[int] = []
+    # T111: ParetoFeaturesLite 用 per-fold canonical artifact (NSGA-II selection 用
+    # Stage B 完結軸、観測専用)。phase2 canonical 有効時のみ捕捉。
+    pareto_capture_enabled = (
+        stage_config.phase2_canonical_metrics_mode != "disabled"
+    )
+    pareto_fold_artifacts: list[FoldCanonicalArtifact] = []
     # T054: 排他的 reason 別カウント。sum(reason_counts.values()) == n_fold_unavailable
     # の不変条件を保つ (test_stage_gate.py で検証)。
     reason_counts: dict[FoldUnavailableReason, int] = dict.fromkeys(
@@ -1484,6 +1495,47 @@ def evaluate_stage_b(
                         error=str(log_exc),
                         error_type=type(log_exc).__name__,
                     )
+                # T111: ParetoFeaturesLite 用 fold artifact 捕捉 (観測専用、no-raise)。
+                # 既存 fold backtest を再実行せず、 fold_trades/fold_equity/test_bars
+                # を canonical adapt して保持 (pooling は loop 後に 1 回)。失敗時は
+                # 当 fold を skip (= 後段で len != n_fold なら pareto unusable)。
+                if (
+                    pareto_capture_enabled
+                    and canonical_sidecar_b_fold is not None
+                    and fold_trades is not None
+                    and fold_equity is not None
+                ):
+                    try:
+                        _c_trades = tuple(
+                            trade_to_trade_record(t) for t in fold_trades
+                        )
+                        _c_bars = equity_curve_to_bar_equity_series(fold_equity)
+                        _c_universe = compute_business_day_universe_from_bars(
+                            test_bars
+                        )
+                        # period は fold 定義 (test_bars の bar_time) 由来で記録
+                        # (canonical 変換後でなく fold 構造に直結、 ordering/overlap
+                        # 検証の契約を強める。 Codex impl-review Round 1)。
+                        if _c_bars.points and test_bars:
+                            pareto_fold_artifacts.append(
+                                FoldCanonicalArtifact(
+                                    fold_index=i,
+                                    period_start=test_bars[0].bar_time,
+                                    period_end=test_bars[-1].bar_time,
+                                    canonical_trades=_c_trades,
+                                    canonical_bars=_c_bars,
+                                    canonical_universe=_c_universe,
+                                    cf_result=canonical_sidecar_b_fold,
+                                )
+                            )
+                    except Exception as pareto_exc:
+                        logger.warning(
+                            "stage_gate.pareto_fold_capture_failed",
+                            fold=i,
+                            genome=genome.name,
+                            error=str(pareto_exc),
+                            error_type=type(pareto_exc).__name__,
+                        )
             except Exception as canonical_exc:
                 # 想定外例外でも fold_sharpe / fold_reason は絶対変えない (= D1)
                 logger.warning(
@@ -1611,6 +1663,18 @@ def evaluate_stage_b(
             positive_fold_ratio=positive_ratio,
         )
 
+    # T111: pooled fold-CV ParetoFeaturesLite (NSGA-II selection 用 Stage B 完結軸、
+    # 観測専用)。全 fold artifact が揃った場合のみ pool、 それ以外は unusable。
+    # no-raise (try_build 側で隔離)、 payload には scalar のみ載せる
+    # (trade/equity 配列は MP 境界に流さない)。selection / gate 判定不変。
+    if pareto_capture_enabled and len(pareto_fold_artifacts) == n_fold:
+        pareto_features_lite_b = try_build_pareto_lite_from_stage_b_fold_artifacts(
+            pareto_fold_artifacts,
+            live_criteria=stage_config.live_criteria,
+        )
+    else:
+        pareto_features_lite_b = ParetoFeaturesLite.unusable()
+
     metrics_envelope: dict[str, object] = {
         "stage": "B",
         "genome_name": genome.name,
@@ -1644,6 +1708,10 @@ def evaluate_stage_b(
             "canonical_shadow_b_is": _canonical_shadow_summary(
                 canonical_sidecar_b_is
             ),
+            # T111: ParetoFeaturesLite (NSGA-II selection 用 Stage B 完結軸、
+            # in-memory only)。swim_lane が collector.record_stage_b に転送し
+            # diagnostics sidecar の pareto_* 列に記録される (archive 列拡張なし)。
+            "pareto_features_lite_b": pareto_features_lite_b,
             # T099 cycle 22: profit_safe_pfr 用 payload (legacy mode でも観測用に記録)。
             # detail: devnotes/20260513-2007-fx-improve/detailed-design.md
             "stage_b_gate_kind": stage_config.stage_b_gate_kind,

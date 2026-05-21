@@ -499,3 +499,65 @@ class TestToRowsStageCGapColumns:
         assert row["stage_c_gap_class"] is None
         assert row["stage_c_base_total_pnl"] is None
         assert row["stage_c_base_trade_count"] is None
+
+
+class TestRecordParetoFeaturesLite:
+    """T111: ParetoFeaturesLite (NSGA-II selection 用 Stage B 完結軸) の記録."""
+
+    def test_record_stage_b_stores_pareto_lite(self) -> None:
+        from src.alpha_factory.pareto_features import ParetoFeaturesLite
+
+        c = DiagnosticsCollector()
+        c.record_stage_a("lane", 0, "g0_i0", _make_stage_a_result(passed=True))
+        lite = ParetoFeaturesLite(
+            net_pnl_after_cost=61000.0,
+            pooled_dd_per_fold_max=0.07,
+            mission_inf_gap=0.0,
+            is_feasible_invariant=True,
+            pareto_axis_usable=True,
+            source_stage="B",
+        )
+        c.record_stage_b("lane", 0, "g0_i0", passed=True, pareto_lite=lite)
+        row = c.to_rows()[0]
+        assert row["pareto_net_pnl_after_cost"] == 61000.0
+        assert row["pareto_pooled_dd_per_fold_max"] == 0.07
+        assert row["pareto_mission_inf_gap"] == 0.0
+        assert row["pareto_axis_usable"] is True
+        assert row["pareto_source_stage"] == "B"
+
+    def test_record_stage_b_without_pareto_leaves_columns_none(self) -> None:
+        c = DiagnosticsCollector()
+        c.record_stage_a("lane", 0, "g0_i0", _make_stage_a_result(passed=True))
+        c.record_stage_b("lane", 0, "g0_i0", passed=True)
+        row = c.to_rows()[0]
+        assert row["pareto_axis_usable"] is None
+        assert row["pareto_source_stage"] is None
+        assert row["pareto_net_pnl_after_cost"] is None
+
+    def test_to_rows_invariant_usable_requires_source_b(self) -> None:
+        from src.alpha_factory.pareto_features import ParetoFeaturesLite
+
+        c = DiagnosticsCollector()
+        c.record_stage_a("lane", 0, "g0_i0", _make_stage_a_result(passed=True))
+        # usable=True なのに source_stage != "B" は invariant 違反 (assert)
+        bad = ParetoFeaturesLite(
+            net_pnl_after_cost=1.0,
+            pooled_dd_per_fold_max=0.1,
+            mission_inf_gap=0.0,
+            is_feasible_invariant=True,
+            pareto_axis_usable=True,
+            source_stage=None,  # invariant violation
+        )
+        c.record_stage_b("lane", 0, "g0_i0", passed=True, pareto_lite=bad)
+        with pytest.raises(AssertionError):
+            c.to_rows()
+
+
+class TestArchiveSchemaUnchangedByPareto:
+    """T111: ParetoFeaturesLite は sidecar 専用、 archive schema には流さない."""
+
+    def test_genomes_schema_has_no_pareto_columns(self) -> None:
+        from src.alpha_factory.archive import GENOMES_SCHEMA
+
+        pareto_cols = [n for n in GENOMES_SCHEMA.names if n.startswith("pareto_")]
+        assert pareto_cols == []

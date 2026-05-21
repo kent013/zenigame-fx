@@ -54,6 +54,7 @@ from src.alpha_factory.cross_pair import (
     CrossPairConfig,
     StageCRunCrossPairEvaluator,
 )
+from src.alpha_factory.pareto_features import ParetoFeaturesLite
 from src.alpha_factory.stage_gate import (
     CrossPairResult,
     StageGateConfig,
@@ -74,6 +75,22 @@ from src.dsl.genome import Genome
 from src.dsl.strategy import PrimitiveEvaluator
 
 logger = structlog.get_logger(__name__)
+
+
+def _extract_pareto_lite_from_b_result(b_result: Any) -> ParetoFeaturesLite | None:
+    """T111: Stage B StageResult payload から ParetoFeaturesLite を defensive 抽出.
+
+    payload に無い / 型不正なら None (= collector 側で Pareto 列据え置き)。観測専用。
+    """
+    metrics = getattr(b_result, "metrics", None)
+    if not isinstance(metrics, dict):
+        return None
+    payload = metrics.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    lite = payload.get("pareto_features_lite_b")
+    return lite if isinstance(lite, ParetoFeaturesLite) else None
+
 
 __all__ = [
     "GRADUATION_INSTRUMENT_SENTINEL",
@@ -655,12 +672,14 @@ class LaneManager:
                 b_result,
             )
             # T033: sidecar diagnostics に Stage B pass/fail を記録
+            # T111: ParetoFeaturesLite (Stage B 完結軸) も併せて記録
             if self._diagnostics is not None:
                 self._diagnostics.record_stage_b(
                     lane.lane_id,
                     lane.generation_count,
                     genome.name,
                     bool(b_result.passed),
+                    pareto_lite=_extract_pareto_lite_from_b_result(b_result),
                 )
             if not b_result.passed:
                 continue
@@ -853,6 +872,7 @@ class LaneManager:
                     generation_index,
                     genome.name,
                     bool(b_result.passed),
+                    pareto_lite=_extract_pareto_lite_from_b_result(b_result),
                 )
             wts_b = b_result.metrics.get("wall_time_seconds")
             if isinstance(wts_b, (int, float)):

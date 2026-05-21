@@ -75,7 +75,8 @@ class TestBuildSidecarTable:
     def test_schema_field_count(self) -> None:
         # T058: 旧 10 列 + v2 必須 2 列 = 12 列
         # T109: + Stage B→C gap diagnostic 5 列 = 17 列
-        assert len(STAGE_A_PROVENANCE_SCHEMA.names) == 17
+        # T111: + ParetoFeaturesLite 6 列 = 23 列
+        assert len(STAGE_A_PROVENANCE_SCHEMA.names) == 23
 
     def test_schema_includes_stage_c_gap_columns(self) -> None:
         # T109: gap diagnostic 列が schema に含まれ、全て nullable であること

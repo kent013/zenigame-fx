@@ -73,6 +73,16 @@ STAGE_A_PROVENANCE_SCHEMA: Final[pa.Schema] = pa.schema(
         pa.field("stage_c_base_trade_count", pa.int32(), nullable=True),
         pa.field("stage_c_stress_pnl_degradation", pa.float64(), nullable=True),
         pa.field("stage_c_stress_trade_count", pa.int32(), nullable=True),
+        # T111: ParetoFeaturesLite (NSGA-II selection 用 Stage B 完結軸、観測専用)。
+        # T109 と同様 additive nullable のため required field 集合は不変
+        # → DIAGNOSTICS_SCHEMA_VERSION は 2 据え置き (assert_diagnostics_v2 は
+        # required field のみ検証)。Stage A 止まり個体は本列 null。
+        pa.field("pareto_net_pnl_after_cost", pa.float64(), nullable=True),
+        pa.field("pareto_pooled_dd_per_fold_max", pa.float64(), nullable=True),
+        pa.field("pareto_mission_inf_gap", pa.float64(), nullable=True),
+        pa.field("pareto_is_feasible_invariant", pa.bool_(), nullable=True),
+        pa.field("pareto_axis_usable", pa.bool_(), nullable=True),
+        pa.field("pareto_source_stage", pa.string(), nullable=True),
     ]
 )
 
