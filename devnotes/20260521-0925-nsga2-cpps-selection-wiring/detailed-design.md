@@ -28,8 +28,26 @@
 
 ## P3: ParetoFeaturesLite sidecar（step3、LOG_ONLY）
 
+### ★ 実装時のスコープ訂正（2026-05-21、ユーザー決定: 忠実=pooled fold-CV 配線）
+**当初前提の誤り**: 詳細設計は「`b_pooled_cf`（pooled fold-CV canonical）が production で利用可能」と仮定したが、コード調査で以下が判明:
+- `b_pooled_cf` を産む `stage_bc_evaluator.evaluate_stage_b_pooled` は **production 未配線**（cpps/loop_closure/nsga2 からの shadow 参照のみ）。
+- production Stage B（`stage_gate.evaluate_stage_b`）が surface するのは `canonical_shadow_b_is`（**IS-monitor** canonical、mission_inf_gap のみ）と per-fold の `canonical_sidecar_b_fold`（**ログ only、未 pooling・未 surface**）。
+
+**決定（汎化目的のため IS-monitor 不採用）**: P3 は単なる sidecar 相乗りでなく、**`evaluate_stage_b_pooled`（pooled fold-CV、OOS）を production Stage B に dual-path LOG_ONLY で配線**し、その `b_pooled_cf_result` から ParetoFeaturesLite を生成する。= 実質 元 T102 step3「BCEvaluationResult dual-path」。判定・gate・selection は不変（LOG_ONLY、bit-exact）。
+
+**配線方針（既存 fold artifact の直消費、Codex review-6 反映）**:
+- `stage_gate.evaluate_stage_b` の fold ループは既に per-fold backtest（fold_bt/fold_trades/fold_equity, L1450）と per-fold canonical（`canonical_sidecar_b_fold`, L1456）を計算済。
+- ⚠ **`stage_bc_evaluator.evaluate_stage_b(BCEvaluationInput)` を直接呼ばない**: 同関数は fold period で trades/bars を `filter_to_period`（`[start, end)`）し canonical を**再計算**するため、(a) 二重評価 (b) Stage Gate の `test_bars` から `Period.end` を作る際の最終 bar/trade 落ち off-by-one、のリスクがある。
+- 代わりに **新 helper `build_stage_b_pooled_result_from_fold_artifacts(fold_artifacts, live_criteria) -> StageBResult`** を新設。入力は各 fold の既算出 artifact（`canonical_cf_result`（=canonical_sidecar_b_fold）, `canonical_trades`, `canonical_bars`, `canonical_universe`, `fold_period`）に限定し、**backtest 再実行も BCEvaluationInput 再構築も period 再フィルタもしない**。`build_pooled_oos_input` 相当の pooling（per-fold cf を pool して b_pooled_cf_result、per-fold max_dd の max で pooled_dd_per_fold_max）だけ行う。
+- **完全 no-raise 境界 `try_build_pareto_lite_from_stage_b_fold_artifacts(...) -> ParetoFeaturesLite`**: fold 数/順序/overlap/empty bars/threshold 構築/pooled canonical 評価まで全体を try で包み、失敗時は `pareto_axis_usable=False, source_stage=None, mission_inf_gap=None` + WARN log のみ（gate/judgment 経路に波及させない）。
+- dual-path: `phase2_canonical_metrics_mode != "disabled"` のときのみ算出。
+- **sidecar 限定**: pooled 値は diagnostics sidecar 専用に閉じ、archive schema には流さない。`test_collect_stage_b_archive_schema_unchanged`（archive 列が増えないこと）で保証。
+
+> 本訂正版 P3 は Codex design-review Round 6-7 で再レビュー済 → **APPROVE**（fold artifact 直消費 helper・no-raise 境界・sidecar 限定で観測のみ・bit-exact 成立）。
+> 実装ノート（Codex R7、既存 StageBResult contract 確認）: **いずれかの fold の `canonical_cf_result.invariants.is_feasible is False` なら `b_pooled_cf_result=None / pooled_dd_per_fold_max=None / is_feasible_invariant=False / pareto_axis_usable=False`** とする。
+
 ### 目的
-step5a が消費する Pareto 3 軸（Stage B 完結 scalar）を per-individual に算出・記録する観測機構。**selection・判定・archive 本体は一切変更しない**（行動不変、bit-exact）。これにより step5a 実装前に「軸が全 evaluated 個体ぶん出るか」「source_stage=B か」を検証可能化。
+step5a が消費する Pareto 3 軸（Stage B 完結 = pooled fold-CV OOS scalar）を per-individual に算出・記録する観測機構。**selection・判定・archive 本体は一切変更しない**（行動不変、bit-exact）。これにより step5a 実装前に「軸が全 evaluated 個体ぶん出るか」「source_stage=B（pooled OOS）か」を検証可能化。
 
 ### ParetoFeaturesLite（新規 dataclass、selection 専用 scalar sidecar、6 field）
 ```python
@@ -45,9 +63,9 @@ class ParetoFeaturesLite:
     source_stage: Literal["B"] | None = None  # 逆流監査用。B 完結時 "B"、未算出 None
 ```
 
-### builder に閉じる（CanonicalFiveResult 直渡し禁止、Codex Warning）
-- 唯一の生成経路を **`build_pareto_features_from_stage_b_result(b_result: StageBResult) -> ParetoFeaturesLite`** に限定。呼び出し側は `CanonicalFiveResult` を直接渡せない（Stage C 由来 cf を混入できない構造）。
-- builder 内: `cf = b_result.b_pooled_cf_result`。`cf is None` → 全 scalar None / pareto_axis_usable=False / source_stage=None。`cf is not None` → 3 scalar 算出、`source_stage="B"`。
+### builder に閉じる（fold artifact 直消費、CanonicalFiveResult 直渡し禁止）
+- 唯一の生成経路を **`try_build_pareto_lite_from_stage_b_fold_artifacts(fold_artifacts, live_criteria) -> ParetoFeaturesLite`**（no-raise）に限定。内部で `build_stage_b_pooled_result_from_fold_artifacts(...) -> StageBResult` を呼び `b_pooled_cf_result` を得る。呼び出し側は `CanonicalFiveResult` / Stage C 由来 cf を直接渡せない。
+- builder 内: `cf = pooled.b_pooled_cf_result`。`cf is None`（fold 不足/infeasible/例外）→ 全 scalar None / pareto_axis_usable=False / source_stage=None。`cf is not None` → net_pnl_after_cost / pooled_dd_per_fold_max / `evaluate_mission_inf_gap(cf).mission_inf_gap` を算出、`source_stage="B"`。
 
 ### NaN slack の abort 回避（Codex Warning: LOG_ONLY で新 abort 経路を作らない）
 - `evaluate_mission_inf_gap` は NaN slack で ValueError を投げる。builder では **try で捕捉せず、事前に cf の finite を検査**し、非 finite なら `mission_inf_gap=None, pareto_axis_usable=False` に落とす（LOG_ONLY で RUN を止めない）。
@@ -85,11 +103,14 @@ class ParetoFeaturesLite:
 | consumer/test | tests/alpha_factory/test_diagnostics_*.py | 追加 |
 
 ### テスト計画
-- `test_pareto_features_lite_recorded_for_b_pass`: B pass 個体で 3 scalar finite かつ pareto_axis_usable=True。
-- `test_pareto_lite_none_for_b_fail`: B fail/infeasible で mission_inf_gap=None, pareto_axis_usable=False。
-- `test_mission_inf_gap_source_stage_b_only`: evaluate_mission_inf_gap が b_pooled_cf_result のみを入力にすること（Stage C 結果を変えても mission_inf_gap が不変）を検証（逆流禁止の機械的保証）。
-- `test_sidecar_schema_version_bumped` + 既存 sidecar テスト更新。
-- baseline 不変: `test_breed_next_gen_bit_exact`（P3 で selection 出力が変わらない）。
+- `test_pooled_result_from_fold_artifacts_no_refilter`: fold artifact を直消費し、period 再フィルタ・再 backtest をしない（最終 bar/trade が落ちない）。
+- `test_pareto_features_lite_recorded_for_b_pass`: B pass 個体で 3 scalar finite かつ pareto_axis_usable=True、source_stage="B"。
+- `test_pareto_lite_none_for_b_fail`: fold 不足/infeasible で mission_inf_gap=None, pareto_axis_usable=False, source_stage=None。
+- `test_try_build_pareto_lite_is_noraise`: pooling 内部例外（empty bars / fold overlap 等）で例外を投げず pareto_axis_usable=False に落ちる（LOG_ONLY 隔離）。
+- `test_mission_inf_gap_source_stage_b_only`: mission_inf_gap が pooled b cf のみ由来（Stage C 結果を変えても不変）= 逆流禁止の機械的保証。
+- `test_collect_stage_b_archive_schema_unchanged`: P3 で archive 列が増えない（sidecar 限定）。
+- 既存 sidecar テスト更新（6 列 additive nullable）。
+- baseline 不変: `test_breed_next_gen_bit_exact`（P3 で selection 出力・gate 判定が変わらない）。
 
 ### schema 後方互換（Codex Warning 対応）
 - `diagnostics_sidecar.py` に**欠損列 null 補完 reader** を明示実装（旧版 parquet を読む際、新 6 列が無ければ null 列を付与してから返す）。strict schema reader での破綻を防ぐ。
