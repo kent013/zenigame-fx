@@ -15,6 +15,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Final
 
+from src.alpha_factory.pareto_features import ParetoFeaturesLite
 from src.alpha_factory.stage_gate import StageResult
 
 __all__ = [
@@ -194,6 +195,14 @@ class IndividualDiagnostics:
     stage_c_base_trade_count: int | None = None
     stage_c_stress_pnl_degradation: float | None = None
     stage_c_stress_trade_count: int | None = None
+    # T111: ParetoFeaturesLite (NSGA-II selection 用 Stage B 完結軸、観測専用)。
+    # Stage B 評価個体のみ非 None。pareto_axis_usable=True ⇒ source_stage=="B"。
+    pareto_net_pnl_after_cost: float | None = None
+    pareto_pooled_dd_per_fold_max: float | None = None
+    pareto_mission_inf_gap: float | None = None
+    pareto_is_feasible_invariant: bool | None = None
+    pareto_axis_usable: bool | None = None
+    pareto_source_stage: str | None = None
 
 
 class DiagnosticsCollector:
@@ -269,14 +278,30 @@ class DiagnosticsCollector:
         generation: int,
         individual_name: str,
         passed: bool,
+        pareto_lite: ParetoFeaturesLite | None = None,
     ) -> None:
-        """Stage B pass/fail を記録。Stage A 未記録なら no-op (defensive)."""
+        """Stage B pass/fail + ParetoFeaturesLite を記録。Stage A 未記録なら no-op.
+
+        T111: ``pareto_lite`` は NSGA-II selection 用 Stage B 完結軸 (観測専用)。
+        省略時 (後方互換) は Pareto 列を据え置く。
+        """
         rec = self._records.get(
             self._key(lane_id, generation, individual_name)
         )
         if rec is None:
             return
         rec.stage_b_pass = bool(passed)
+        if pareto_lite is not None:
+            rec.pareto_net_pnl_after_cost = pareto_lite.net_pnl_after_cost
+            rec.pareto_pooled_dd_per_fold_max = (
+                pareto_lite.pooled_dd_per_fold_max
+            )
+            rec.pareto_mission_inf_gap = pareto_lite.mission_inf_gap
+            rec.pareto_is_feasible_invariant = (
+                pareto_lite.is_feasible_invariant
+            )
+            rec.pareto_axis_usable = pareto_lite.pareto_axis_usable
+            rec.pareto_source_stage = pareto_lite.source_stage
 
     def record_stage_c(
         self,
@@ -335,6 +360,24 @@ class DiagnosticsCollector:
                 f"stage_c_gap_class out of enum: {rec.stage_c_gap_class!r} "
                 f"(rec={rec})"
             )
+            # T111: ParetoFeaturesLite CI invariant
+            # (pareto_axis_usable=True ⇒ source_stage=="B" かつ 3 scalar finite)。
+            if rec.pareto_axis_usable is True:
+                assert rec.pareto_source_stage == "B", (
+                    f"pareto_axis_usable=True but source_stage="
+                    f"{rec.pareto_source_stage!r} (rec={rec})"
+                )
+                _pareto_scalars = (
+                    rec.pareto_net_pnl_after_cost,
+                    rec.pareto_pooled_dd_per_fold_max,
+                    rec.pareto_mission_inf_gap,
+                )
+                assert all(
+                    v is not None and math.isfinite(v) for v in _pareto_scalars
+                ), (
+                    f"pareto_axis_usable=True but scalar is None/non-finite "
+                    f"(rec={rec})"
+                )
             rows.append(
                 {
                     "lane_id": rec.lane_id,
@@ -355,6 +398,17 @@ class DiagnosticsCollector:
                         rec.stage_c_stress_pnl_degradation
                     ),
                     "stage_c_stress_trade_count": rec.stage_c_stress_trade_count,
+                    # T111: ParetoFeaturesLite (NSGA-II selection 用 Stage B 完結軸)
+                    "pareto_net_pnl_after_cost": rec.pareto_net_pnl_after_cost,
+                    "pareto_pooled_dd_per_fold_max": (
+                        rec.pareto_pooled_dd_per_fold_max
+                    ),
+                    "pareto_mission_inf_gap": rec.pareto_mission_inf_gap,
+                    "pareto_is_feasible_invariant": (
+                        rec.pareto_is_feasible_invariant
+                    ),
+                    "pareto_axis_usable": rec.pareto_axis_usable,
+                    "pareto_source_stage": rec.pareto_source_stage,
                 }
             )
         return rows
