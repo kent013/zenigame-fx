@@ -166,6 +166,14 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
         pa.field("canonical_gate_pass_c_shadow", pa.bool_(), nullable=True),
         pa.field("mission_inf_gap_c_shadow", pa.float64(), nullable=True),
         pa.field("mission_signed_margin_c_shadow", pa.float64(), nullable=True),
+        # T112: ParetoFeaturesLite (Stage B pooled fold-CV OOS) を selection 入力として
+        # archive へ (additive nullable)。T111 sidecar と同値だが、_update_cache が
+        # archive 行から breed cache へ運ぶため archive にも載せる。
+        # nsga2_selection_enabled=True 時のみ消費、 default OFF では観測のみ。
+        pa.field("pareto_b_net_pnl", pa.float64(), nullable=True),
+        pa.field("pareto_b_pooled_dd", pa.float64(), nullable=True),
+        pa.field("pareto_b_mission_inf_gap", pa.float64(), nullable=True),
+        pa.field("pareto_b_axis_usable", pa.bool_(), nullable=True),
         # T054: Stage B fold unavailable の排他的 reason 別カウント。
         # JSON 文字列として永続化 (FoldUnavailableReason value → count)。
         # 不変条件: 全 reason の合計 == n_fold_unavailable。
@@ -281,6 +289,11 @@ def _create_row_template() -> dict[str, Any]:
         "canonical_gate_pass_c_shadow": None,
         "mission_inf_gap_c_shadow": None,
         "mission_signed_margin_c_shadow": None,
+        # T112: ParetoFeaturesLite (Stage B pooled fold-CV) を collect_stage_b で書込
+        "pareto_b_net_pnl": None,
+        "pareto_b_pooled_dd": None,
+        "pareto_b_mission_inf_gap": None,
+        "pareto_b_axis_usable": None,
         # T043: mission_score (Stage C 評価時のみ書き込み、それ以外は None)
         "mission_score": None,
         # T036: FSP — post-RUN updater が一括書き戻し、template は null 初期化のみ
@@ -413,6 +426,31 @@ def _extract_canonical_shadow(
         gate_pass,
         _finite_or_none(shadow.get("mission_inf_gap")),
         _finite_or_none(shadow.get("mission_signed_margin")),
+    )
+
+
+def _extract_pareto_b_shadow(
+    payload: Mapping[str, object],
+) -> tuple[float | None, float | None, float | None, bool | None]:
+    """T112: payload の ``pareto_features_lite_b`` (ParetoFeaturesLite) を defensive 抽出.
+
+    ``stage_gate.evaluate_stage_b`` が payload に格納した ParetoFeaturesLite から
+    selection 用 3 軸 + usable flag を取り出す。duck-typing で読み (import 不要)、
+    欠損 / 型不正 / 非有限は None に潰す (= 旧 stage_gate / unusable でも安全)。
+
+    Returns:
+        ``(net_pnl, pooled_dd, mission_inf_gap, axis_usable)``。
+    """
+    lite = payload.get("pareto_features_lite_b")
+    if lite is None:
+        return (None, None, None, None)
+    usable_raw = getattr(lite, "pareto_axis_usable", None)
+    usable: bool | None = usable_raw if isinstance(usable_raw, bool) else None
+    return (
+        _finite_or_none(getattr(lite, "net_pnl_after_cost", None)),
+        _finite_or_none(getattr(lite, "pooled_dd_per_fold_max", None)),
+        _finite_or_none(getattr(lite, "mission_inf_gap", None)),
+        usable,
     )
 
 
@@ -737,6 +775,13 @@ class GenomeArchive:
         row["canonical_gate_pass_b_shadow"] = gate_pass_b
         row["mission_inf_gap_b_shadow"] = gap_b
         row["mission_signed_margin_b_shadow"] = margin_b
+        # T112: ParetoFeaturesLite (Stage B pooled fold-CV) を selection 入力として記録。
+        # nsga2_selection_enabled=True 時に _update_cache が breed cache へ運ぶ。
+        p_net, p_dd, p_gap, p_usable = _extract_pareto_b_shadow(payload)
+        row["pareto_b_net_pnl"] = p_net
+        row["pareto_b_pooled_dd"] = p_dd
+        row["pareto_b_mission_inf_gap"] = p_gap
+        row["pareto_b_axis_usable"] = p_usable
         self._mark_stage(row, "B")
 
     def collect_stage_c(

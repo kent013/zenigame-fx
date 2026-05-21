@@ -168,6 +168,11 @@ class GAConfig:
     # mission 個体を seed 非依存に保持する (再現性確保)。default 0.0 = 完全行動不変。
     warmstart_ratio: float = 0.0
     warmstart_motif_archive: str | None = None
+    # T112: NSGA-II only selection (Phase2 step5a)。True で _breed_next_gen の
+    # parent 選抜を Stage B pooled fold-CV Pareto 3軸 (net_pnl/max_dd/mission_inf_gap)
+    # の non-dominated sort + crowding に置換。default False で従来 tournament と
+    # bit-exact 一致。軸は archive pareto_b_* 列 (T111/T112) 由来。
+    nsga2_selection_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.population_size < 1:

@@ -42,6 +42,7 @@ from dataclasses import dataclass
 
 from src.alpha_factory.canonical_metrics import InvariantFlags
 from src.alpha_factory.mission_inf_gap import MissionGapResult
+from src.alpha_factory.pareto_features import ParetoFeaturesLite
 from src.alpha_factory.stage_bc_evaluator import BCEvaluationResult
 
 __all__ = [
@@ -57,6 +58,7 @@ __all__ = [
     "make_selection_seed",
     "non_dominated_sort",
     "run_generation_selection",
+    "select_from_pareto_features",
     "select_parent_pair",
     "select_survivors",
 ]
@@ -839,4 +841,148 @@ def run_generation_selection(
         parent_pairs=tuple(parent_pairs),
         excluded_indices=frozenset(excluded_indices_set),
         sample_size_warnings=tuple(sample_size_warnings),
+    )
+
+
+# ---------------------------------------------------------------------------
+# T112 (Phase2 step5a): ParetoFeaturesLite 専用 selection 入口
+# ---------------------------------------------------------------------------
+
+
+def _parent_pairs_from_survivors(
+    survivors: Sequence[int],
+    sort_keys: Mapping[int, tuple[int, float, str, int]],
+    genome_hash_by_idx: Mapping[int, str],
+    *,
+    offspring_count: int,
+    rng: random.Random,
+    max_retry: int = 3,
+) -> tuple[tuple[int, int], ...]:
+    """survivor から ``offspring_count`` 件の parent pair を生成 (T112)。
+
+    - ``len(survivors) == 1``: ``(i, i)`` の self-mating を ``offspring_count`` 件
+      (mutation only fallback)。
+    - ``len(survivors) >= 2``: binary_tournament で p1、 max_retry 回まで p2 を
+      引き直して genome_hash 重複回避。超過時は ``(p1, p1)`` mutation only。
+
+    parent_pairs の長さは常に ``offspring_count`` (= breed する個体数と一致、
+    詳細設計 P5a offspring_count contract)。
+    """
+    if offspring_count <= 0 or not survivors:
+        return ()
+    if len(survivors) == 1:
+        only = survivors[0]
+        return tuple((only, only) for _ in range(offspring_count))
+    pairs: list[tuple[int, int]] = []
+    for _ in range(offspring_count):
+        p1 = binary_tournament(survivors, sort_keys, rng=rng)
+        p2 = p1
+        for _retry in range(max_retry):
+            cand = binary_tournament(survivors, sort_keys, rng=rng)
+            if genome_hash_by_idx[cand] != genome_hash_by_idx[p1]:
+                p2 = cand
+                break
+        pairs.append((p1, p2))
+    return tuple(pairs)
+
+
+def select_from_pareto_features(
+    features_by_idx: Mapping[int, ParetoFeaturesLite],
+    *,
+    offspring_count: int,
+    rng: random.Random,
+    genome_hash_by_idx: Mapping[int, str],
+) -> GenerationSelectionResult:
+    """``ParetoFeaturesLite`` (scalar) から直接 NSGA-II 選抜を行う lite 入口 (T112)。
+
+    ``run_generation_selection`` の ``IndividualEvaluation`` / ``BCEvaluationResult``
+    契約を経由せず、 Stage B pooled fold-CV Pareto 3軸 (net_pnl/max_dd/mission_inf_gap)
+    から ``ParetoAxis`` を構築し、 既存の non-dominated sort + crowding を再利用する
+    (contract 偽装回避、 詳細設計 P5a)。
+
+    eligible = ``pareto_axis_usable=True`` かつ 3 scalar が finite な個体のみ。
+    parent_pairs の長さは ``offspring_count``。 軸方向は ``ParetoAxis`` /
+    ``_pareto_dominates`` が処理 (net_pnl 最大化、 max_dd / mission_inf_gap 最小化)。
+
+    Args:
+        features_by_idx: ``{idx: ParetoFeaturesLite}`` (全 population idx、 caller 契約)。
+        offspring_count: 生成する parent pair 数 (= breed_slots)。
+        rng: deterministic ``random.Random`` (make_selection_seed 推奨)。
+        genome_hash_by_idx: ``{idx: genome_hash}`` (全 population idx、 tie-break / dedup 用)。
+
+    Returns:
+        :class:`GenerationSelectionResult`。 eligible 空なら survivor/parent_pairs 空 +
+        ``sample_size_warnings=("eligible_set_empty",)``。
+
+    Raises:
+        ValueError: ``offspring_count < 0``、 または eligible idx が
+            ``genome_hash_by_idx`` に欠落。
+    """
+    if offspring_count < 0:
+        raise ValueError(f"offspring_count must be >= 0, got {offspring_count}")
+
+    axes: dict[int, ParetoAxis] = {}
+    violations: dict[int, float] = {}
+    feasibility: dict[int, bool] = {}
+    eligible: list[int] = []
+    for idx, feat in features_by_idx.items():
+        if not getattr(feat, "pareto_axis_usable", False):
+            continue
+        net = feat.net_pnl_after_cost
+        dd = feat.pooled_dd_per_fold_max
+        gap = feat.mission_inf_gap
+        if net is None or dd is None or gap is None:
+            continue
+        if not (math.isfinite(net) and math.isfinite(dd) and math.isfinite(gap)):
+            continue
+        if idx not in genome_hash_by_idx:
+            raise ValueError(
+                f"select_from_pareto_features: idx {idx} missing in "
+                "genome_hash_by_idx (caller must pass all population idx)"
+            )
+        axes[idx] = ParetoAxis(net_pnl=net, max_dd=dd, mission_inf_gap=gap)
+        violations[idx] = 0.0
+        feasibility[idx] = True
+        eligible.append(idx)
+
+    excluded = frozenset(set(features_by_idx) - set(eligible))
+    if not eligible:
+        return GenerationSelectionResult(
+            front_assignments=types.MappingProxyType({}),
+            crowding_distances=types.MappingProxyType({}),
+            survivor_indices=(),
+            parent_pairs=(),
+            excluded_indices=excluded,
+            sample_size_warnings=("eligible_set_empty",),
+        )
+
+    front_no, crowding = _compute_front_assignments_and_crowding(
+        eligible, axes, violations, feasibility,
+    )
+    sort_keys: dict[int, tuple[int, float, str, int]] = {
+        idx: (front_no[idx], -crowding[idx], genome_hash_by_idx[idx], idx)
+        for idx in eligible
+    }
+    survivor_indices = tuple(sorted(eligible, key=lambda i: sort_keys[i]))
+    parent_pairs = _parent_pairs_from_survivors(
+        survivor_indices,
+        sort_keys,
+        genome_hash_by_idx,
+        offspring_count=offspring_count,
+        rng=rng,
+    )
+
+    warnings: list[str] = []
+    if len(eligible) == 1:
+        warnings.append("nsga2_eligible_below_2")
+    if len(eligible) < 30:
+        warnings.append("eligible_below_operational_threshold")
+
+    return GenerationSelectionResult(
+        front_assignments=types.MappingProxyType(dict(front_no)),
+        crowding_distances=types.MappingProxyType(dict(crowding)),
+        survivor_indices=survivor_indices,
+        parent_pairs=parent_pairs,
+        excluded_indices=excluded,
+        sample_size_warnings=tuple(warnings),
     )

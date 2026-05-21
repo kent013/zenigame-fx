@@ -182,7 +182,9 @@ def test_schema_has_58_columns() -> None:
     #     3 列 (gate_pass / inf_gap / signed_margin) = 6 列 (52→58)
     # T099 cycle 22 (profit_safe_pfr observability): median_oos_total_pnl /
     #     sum_oos_total_pnl / stage_b_gate_kind の 3 列追加 (58→61)
-    assert len(GENOMES_SCHEMA.names) == 61
+    # T112 (NSGA-II selection): pareto_b_net_pnl / pareto_b_pooled_dd /
+    #     pareto_b_mission_inf_gap / pareto_b_axis_usable の 4 列追加 (61→65)
+    assert len(GENOMES_SCHEMA.names) == 65
     expected = {
         "run_id", "run_number", "generation", "individual_name",
         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
@@ -221,6 +223,9 @@ def test_schema_has_58_columns() -> None:
         "mission_signed_margin_c_shadow",
         # T099 cycle 22: profit_safe_pfr observability 3 列
         "median_oos_total_pnl", "sum_oos_total_pnl", "stage_b_gate_kind",
+        # T112: NSGA-II selection 用 Stage B pooled fold-CV Pareto 軸
+        "pareto_b_net_pnl", "pareto_b_pooled_dd",
+        "pareto_b_mission_inf_gap", "pareto_b_axis_usable",
     }
     assert set(GENOMES_SCHEMA.names) == expected
 
@@ -1045,6 +1050,9 @@ def test_schema_nullable_attributes() -> None:
         "mission_signed_margin_c_shadow",
         # T099 cycle 22: profit_safe_pfr observability (collect_stage_b で書込、 nullable=True)
         "median_oos_total_pnl", "sum_oos_total_pnl", "stage_b_gate_kind",
+        # T112: NSGA-II selection 用 Pareto 軸 (collect_stage_b で書込、 nullable=True)
+        "pareto_b_net_pnl", "pareto_b_pooled_dd",
+        "pareto_b_mission_inf_gap", "pareto_b_axis_usable",
     }
     for f in GENOMES_SCHEMA:
         if f.name in nullable_cols:
@@ -2215,3 +2223,43 @@ def test_pr3_canonical_shadow_persisted_in_parquet(tmp_path: Path) -> None:
     assert bool(df.iloc[0]["canonical_gate_pass_c_shadow"]) is False
     assert df.iloc[0]["mission_inf_gap_c_shadow"] == pytest.approx(0.1)
     assert df.iloc[0]["mission_signed_margin_c_shadow"] == pytest.approx(-0.05)
+
+
+def test_pareto_b_columns_propagate_from_payload_to_row() -> None:
+    """T112 E2E: payload の ParetoFeaturesLite → collect_stage_b → archive row の
+    pareto_b_* 4列まで配線断なく伝搬する (4段伝搬の archive 区間検証)。"""
+    from src.alpha_factory.pareto_features import ParetoFeaturesLite
+
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    lite = ParetoFeaturesLite(
+        net_pnl_after_cost=61000.0,
+        pooled_dd_per_fold_max=0.07,
+        mission_inf_gap=0.0,
+        is_feasible_invariant=True,
+        pareto_axis_usable=True,
+        source_stage="B",
+    )
+    arc.collect_stage_b(
+        g, "lane", 0, _stage_b_result(pareto_features_lite_b=lite)
+    )
+    row = arc.get_row_snapshot("lane", 0, g.name)
+    assert row is not None
+    assert row["pareto_b_net_pnl"] == 61000.0
+    assert row["pareto_b_pooled_dd"] == 0.07
+    assert row["pareto_b_mission_inf_gap"] == 0.0
+    assert row["pareto_b_axis_usable"] is True
+
+
+def test_pareto_b_columns_none_when_payload_missing_lite() -> None:
+    """T112: payload に ParetoFeaturesLite が無い (旧 stage_gate / unusable) 個体は
+    pareto_b_* が None (defensive、 selection eligible から除外される)。"""
+    arc = _make_archive()
+    g = _stub_genome()
+    arc.collect_stage_a(g, "lane", 0, _stage_a_result(), instrument="USD_JPY")
+    arc.collect_stage_b(g, "lane", 0, _stage_b_result())  # lite なし
+    row = arc.get_row_snapshot("lane", 0, g.name)
+    assert row is not None
+    assert row["pareto_b_net_pnl"] is None
+    assert row["pareto_b_axis_usable"] is None

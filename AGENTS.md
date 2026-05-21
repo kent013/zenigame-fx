@@ -177,6 +177,20 @@ GA 初期集団に既知 mission/Stage-C 個体を注入し、mission 個体を 
 
 詳細: `docs/alpha_factory/stage-gates.md` § "T099 cycle 22: Stage B gate profit_safe_pfr opt-in" / `devnotes/20260513-2007-fx-improve/detailed-design.md` (Codex Round 3 APPROVED)。
 
+### NSGA-II selection 配線 (T111/T112、Phase2 step3/5a)
+
+GA 選択を**単一目的 tournament から多目的 NSGA-II へ置換**し、seed variance / モノカルチャー収束に対処する (default OFF で bit-exact)。
+
+- **T111 (step3)**: Stage B pooled fold-CV (OOS) から NSGA-II 用 Pareto 3軸 (net_pnl / max_dd / mission_inf_gap) を `ParetoFeaturesLite` として算出 (`src/alpha_factory/pareto_features.py`)。観測専用 (sidecar `pareto_*` 6列)、bit-exact。fold artifact 直消費 pooling (period 再フィルタ/再 backtest なし)、完全 no-raise。
+- **T112 (step5a)**: `_breed_next_gen` の parent 選抜を NSGA-II (non-dominated sort + crowding) に置換。`GAConfig.nsga2_selection_enabled: bool = False`、CLI `--nsga2-selection`。
+  - 軸は archive `pareto_b_*` 4列 (net_pnl/pooled_dd/mission_inf_gap/axis_usable) 経由で breed cache へ (payload→collect_stage_b→archive→`_update_cache`→`IndividualCacheEntry` の 4段伝搬)。
+  - NSGA-II 入口は `nsga2_selection.select_from_pareto_features` (低レベル non_dominated_sort/crowding を再利用、IndividualEvaluation 契約を経由しない)。parent_pairs 長 = population_size、elite copy なし (front-1 を parent pool 優先)。
+  - parent 選抜 rng = `make_selection_seed(run_id, gen)` で deterministic、crossover/mutate は GA 主 rng。
+  - eligible (pareto_axis_usable ∧ 3 scalar finite) が 0 の世代は従来 tournament に fallback。`nsga2_selection_enabled=False` で legacy 経路と完全 bit-exact (Pareto 列は selection_score 不関与)。
+- 次段 (T113, step5b): CPPS archive injection (`cpps_archive_enabled`、未実装)。
+
+詳細: `devnotes/20260521-0925-nsga2-cpps-selection-wiring/` (概念/詳細設計、Codex 7round APPROVED) / `docs/alpha_factory/diagnostics-sidecar.md` (ParetoFeaturesLite 列)。
+
 ### cross-pair multi-pair shadow 有効化 (T114)
 
 mission 個体の**汎化** (多ペア通用) を観測可能にする。cross-pair (ii-lite) は単一銘柄 run では構造的にスキップ (anchor 必須) されるため、`ANCHOR_PAIRS[target]` の holdout を本番 parallel 経路の `LaneEvalContext.cp_inputs` に供給して shadow 実走させ、`ii_lite_pass` を計測。graduation は cross_pair.passed で自然機能 (Stage C passed 非介入)。
