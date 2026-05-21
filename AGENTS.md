@@ -177,6 +177,14 @@ GA 初期集団に既知 mission/Stage-C 個体を注入し、mission 個体を 
 
 詳細: `docs/alpha_factory/stage-gates.md` § "T099 cycle 22: Stage B gate profit_safe_pfr opt-in" / `devnotes/20260513-2007-fx-improve/detailed-design.md` (Codex Round 3 APPROVED)。
 
+### cross-pair multi-pair shadow 有効化 (T114)
+
+mission 個体の**汎化** (多ペア通用) を観測可能にする。cross-pair (ii-lite) は単一銘柄 run では構造的にスキップ (anchor 必須) されるため、`ANCHOR_PAIRS[target]` の holdout を本番 parallel 経路の `LaneEvalContext.cp_inputs` に供給して shadow 実走させ、`ii_lite_pass` を計測。graduation は cross_pair.passed で自然機能 (Stage C passed 非介入)。
+
+- `CrossPairConfig.enable: bool = False` (default OFF = 現状 cross-pair skip、挙動完全不変)。CLI: `scripts/alpha_factory/run_ga.py --cross-pair-enable`。
+- enable 時、target の `ANCHOR_PAIRS` 2 anchor (例 EUR_JPY→EUR_USD+USD_JPY) の holdout を holdout-only loader でロード (coverage fail-closed)。`cross_pair_runtime_mode` = `skipped_disabled` (enable=False) / `skipped_target_not_configured` (ANCHOR_PAIRS 未定義 target) / `enabled`。
+- cross_pair mode は shadow 維持 (graduation 強制は別途)。汎化の壁を ii_lite_pass 分布で定量化する観測機構。
+
 ---
 
 ## cycle 23: live_criteria.sharpe 単位整合性修正 (2026-05-14 improve-cycle)

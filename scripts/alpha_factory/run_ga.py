@@ -326,6 +326,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     # T101: warmstart pool (既知 mission/Stage-C 個体を初期集団注入、再現性確保)
     p.add_argument("--warmstart-ratio", type=float, default=None)
     p.add_argument("--warmstart-motif-archive", type=str, default=None)
+    # T114: cross-pair (ii-lite) shadow 有効化。未指定=None で yaml default(False)尊重。
+    p.add_argument(
+        "--cross-pair-enable", action="store_const", const=True, default=None
+    )
     p.add_argument(
         "--no-report",
         action="store_true",
@@ -472,6 +476,10 @@ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
         # None なら _build_phase4 が dataclass default を尊重する。
         "phase4": {
             "fitness_mode": args.fitness_mode,
+        },
+        # T114: --cross-pair-enable override (None なら yaml default(False)尊重)。
+        "cross_pair": {
+            "enable": args.cross_pair_enable,
         },
     }
 
@@ -732,6 +740,68 @@ def _load_lane_bars(
         bars_stage_b=bars_stage_b,
         bars_holdout=bars_holdout,
     )
+
+
+def _load_holdout_only(
+    instrument: str,
+    dataset: DatasetConfig,
+    stage_windows: StageWindowsConfig,
+) -> tuple[list[PriceBar], InstrumentMeta]:
+    """T114: anchor ペアの holdout 区間 bars + meta のみをロードする (Stage A/B 省略)。
+
+    cross-pair (ii-lite) shadow 評価は anchor ペアの holdout のみ必要なため、
+    ``_load_lane_bars`` の Stage A/B ロードを省いた軽量版。holdout 窓は target と
+    同一 ``[dataset.end, dataset.end + stage_c_holdout_days)``。
+
+    coverage fail-closed (Codex design-review Round 2 [Warning]): non-empty に
+    加え、先頭 >= dataset.end / 末尾 < holdout_end / 単調増加・重複なし を検証。
+    短い anchor holdout で ii_lite_pass が誤って計測されるのを防ぐ。
+    """
+    holdout_end = dataset.end + timedelta(days=stage_windows.stage_c_holdout_days)
+    with SessionLocal() as session:
+        pair = session.scalars(
+            select(CurrencyPair).where(CurrencyPair.oanda_name == instrument)
+        ).one_or_none()
+        if pair is None:
+            raise RuntimeError(
+                f"cross-pair anchor currency_pair for {instrument} not found"
+            )
+        meta = _meta_from_pair(pair)
+        bars = _stream_bars(
+            session,
+            pair_id=pair.id,
+            pair_name=instrument,
+            start=dataset.end,
+            end=holdout_end,
+        )
+    if not bars:
+        raise RuntimeError(
+            f"cross-pair anchor {instrument} has no holdout bars in "
+            f"[{dataset.end}, {holdout_end})"
+        )
+    # coverage / 単調性 fail-closed
+    if bars[0].bar_time < dataset.end or bars[-1].bar_time >= holdout_end:
+        raise RuntimeError(
+            f"cross-pair anchor {instrument} holdout out of window: "
+            f"first={bars[0].bar_time} last={bars[-1].bar_time} "
+            f"expected [{dataset.end}, {holdout_end})"
+        )
+    prev = None
+    for b in bars:
+        if prev is not None and b.bar_time <= prev:
+            raise RuntimeError(
+                f"cross-pair anchor {instrument} holdout not strictly increasing "
+                f"(dup/unordered at {b.bar_time})"
+            )
+        prev = b.bar_time
+    logger.info(
+        "run_ga.cross_pair_anchor_loaded",
+        instrument=instrument,
+        bar_count=len(bars),
+        holdout_first=bars[0].bar_time.isoformat(),
+        holdout_last=bars[-1].bar_time.isoformat(),
+    )
+    return bars, meta
 
 
 # ---------------------------------------------------------------------------
@@ -1931,15 +2001,54 @@ def main(argv: list[str] | None = None) -> int:
         bars_holdout=bundle.bars_holdout,
         meta=bundle.meta,
     )
+    # T114: cross-pair enable 時、ANCHOR_PAIRS[target] の holdout をロードし
+    # cp_inputs / GraduationLane.pair_bars に配線する (default OFF=現状不変)。
+    _cp_inputs = None
+    _cp_pair_bars: dict[str, list[PriceBar]] = {}
+    _cp_pair_meta: dict[str, InstrumentMeta] = {}
+    _cp_runtime_mode = "skipped_disabled"
+    if cfg.cross_pair.enable:
+        from src.alpha_factory.cross_pair import ANCHOR_PAIRS
+        from src.alpha_factory.parallel_eval import CrossPairLaneInputs
+
+        _tgt = cfg.dataset.instrument
+        _anchors = ANCHOR_PAIRS.get(_tgt)
+        if _anchors is None:
+            logger.warning(
+                "run_ga.cross_pair.target_not_configured",
+                target=_tgt,
+                known_targets=sorted(ANCHOR_PAIRS.keys()),
+            )
+            _cp_runtime_mode = "skipped_target_not_configured"
+        else:
+            _cp_pair_bars[_tgt] = list(bundle.bars_holdout)
+            _cp_pair_meta[_tgt] = bundle.meta
+            for _a in _anchors:
+                if _a == _tgt:
+                    continue
+                _a_bars, _a_meta = _load_holdout_only(
+                    _a, cfg.dataset, cfg.stage_windows
+                )
+                _cp_pair_bars[_a] = _a_bars
+                _cp_pair_meta[_a] = _a_meta
+            _cp_inputs = CrossPairLaneInputs(
+                target_pair=_tgt,
+                pair_bars_map={k: tuple(v) for k, v in _cp_pair_bars.items()},
+                meta_map=dict(_cp_pair_meta),
+            )
+            _cp_runtime_mode = "enabled"
+            logger.info(
+                "run_ga.cross_pair.enabled",
+                target=_tgt,
+                anchors=list(_anchors),
+                n_pairs=len(_cp_pair_bars),
+            )
     graduation_lane = GraduationLane(
         lane_id=GRADUATION_LANE_ID,
-        pair_bars={},
-        pair_meta={},
+        pair_bars=_cp_pair_bars,
+        pair_meta=_cp_pair_meta,
     )
-    cross_pair_mode = (
-        "enabled" if graduation_lane.pair_bars
-        else "skipped_single_instrument"
-    )
+    cross_pair_mode = _cp_runtime_mode
 
     # T052: GenomeEvaluator を構築 (max_workers=1 で in-process / >1 で Pool)。
     # LaneEvalContext は RUN 中 immutable (Pool initializer で 1 度だけ broadcast)。
@@ -2008,7 +2117,7 @@ def main(argv: list[str] | None = None) -> int:
         bars_holdout=tuple(bundle.bars_holdout),
         meta=bundle.meta,
         bt_cfg=bt_factory(cfg.dataset.instrument),
-        cp_inputs=None,  # Phase 2: graduation.pair_bars が空のため None
+        cp_inputs=_cp_inputs,  # T114: cross_pair.enable 時のみ非None (本番parallel経路)
         preflight_underfilled=preflight_underfilled,
         preflight_payload=preflight_payload,
         aux_bundle=aux_bundle,  # T057 Phase 2: stage 別 align 用 raw container

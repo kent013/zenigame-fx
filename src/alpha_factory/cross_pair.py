@@ -97,6 +97,12 @@ class CrossPairConfig:
     min_sharpe_cross_min: float = -0.20
     aggregator_lambda: float = 0.5
     mode: Literal["shadow", "hard"] = "shadow"
+    # T114: cross-pair 評価の有効化。default False = run が単一銘柄扱いで cross-pair
+    # を skip (現状挙動完全不変)。True で run_ga が ANCHOR_PAIRS[target] の holdout を
+    # ロードし LaneEvalContext.cp_inputs に配線 → cross-pair が shadow 実走し ii_lite_pass
+    # が計測される (汎化定量化)。graduation は cross_pair.passed で自然機能 (Stage C
+    # passed 非介入)。
+    enable: bool = False
 
     def __post_init__(self) -> None:
         if self.aggregator_lambda < 0:
