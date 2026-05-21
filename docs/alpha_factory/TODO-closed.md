@@ -105,6 +105,7 @@
 | T110 | Stage C stress の cost-robustness 化 (spread_cost_multiplier、realized fill のみ・kernel+MockBroker両経路) | stage-gate | High | 2026-05-21 05:22 | - |
 | T101 | Run 71/63 系統 warmstart 検討 (= 再現性検証) | ga-architecture | Low | 2026-05-21 08:24 | - |
 | T111 | Phase2 step3: ParetoFeaturesLite sidecar (NSGA-II selection 配線の前提, LOG_ONLY) | ga-architecture | Critical | 2026-05-21 12:55 | - |
+| T114 | cross-pair multi-pair shadow 有効化 (anchor holdout を cp_inputs 配線、汎化定量化、default OFF) | cross-pair | High | 2026-05-21 15:13 | - |
 
 ## Obsoleted
 
