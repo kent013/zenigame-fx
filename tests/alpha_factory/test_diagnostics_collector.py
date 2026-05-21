@@ -554,10 +554,35 @@ class TestRecordParetoFeaturesLite:
 
 
 class TestArchiveSchemaUnchangedByPareto:
-    """T111: ParetoFeaturesLite は sidecar 専用、 archive schema には流さない."""
+    """T111/T112: sidecar 専用 ParetoFeaturesLite 列は archive に流さない。
 
-    def test_genomes_schema_has_no_pareto_columns(self) -> None:
+    T111 では archive 非搭載 (sidecar のみ)。T112 で selection 入力用に
+    ``pareto_b_*`` 4 列を archive へ追加したが、 sidecar collector 列
+    (``pareto_net_pnl_after_cost`` 等) は依然 archive に載せない。
+    """
+
+    def test_genomes_schema_has_no_sidecar_pareto_columns(self) -> None:
         from src.alpha_factory.archive import GENOMES_SCHEMA
 
-        pareto_cols = [n for n in GENOMES_SCHEMA.names if n.startswith("pareto_")]
-        assert pareto_cols == []
+        # sidecar collector 由来の列名は archive に存在しない
+        sidecar_names = {
+            "pareto_net_pnl_after_cost",
+            "pareto_pooled_dd_per_fold_max",
+            "pareto_mission_inf_gap",
+            "pareto_is_feasible_invariant",
+            "pareto_axis_usable",
+            "pareto_source_stage",
+        }
+        assert sidecar_names.isdisjoint(set(GENOMES_SCHEMA.names))
+
+    def test_genomes_schema_has_t112_selection_pareto_columns(self) -> None:
+        from src.alpha_factory.archive import GENOMES_SCHEMA
+
+        # T112: selection 入力用 pooled Pareto 軸は archive に存在する
+        names = set(GENOMES_SCHEMA.names)
+        assert {
+            "pareto_b_net_pnl",
+            "pareto_b_pooled_dd",
+            "pareto_b_mission_inf_gap",
+            "pareto_b_axis_usable",
+        } <= names

@@ -81,6 +81,10 @@ from src.alpha_factory.diagnostics_stage_a_top_fold import (
     write_stage_a_top_fold,
 )
 from src.alpha_factory.epoch_manager import EpochWindow, make_epoch_id
+from src.alpha_factory.nsga2_selection import (
+    make_selection_seed,
+    select_from_pareto_features,
+)
 from src.alpha_factory.observability import (
     build_default_archive_churn_metric,
     build_default_bypass_ratio_metric,
@@ -100,6 +104,7 @@ from src.alpha_factory.parallel_eval import (
     PreflightPayload,
     measure_peak_rss_mb,
 )
+from src.alpha_factory.pareto_features import ParetoFeaturesLite
 from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
 from src.alpha_factory.run_context import RunContext, generate_epoch_id_stub
 from src.alpha_factory.schema_contract import (
@@ -190,6 +195,13 @@ class IndividualCacheEntry:
     # 読み込み、 None なら trade_count (Stage A 60d) を fallback。
     # 詳細: devnotes/20260508-1203-stage-b-gate-redesign/detailed-design.md
     trade_count_full_dataset: int | None = None
+    # T112: NSGA-II selection 用 Stage B pooled fold-CV Pareto 軸 (archive 由来)。
+    # nsga2_selection_enabled=True 時のみ _breed_next_gen が消費。default OFF では
+    # selection_score (lex 10-tuple) に一切寄与せず bit-exact。
+    pareto_net_pnl: float | None = None
+    pareto_pooled_dd: float | None = None
+    pareto_mission_inf_gap: float | None = None
+    pareto_axis_usable: bool = False
 
     @property
     def selection_score(self) -> tuple[int, float, int, int, int, int, int, int, int, float]:
@@ -326,6 +338,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     # T101: warmstart pool (既知 mission/Stage-C 個体を初期集団注入、再現性確保)
     p.add_argument("--warmstart-ratio", type=float, default=None)
     p.add_argument("--warmstart-motif-archive", type=str, default=None)
+    # T112: NSGA-II only selection (Stage B pooled fold-CV Pareto 3軸)。
+    # 未指定=None で yaml default(False)尊重、 指定で True override。
+    p.add_argument(
+        "--nsga2-selection", action="store_const", const=True, default=None
+    )
     # T114: cross-pair (ii-lite) shadow 有効化。未指定=None で yaml default(False)尊重。
     p.add_argument(
         "--cross-pair-enable", action="store_const", const=True, default=None
@@ -471,6 +488,7 @@ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
             "max_tasks_per_child": args.max_tasks_per_child,
             "warmstart_ratio": args.warmstart_ratio,
             "warmstart_motif_archive": args.warmstart_motif_archive,
+            "nsga2_selection_enabled": args.nsga2_selection,
         },
         # PR4: --fitness-mode CLI override (= yaml phase4.fitness_mode より優先)。
         # None なら _build_phase4 が dataclass default を尊重する。
@@ -846,6 +864,99 @@ def _tournament(
     return max(sample, key=lambda g: _selection_key(cache[g.name], fallback))
 
 
+def _cache_entry_to_pareto_lite(
+    entry: IndividualCacheEntry | None,
+) -> ParetoFeaturesLite:
+    """T112: cache entry の Stage B pooled Pareto 軸を ParetoFeaturesLite へ.
+
+    archive 列が無い / axis_usable=False の個体は unusable sentinel
+    (= NSGA-II eligible から除外)。
+    """
+    if entry is None or not entry.pareto_axis_usable:
+        return ParetoFeaturesLite.unusable()
+    return ParetoFeaturesLite(
+        net_pnl_after_cost=entry.pareto_net_pnl,
+        pooled_dd_per_fold_max=entry.pareto_pooled_dd,
+        mission_inf_gap=entry.pareto_mission_inf_gap,
+        is_feasible_invariant=True,
+        pareto_axis_usable=True,
+        source_stage="B",
+    )
+
+
+def _breed_nsga2(
+    prev_pop: list[Genome],
+    cache: dict[str, IndividualCacheEntry],
+    ga_cfg: Any,
+    registry: dict[str, RandomGenSpec],
+    rng: random.Random,
+    gen: int,
+    run_id: str,
+) -> tuple[list[Genome], dict[str, tuple[str | None, str | None]]] | None:
+    """T112 (Phase2 step5a): NSGA-II only parent 選抜で次世代を生成.
+
+    Stage B pooled fold-CV Pareto 3軸 (cache 由来) で non-dominated sort + crowding を
+    行い、 ``population_size`` 体を crossover/mutate で生成する。elite copy はしない
+    (front-1 を parent pool として優先するため、 survivor の二重カウントを避ける)。
+
+    parent 選抜の rng は ``make_selection_seed(run_id, gen)`` で run 跨ぎ deterministic。
+    crossover/mutate は GA 主 rng (``rng``) を使う (探索多様性の seed 系統を維持)。
+
+    Returns:
+        ``(genomes, provenance)``。eligible (pareto_axis_usable) が 0 のときは ``None``
+        を返し、 呼出元が従来 tournament に fallback する。
+    """
+    features_by_idx: dict[int, ParetoFeaturesLite] = {}
+    genome_hash_by_idx: dict[int, str] = {}
+    idx_to_genome: dict[int, Genome] = {}
+    for i, g in enumerate(prev_pop):
+        features_by_idx[i] = _cache_entry_to_pareto_lite(cache.get(g.name))
+        genome_hash_by_idx[i] = g.name  # 世代内一意 = deterministic tie-break/dedup
+        idx_to_genome[i] = g
+
+    sel_rng = random.Random(make_selection_seed(run_id, gen))
+    result = select_from_pareto_features(
+        features_by_idx,
+        offspring_count=ga_cfg.population_size,
+        rng=sel_rng,
+        genome_hash_by_idx=genome_hash_by_idx,
+    )
+    if not result.parent_pairs:
+        # eligible 0 (= 全個体 pareto_axis_usable=False) → tournament fallback
+        logger.info(
+            "run_ga.nsga2_selection.no_eligible_fallback_tournament",
+            generation=gen,
+            warnings=list(result.sample_size_warnings),
+        )
+        return None
+
+    next_genomes: list[Genome] = []
+    provenance: dict[str, tuple[str | None, str | None]] = {}
+    for i1, i2 in result.parent_pairs:
+        if len(next_genomes) >= ga_cfg.population_size:
+            break
+        p1 = idx_to_genome[i1]
+        p2 = idx_to_genome[i2]
+        # crossover/mutate は GA 主 rng を使用 (legacy 経路と同じ演算子)
+        if rng.random() < ga_cfg.crossover_rate:
+            c1, _c2 = crossover(p1, p2, rng, max_depth=ga_cfg.max_depth)
+        else:
+            c1 = p1
+        c1 = mutate(
+            c1,
+            rng,
+            ga_cfg.mutation_rate,
+            max_clause=ga_cfg.max_clause,
+            max_depth=ga_cfg.max_depth,
+            registry=registry,
+            n_edit_max=ga_cfg.n_edit_max,
+        )
+        name = f"g{gen}_i{len(next_genomes)}"
+        next_genomes.append(replace(c1, name=name))
+        provenance[name] = (p1.name, p2.name)
+    return next_genomes, provenance
+
+
 def _breed_next_gen(
     prev_pop: list[Genome],
     cache: dict[str, IndividualCacheEntry],
@@ -853,12 +964,24 @@ def _breed_next_gen(
     registry: dict[str, RandomGenSpec],
     rng: random.Random,
     gen: int,
+    run_id: str = "",
 ) -> tuple[list[Genome], dict[str, tuple[str | None, str | None]]]:
     """次世代 genomes を生成。elite → crossover/mutate で埋める。
 
     elite 選抜 / tournament いずれも cache 全体スコープで一度だけ fallback 判定し、
     同一規則で sort / max するため、elite と tournament の規則不整合を回避する。
+
+    T112: ``ga_cfg.nsga2_selection_enabled=True`` のとき NSGA-II 経路
+    (:func:`_breed_nsga2`) を試行。eligible 0 なら従来 tournament に fallback。
+    default False では本分岐に入らず完全 bit-exact。
     """
+    if getattr(ga_cfg, "nsga2_selection_enabled", False):
+        nsga2_result = _breed_nsga2(
+            prev_pop, cache, ga_cfg, registry, rng, gen, run_id
+        )
+        if nsga2_result is not None:
+            return nsga2_result
+        # eligible 0: legacy tournament に fall through (warning は _breed_nsga2 内)
     feasibility_cfg = ga_cfg.feasibility
     fallback = _is_all_infeasible(cache.values(), feasibility_cfg)
     sorted_pop = sorted(
@@ -918,6 +1041,22 @@ def _breed_next_gen(
 # ---------------------------------------------------------------------------
 # Cache update
 # ---------------------------------------------------------------------------
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    """row dict 値を finite float に正規化する (T112、 Pareto 軸 archive 読込用).
+
+    None / NaN / ±inf / 非数値 / bool / list 等は None に潰す。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        if hasattr(value, "__len__"):
+            return None
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
 
 
 def _coerce_optional_int(value: Any) -> int | None:
@@ -1057,6 +1196,13 @@ def _update_cache(
             and math.isfinite(pfre_val)
             and pfre_val >= fold_robust_threshold
         )
+        # T112: Stage B pooled fold-CV Pareto 軸 (NSGA-II selection 用)。
+        # archive 列が None / 旧 archive なら axis_usable=False で fallback
+        # (= nsga2 経路では eligible から除外、 OFF 経路には無影響)。
+        pareto_net = _coerce_optional_float(row.get("pareto_b_net_pnl"))
+        pareto_dd = _coerce_optional_float(row.get("pareto_b_pooled_dd"))
+        pareto_gap = _coerce_optional_float(row.get("pareto_b_mission_inf_gap"))
+        pareto_usable = bool(row.get("pareto_b_axis_usable") is True)
         cache[g.name] = IndividualCacheEntry(
             generation=generation,
             fitness_pen=fp,
@@ -1071,6 +1217,10 @@ def _update_cache(
             # tc_full が None なら欠損 (旧 archive or 計算失敗)、 0 件なら 0 を保持。
             # replay/report で「欠損 vs 0 件」 を区別可能。
             trade_count_full_dataset=tc_full,
+            pareto_net_pnl=pareto_net,
+            pareto_pooled_dd=pareto_dd,
+            pareto_mission_inf_gap=pareto_gap,
+            pareto_axis_usable=pareto_usable,
         )
 
 
@@ -2257,7 +2407,8 @@ def main(argv: list[str] | None = None) -> int:
                 }
             else:
                 population, provenance = _breed_next_gen(
-                    prev_population, cache, cfg.ga, rg_registry, rng, gen
+                    prev_population, cache, cfg.ga, rg_registry, rng, gen,
+                    run_id,
                 )
 
             for g in population:
