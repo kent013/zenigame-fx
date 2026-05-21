@@ -202,6 +202,11 @@ class IndividualCacheEntry:
     pareto_pooled_dd: float | None = None
     pareto_mission_inf_gap: float | None = None
     pareto_axis_usable: bool = False
+    # T115: cross-pair 実測シグナル (archive cross_pair_aggregate_fitness 由来)。
+    # cross_pair.selection_pressure=True 時のみ _selection_key が tie-break に消費。
+    # default OFF では selection_score (10-tuple) に一切寄与せず bit-exact。None は
+    # cross-pair 未実行 (enable=False / skipped)。
+    cross_pair_margin: float | None = None
 
     @property
     def selection_score(self) -> tuple[int, float, int, int, int, int, int, int, int, float]:
@@ -255,15 +260,55 @@ class IndividualCacheEntry:
 def _selection_key(
     entry: IndividualCacheEntry,
     fallback_active: bool,
+    *,
+    selection_pressure: bool = False,
+    margin_threshold: float = 0.0,
 ) -> tuple[Any, ...]:
     """selection 用 lexicographic key.
 
     ``fallback_active=True`` (cache 全体が infeasible) の場合は旧 4 要素に
     フォールバックする。
+
+    T115: ``selection_pressure=True`` 時のみ、selection_score (10-tuple) の
+    fold_robust(9 要素目) と fitness_pen(10 要素目) の間に cross-pair tie-break
+    要素 ``int(cross_pair_margin is not None and margin > margin_threshold)`` を
+    挿入し 11-tuple にする (fold_robust より下位・fitness_pen より上位 = 弱い圧)。
+    **default (selection_pressure=False) では現行 10-tuple をそのまま返す (bit-exact)**。
+    keyword-only 引数化で全呼出経路への thread 漏れを型で防ぐ (Codex Round1 Critical3)。
     """
     if fallback_active:
         return entry._legacy_selection_score
-    return entry.selection_score
+    score = entry.selection_score
+    if not selection_pressure:
+        return score
+    # ON: fold_robust(index 8) と fitness_pen(index 9) の間に tie-break を挿入。
+    cp_pref = int(
+        entry.cross_pair_margin is not None
+        and entry.cross_pair_margin > margin_threshold
+    )
+    return (*score[:9], cp_pref, score[9])
+
+
+def _resolve_cross_pair_selection_pressure(cfg: Any) -> tuple[bool, str]:
+    """T115: cross-pair in-loop selection pressure の effective 判定 (単一 SSOT)。
+
+    Codex Round2 [Warning1]: pressure=True でも前提が崩れると no-op になる判定を
+    log / summary / selection 呼出で一元化し乖離を防ぐ。
+
+    Returns:
+        (effective, reason): effective=True なら selection に圧をかける。
+        reason は no-op 理由 (effective=True なら "enabled")。
+    """
+    cp = cfg.cross_pair
+    if not getattr(cp, "selection_pressure", False):
+        return False, "selection_pressure=False"
+    if not getattr(cp, "enable", False):
+        # cross_pair eval が走らず aggregate_fitness が None → 圧が乗らない
+        return False, "cross_pair.enable=False (aggregate_fitness 計算されず no-op)"
+    if getattr(cfg.ga, "nsga2_selection_enabled", False):
+        # NSGA-II 経路は _selection_key を tie-break に使わないため no-op
+        return False, "nsga2_selection_enabled=True (legacy tournament 経路でないため no-op)"
+    return True, "enabled"
 
 
 def _is_all_infeasible(
@@ -346,6 +391,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     # T114: cross-pair (ii-lite) shadow 有効化。未指定=None で yaml default(False)尊重。
     p.add_argument(
         "--cross-pair-enable", action="store_const", const=True, default=None
+    )
+    # T115: cross-pair in-loop selection pressure。未指定=None で yaml default(False)。
+    p.add_argument(
+        "--cross-pair-selection-pressure",
+        action="store_const", const=True, default=None,
     )
     p.add_argument(
         "--no-report",
@@ -495,9 +545,10 @@ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "phase4": {
             "fitness_mode": args.fitness_mode,
         },
-        # T114: --cross-pair-enable override (None なら yaml default(False)尊重)。
+        # T114/T115: cross-pair override (None なら yaml default 尊重)。
         "cross_pair": {
             "enable": args.cross_pair_enable,
+            "selection_pressure": args.cross_pair_selection_pressure,
         },
     }
 
@@ -857,11 +908,25 @@ def _tournament(
     rng: random.Random,
     k: int,
     feasibility_cfg: GAFeasibilityConfig,
+    *,
+    selection_pressure: bool = False,
+    margin_threshold: float = 0.0,
 ) -> Genome:
-    """``feasibility_cfg`` を見て fallback (cache 全体 infeasible) 判定後に max."""
+    """``feasibility_cfg`` を見て fallback (cache 全体 infeasible) 判定後に max.
+
+    T115: selection_pressure を _selection_key に thread (default False=現行不変)。
+    """
     sample = rng.sample(pop, k=min(k, len(pop)))
     fallback = _is_all_infeasible(cache.values(), feasibility_cfg)
-    return max(sample, key=lambda g: _selection_key(cache[g.name], fallback))
+    return max(
+        sample,
+        key=lambda g: _selection_key(
+            cache[g.name],
+            fallback,
+            selection_pressure=selection_pressure,
+            margin_threshold=margin_threshold,
+        ),
+    )
 
 
 def _cache_entry_to_pareto_lite(
@@ -965,6 +1030,9 @@ def _breed_next_gen(
     rng: random.Random,
     gen: int,
     run_id: str = "",
+    *,
+    selection_pressure: bool = False,
+    margin_threshold: float = 0.0,
 ) -> tuple[list[Genome], dict[str, tuple[str | None, str | None]]]:
     """次世代 genomes を生成。elite → crossover/mutate で埋める。
 
@@ -986,7 +1054,12 @@ def _breed_next_gen(
     fallback = _is_all_infeasible(cache.values(), feasibility_cfg)
     sorted_pop = sorted(
         prev_pop,
-        key=lambda g: _selection_key(cache[g.name], fallback),
+        key=lambda g: _selection_key(
+            cache[g.name],
+            fallback,
+            selection_pressure=selection_pressure,
+            margin_threshold=margin_threshold,
+        ),
         reverse=True,
     )
     elites = sorted_pop[: ga_cfg.elite_count]
@@ -999,10 +1072,14 @@ def _breed_next_gen(
         provenance[new_name] = (e.name, None)
     while len(next_genomes) < ga_cfg.population_size:
         p1 = _tournament(
-            prev_pop, cache, rng, ga_cfg.tournament_size, feasibility_cfg
+            prev_pop, cache, rng, ga_cfg.tournament_size, feasibility_cfg,
+            selection_pressure=selection_pressure,
+            margin_threshold=margin_threshold,
         )
         p2 = _tournament(
-            prev_pop, cache, rng, ga_cfg.tournament_size, feasibility_cfg
+            prev_pop, cache, rng, ga_cfg.tournament_size, feasibility_cfg,
+            selection_pressure=selection_pressure,
+            margin_threshold=margin_threshold,
         )
         if rng.random() < ga_cfg.crossover_rate:
             c1, c2 = crossover(p1, p2, rng, max_depth=ga_cfg.max_depth)
@@ -1221,19 +1298,32 @@ def _update_cache(
             pareto_pooled_dd=pareto_dd,
             pareto_mission_inf_gap=pareto_gap,
             pareto_axis_usable=pareto_usable,
+            # T115: cross-pair 実測シグナル。is not None 明示 (Codex Round1 Critical2:
+            # or fallback は 0.0 偽扱い/NaN 真扱いで壊れるため使わない)。
+            cross_pair_margin=_coerce_optional_float(
+                row.get("cross_pair_aggregate_fitness")
+            ),
         )
 
 
 def _select_best(
     cache: Mapping[str, IndividualCacheEntry],
     feasibility_cfg: GAFeasibilityConfig,
+    *,
+    selection_pressure: bool = False,
+    margin_threshold: float = 0.0,
 ) -> tuple[str, IndividualCacheEntry]:
     if not cache:
         raise RuntimeError("no individuals evaluated")
     fallback = _is_all_infeasible(cache.values(), feasibility_cfg)
     return max(
         cache.items(),
-        key=lambda kv: _selection_key(kv[1], fallback),
+        key=lambda kv: _selection_key(
+            kv[1],
+            fallback,
+            selection_pressure=selection_pressure,
+            margin_threshold=margin_threshold,
+        ),
     )
 
 
@@ -1437,6 +1527,8 @@ def _write_reports(
     run_dir.mkdir(parents=True, exist_ok=True)
     # T058 PR 5: 全 artifact に同一 dataset_epoch_id を伝搬する SSOT (RunContext 経由)
     dataset_epoch_id = run_context.dataset_epoch_id
+    # T115: cross-pair selection pressure の effective 判定 (run loop と同一 helper SSOT)。
+    _cp_sel_eff, _cp_sel_reason = _resolve_cross_pair_selection_pressure(cfg)
 
     best_fitness_val, best_finite = _safe_finite(best_entry.fitness_pen)
     best_fitness_str = _fitness_to_str(best_entry.fitness_pen)
@@ -1562,8 +1654,19 @@ def _write_reports(
         "cross_pair_config": {
             "mode": cfg.cross_pair.mode,
             "aggregator_lambda": cfg.cross_pair.aggregator_lambda,
+            # T115: in-loop selection pressure の effective 判定 (単一 helper SSOT)。
+            "selection_pressure_requested": cfg.cross_pair.selection_pressure,
+            "selection_pressure_effective": _cp_sel_eff,
+            "selection_pressure_reason": _cp_sel_reason,
+            "selection_pressure_margin_threshold": (
+                cfg.cross_pair.selection_pressure_margin_threshold
+            ),
         },
         "cross_pair_runtime_mode": cross_pair_mode,
+        # T115: pressure ON 時は selection_key が 11-tuple (v3_4)、OFF は 10-tuple (v3_3)。
+        "selection_key_schema": (
+            "v3_4_cross_pair_pressure" if _cp_sel_eff else "v3_3"
+        ),
         "per_generation": sanitized_per_generation,
         "best": {
             "name": best_name,
@@ -2335,6 +2438,17 @@ def main(argv: list[str] | None = None) -> int:
         all_ab_excluded_preflight_count = 0
         ab_score_source: str | None = None  # run 内 mixing 検出用 (= None / "noop" 以外で固定)
 
+        # T115: cross-pair in-loop selection pressure の effective 判定 (RUN 中不変)。
+        _cp_sel_pressure, _cp_sel_reason = _resolve_cross_pair_selection_pressure(cfg)
+        _cp_sel_threshold = cfg.cross_pair.selection_pressure_margin_threshold
+        logger.info(
+            "run_ga.cross_pair.selection_pressure",
+            effective=_cp_sel_pressure,
+            reason=_cp_sel_reason,
+            requested=cfg.cross_pair.selection_pressure,
+            margin_threshold=_cp_sel_threshold,
+        )
+
         _log_phase_marker("before_ga_loop", generations=cfg.ga.generations)
 
         for gen in range(cfg.ga.generations + 1):
@@ -2409,6 +2523,8 @@ def main(argv: list[str] | None = None) -> int:
                 population, provenance = _breed_next_gen(
                     prev_population, cache, cfg.ga, rg_registry, rng, gen,
                     run_id,
+                    selection_pressure=_cp_sel_pressure,
+                    margin_threshold=_cp_sel_threshold,
                 )
 
             for g in population:
@@ -2496,7 +2612,12 @@ def main(argv: list[str] | None = None) -> int:
 
     archive_path = archive.flush()
 
-    best_name, best_entry = _select_best(cache, cfg.ga.feasibility)
+    best_name, best_entry = _select_best(
+        cache,
+        cfg.ga.feasibility,
+        selection_pressure=_cp_sel_pressure,
+        margin_threshold=_cp_sel_threshold,
+    )
     best_row = archive.get_row_snapshot(
         lane_id, best_entry.generation, best_name
     )

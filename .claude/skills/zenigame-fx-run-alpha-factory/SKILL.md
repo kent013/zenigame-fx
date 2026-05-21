@@ -24,7 +24,7 @@ argument-hint: "<run_ga.py args> [--timeout-min N]"
 passthrough 対象の主な run_ga.py 引数（一覧は `uv run python scripts/alpha_factory/run_ga.py --help`）:
 `--config`, `--instrument`, `--start`, `--end`, `--population-size`, `--generations`,
 `--mutation-rate`, `--crossover-rate`, `--tournament-size`, `--elite-count`,
-`--max-depth`, `--fitness-metric`, `--seed`, `--warmstart-ratio`, `--warmstart-motif-archive` (T101 warmstart pool), `--cross-pair-enable` (T114 cross-pair shadow)
+`--max-depth`, `--fitness-metric`, `--seed`, `--warmstart-ratio`, `--warmstart-motif-archive` (T101 warmstart pool), `--cross-pair-enable` (T114 cross-pair shadow), `--cross-pair-selection-pressure` (T115 汎化探索圧)
 
 `--run-id` は **skill が自動生成して付与**する。引数で指定された場合も skill 側で上書きされる（log/state とのバインドを保証するため）。
 

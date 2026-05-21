@@ -103,6 +103,13 @@ class CrossPairConfig:
     # が計測される (汎化定量化)。graduation は cross_pair.passed で自然機能 (Stage C
     # passed 非介入)。
     enable: bool = False
+    # T115: cross-pair in-loop selection pressure。default False = selection_score
+    # 10-tuple 不変 (bit-exact)。True で GA 選択キーに cross-pair aggregate_fitness を
+    # 弱く反映 (汎化探索圧)。enable=True が前提 (aggregate_fitness が計算されないと無効)。
+    selection_pressure: bool = False
+    # tie-break の margin 閾値。aggregate_fitness > threshold の個体を同 fold_robust
+    # 内で fitness_pen より優先。0.0 = cross-pair 寄与が正 (mean>λ·std) の個体を優遇。
+    selection_pressure_margin_threshold: float = 0.0
 
     def __post_init__(self) -> None:
         if self.aggregator_lambda < 0:

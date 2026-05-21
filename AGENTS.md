@@ -199,6 +199,15 @@ mission 個体の**汎化** (多ペア通用) を観測可能にする。cross-p
 - enable 時、target の `ANCHOR_PAIRS` 2 anchor (例 EUR_JPY→EUR_USD+USD_JPY) の holdout を holdout-only loader でロード (coverage fail-closed)。`cross_pair_runtime_mode` = `skipped_disabled` (enable=False) / `skipped_target_not_configured` (ANCHOR_PAIRS 未定義 target) / `enabled`。
 - cross_pair mode は shadow 維持 (graduation 強制は別途)。汎化の壁を ii_lite_pass 分布で定量化する観測機構。
 
+### cross-pair in-loop selection pressure (T115)
+
+R87 で cross-pair 汎化 0/599 (EUR_JPY mission 個体は in-sample 過学習) と判明。根本原因は GA 選択が in-sample sharpe のみで cross-pair が最終評価でしか効かず**汎化探索圧ゼロ**。これに対し、真の cross-pair シグナル `CrossPairResult.metrics["aggregate_fitness"]` (= mean_sharpe − λ·std) を GA 選択キーに弱く反映し汎化方向へ探索圧をかける。新規 eval なし (既計算シグナルを伝搬)。
+
+- `CrossPairConfig.selection_pressure: bool = False` (default OFF = selection_score 10-tuple 不変・bit-exact)。`cross_pair.enable=True` 前提。CLI: `--cross-pair-selection-pressure`。`selection_pressure_margin_threshold` (default 0.0)。
+- 伝搬: cross-pair payload → archive 列 `cross_pair_aggregate_fitness` → `IndividualCacheEntry.cross_pair_margin` → `_selection_key` (ON 時のみ fold_robust と fitness_pen の間に `int(margin>threshold)` tie-break 挿入で 11-tuple)。
+- effective 判定は `_resolve_cross_pair_selection_pressure(cfg)` 単一 helper (selection_pressure=False / enable=False / nsga2_selection_enabled=True で no-op)。summary に `selection_key_schema` (v3_3/v3_4) + effective/reason 記録。
+- 閾値緩和でなく加点。aggregate_fitness は Structural シグナル (Reactive Parametric でない)。
+
 ---
 
 ## cycle 23: live_criteria.sharpe 単位整合性修正 (2026-05-14 improve-cycle)
