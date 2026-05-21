@@ -51,6 +51,7 @@ def test_args_to_overrides_includes_cross_pair_enable() -> None:
             max_depth=None, fitness_metric=None, seed=None, max_workers=None,
             max_tasks_per_child=None, warmstart_ratio=None,
             warmstart_motif_archive=None, cross_pair_enable=cross_pair_enable,
+            cross_pair_selection_pressure=None,
             fitness_mode=None, nsga2_selection=None,
         )
 

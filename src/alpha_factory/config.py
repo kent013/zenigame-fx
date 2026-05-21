@@ -626,6 +626,13 @@ def _build_cross_pair(raw: Mapping[str, Any]) -> CrossPairConfig:
         # T114: default OFF=挙動不変。_strict_bool で "false" 等の文字列も正しく解釈
         # (Codex impl-review [Warning]: bool("false") が True になる罠を回避)。
         enable=_strict_bool(raw.get("enable"), default=False),
+        # T115: cross-pair in-loop selection pressure (default OFF=selection_score 不変)。
+        selection_pressure=_strict_bool(
+            raw.get("selection_pressure"), default=False
+        ),
+        selection_pressure_margin_threshold=float(
+            raw.get("selection_pressure_margin_threshold", 0.0)
+        ),
     )
 
 

@@ -109,6 +109,10 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
         pa.field("fold_sign_ratio", pa.float64(), nullable=True),
         pa.field("dsr", pa.float64(), nullable=True),
         pa.field("ii_lite_pass", pa.bool_(), nullable=True),
+        # T115: cross-pair 実測シグナル (CrossPairResult.metrics["aggregate_fitness"]
+        # = mean_sharpe - λ·std)。in-loop selection pressure の源。cross_pair 未実行
+        # (enable=False / skipped) は None。
+        pa.field("cross_pair_aggregate_fitness", pa.float64(), nullable=True),
         pa.field("graduated", pa.bool_(), nullable=False),
         # T-sharpe Phase 1A: trade-level Sharpe (v2) と calc version
         # T044: trade_sharpe_raw は **Stage A 値で固定** (selection 基準と
@@ -257,6 +261,7 @@ def _create_row_template() -> dict[str, Any]:
         "fold_sign_ratio": None,
         "dsr": None,
         "ii_lite_pass": None,
+        "cross_pair_aggregate_fitness": None,  # T115
         "graduated": False,
         # T-sharpe Phase 1A
         "trade_sharpe_raw": None,
@@ -848,8 +853,14 @@ class GenomeArchive:
         skipped, cp_result = _extract_cross_pair(payload)
         if skipped or cp_result is None:
             row["ii_lite_pass"] = None
+            row["cross_pair_aggregate_fitness"] = None  # T115
         else:
             row["ii_lite_pass"] = bool(cp_result.passed)
+            # T115: cross-pair 実測シグナル (in-loop selection pressure 源)。
+            # metrics["aggregate_fitness"] = mean_sharpe - λ·std (大が汎化寄り)。
+            row["cross_pair_aggregate_fitness"] = _finite_or_none(
+                cp_result.metrics.get("aggregate_fitness")
+            )
         # T043: mission_score を payload から書き写す (stage_gate 側で計算済)。
         # base 評価が trade を出さず Sharpe=None だった場合は None になる。
         row["mission_score"] = _opt_float(payload, "mission_score")

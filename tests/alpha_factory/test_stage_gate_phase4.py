@@ -493,7 +493,7 @@ def test_pr4_cli_args_to_overrides_includes_fitness_mode() -> None:
         max_depth=None, fitness_metric=None, seed=None, max_workers=None,
         max_tasks_per_child=None,
         warmstart_ratio=None, warmstart_motif_archive=None,
-        cross_pair_enable=None, nsga2_selection=None,
+        cross_pair_enable=None, cross_pair_selection_pressure=None, nsga2_selection=None,
         fitness_mode="legacy_pnl_smoke",
     )
     overrides = _args_to_overrides(args)
@@ -513,7 +513,7 @@ def test_pr4_cli_args_to_overrides_none_fitness_mode() -> None:
         max_depth=None, fitness_metric=None, seed=None, max_workers=None,
         max_tasks_per_child=None,
         warmstart_ratio=None, warmstart_motif_archive=None,
-        cross_pair_enable=None, nsga2_selection=None,
+        cross_pair_enable=None, cross_pair_selection_pressure=None, nsga2_selection=None,
         fitness_mode=None,
     )
     overrides = _args_to_overrides(args)
