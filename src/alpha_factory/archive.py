@@ -113,6 +113,13 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
         # = mean_sharpe - λ·std)。in-loop selection pressure の源。cross_pair 未実行
         # (enable=False / skipped) は None。
         pa.field("cross_pair_aggregate_fitness", pa.float64(), nullable=True),
+        # T116: cross-pair pass 3 条件の実値 + pair_failure 数 (観測専用、selection 非影響)。
+        # 天井検証 (max mean_sharpe が pass 0.15 近傍か) + proxy 整合性監視
+        # (aggregate climb 時 mean_sharpe も climb するか) + 偽陽性検知 (pair_failure)。
+        pa.field("cross_pair_mean_sharpe", pa.float64(), nullable=True),
+        pa.field("cross_pair_min_sharpe", pa.float64(), nullable=True),
+        pa.field("cross_pair_target_ratio", pa.float64(), nullable=True),
+        pa.field("cross_pair_pair_failure_count", pa.int64(), nullable=True),
         pa.field("graduated", pa.bool_(), nullable=False),
         # T-sharpe Phase 1A: trade-level Sharpe (v2) と calc version
         # T044: trade_sharpe_raw は **Stage A 値で固定** (selection 基準と
@@ -262,6 +269,10 @@ def _create_row_template() -> dict[str, Any]:
         "dsr": None,
         "ii_lite_pass": None,
         "cross_pair_aggregate_fitness": None,  # T115
+        "cross_pair_mean_sharpe": None,  # T116 観測
+        "cross_pair_min_sharpe": None,  # T116 観測
+        "cross_pair_target_ratio": None,  # T116 観測
+        "cross_pair_pair_failure_count": None,  # T116 観測
         "graduated": False,
         # T-sharpe Phase 1A
         "trade_sharpe_raw": None,
@@ -854,12 +865,32 @@ class GenomeArchive:
         if skipped or cp_result is None:
             row["ii_lite_pass"] = None
             row["cross_pair_aggregate_fitness"] = None  # T115
+            row["cross_pair_mean_sharpe"] = None  # T116
+            row["cross_pair_min_sharpe"] = None
+            row["cross_pair_target_ratio"] = None
+            row["cross_pair_pair_failure_count"] = None
         else:
             row["ii_lite_pass"] = bool(cp_result.passed)
             # T115: cross-pair 実測シグナル (in-loop selection pressure 源)。
             # metrics["aggregate_fitness"] = mean_sharpe - λ·std (大が汎化寄り)。
             row["cross_pair_aggregate_fitness"] = _finite_or_none(
                 cp_result.metrics.get("aggregate_fitness")
+            )
+            # T116: pass 3 条件の実値 (観測専用、selection 非影響)。
+            row["cross_pair_mean_sharpe"] = _finite_or_none(
+                cp_result.metrics.get("mean_sharpe")
+            )
+            row["cross_pair_min_sharpe"] = _finite_or_none(
+                cp_result.metrics.get("min_sharpe")
+            )
+            row["cross_pair_target_ratio"] = _finite_or_none(
+                cp_result.metrics.get("sharpe_target_cross_ratio")
+            )
+            # pair_failure 数: reason_codes の "pair_failure:" prefix を count
+            # (aggregate 上昇の偽陽性=pair_failure で集約値が壊れるケース検知)。
+            row["cross_pair_pair_failure_count"] = sum(
+                1 for r in cp_result.reason_codes
+                if str(r).startswith("pair_failure:")
             )
         # T043: mission_score を payload から書き写す (stage_gate 側で計算済)。
         # base 評価が trade を出さず Sharpe=None だった場合は None になる。

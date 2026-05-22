@@ -269,10 +269,13 @@ def _selection_key(
     ``fallback_active=True`` (cache 全体が infeasible) の場合は旧 4 要素に
     フォールバックする。
 
-    T115: ``selection_pressure=True`` 時のみ、selection_score (10-tuple) の
-    fold_robust(9 要素目) と fitness_pen(10 要素目) の間に cross-pair tie-break
-    要素 ``int(cross_pair_margin is not None and margin > margin_threshold)`` を
-    挿入し 11-tuple にする (fold_robust より下位・fitness_pen より上位 = 弱い圧)。
+    T116 (T115 連続値化): ``selection_pressure=True`` 時のみ、selection_score
+    (10-tuple) の fold_robust(9 要素目) と fitness_pen(10 要素目) の間に cross-pair
+    margin の **連続値** ``cp_val = float(margin) if finite else -inf`` を挿入し
+    11-tuple にする (fold_robust より下位・fitness_pen より上位)。T115 の bool
+    tie-break (``int(margin>threshold)``) は gen0 飽和で勾配ゼロだったため、連続値で
+    pass 閾値方向の勾配を継続付与する。``margin_threshold`` は連続値経路では未使用
+    (CrossPairConfig.__post_init__ で !=0.0 を fail-closed)。
     **default (selection_pressure=False) では現行 10-tuple をそのまま返す (bit-exact)**。
     keyword-only 引数化で全呼出経路への thread 漏れを型で防ぐ (Codex Round1 Critical3)。
     """
@@ -281,12 +284,14 @@ def _selection_key(
     score = entry.selection_score
     if not selection_pressure:
         return score
-    # ON: fold_robust(index 8) と fitness_pen(index 9) の間に tie-break を挿入。
-    cp_pref = int(
-        entry.cross_pair_margin is not None
-        and entry.cross_pair_margin > margin_threshold
-    )
-    return (*score[:9], cp_pref, score[9])
+    # ON (T116 連続値化): fold_robust(index 8) と fitness_pen(index 9) の間に
+    # cross-pair margin の **連続値** を挿入 (T115 bool tie-break は gen0 飽和で
+    # 勾配ゼロだったため、連続値で pass 閾値方向の勾配を継続付与)。None/NaN/inf は
+    # -inf (最下位、cross-pair 評価なし個体は不利、pass 整合)。margin_threshold は
+    # 連続値経路では未使用 (CrossPairConfig.__post_init__ で !=0.0 を fail-closed)。
+    m = entry.cross_pair_margin
+    cp_val = float(m) if (m is not None and math.isfinite(m)) else -math.inf
+    return (*score[:9], cp_val, score[9])
 
 
 def _resolve_cross_pair_selection_pressure(cfg: Any) -> tuple[bool, str]:
@@ -1663,9 +1668,11 @@ def _write_reports(
             ),
         },
         "cross_pair_runtime_mode": cross_pair_mode,
-        # T115: pressure ON 時は selection_key が 11-tuple (v3_4)、OFF は 10-tuple (v3_3)。
+        # T116: pressure ON 時は selection_key が 11-tuple で cross-pair margin 連続値
+        # (v3_5_continuous)、OFF は 10-tuple (v3_3)。R88(bool,v3_4) と R89(continuous,
+        # v3_5) を A/B 監査で識別可能にする (Codex Round1 Critical)。
         "selection_key_schema": (
-            "v3_4_cross_pair_pressure" if _cp_sel_eff else "v3_3"
+            "v3_5_cross_pair_pressure_continuous" if _cp_sel_eff else "v3_3"
         ),
         "per_generation": sanitized_per_generation,
         "best": {

@@ -185,7 +185,9 @@ def test_schema_has_58_columns() -> None:
     # T112 (NSGA-II selection): pareto_b_net_pnl / pareto_b_pooled_dd /
     #     pareto_b_mission_inf_gap / pareto_b_axis_usable の 4 列追加 (61→65)
     # T115 (cross-pair selection pressure): cross_pair_aggregate_fitness (65→66)
-    assert len(GENOMES_SCHEMA.names) == 66
+    # T116 (continuous + pass観測): cross_pair_mean_sharpe/min_sharpe/target_ratio/
+    #     pair_failure_count の 4 列追加 (66→70)
+    assert len(GENOMES_SCHEMA.names) == 70
     expected = {
         "run_id", "run_number", "generation", "individual_name",
         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
@@ -193,7 +195,11 @@ def test_schema_has_58_columns() -> None:
         "stage_c_pass", "trade_count", "total_pnl", "sharpe", "sortino",
         "calmar", "max_drawdown_pct", "active_clause", "n_nodes",
         "bootstrap_ci_lower", "bootstrap_ci_upper", "fold_sign_ratio",
-        "dsr", "ii_lite_pass", "cross_pair_aggregate_fitness", "graduated",
+        "dsr", "ii_lite_pass", "cross_pair_aggregate_fitness",
+        # T116 観測列
+        "cross_pair_mean_sharpe", "cross_pair_min_sharpe",
+        "cross_pair_target_ratio", "cross_pair_pair_failure_count",
+        "graduated",
         # T-sharpe Phase 1A
         "trade_sharpe_raw", "sharpe_calc_version",
         # T044: stage 別 sharpe (selection と切り離した観測列)
@@ -1022,6 +1028,9 @@ def test_schema_nullable_attributes() -> None:
         "dsr", "ii_lite_pass",
         # T115: cross-pair 実測シグナル (cross_pair 未実行で None、nullable=True)
         "cross_pair_aggregate_fitness",
+        # T116: cross-pair pass 3 条件実値 + pair_failure (観測専用、nullable=True)
+        "cross_pair_mean_sharpe", "cross_pair_min_sharpe",
+        "cross_pair_target_ratio", "cross_pair_pair_failure_count",
         # T-sharpe Phase 1A
         "trade_sharpe_raw", "sharpe_calc_version",
         # T044: stage 別 sharpe (Stage B/C 評価時のみ書き込み)
