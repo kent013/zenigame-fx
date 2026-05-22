@@ -409,6 +409,47 @@ class Phase4Config:
 
 
 @dataclass(frozen=True)
+class MultiPairTrainingConfig:
+    """T117: multi-pair training (最小 spike)。
+
+    GA fitness を EUR_JPY 単一でなく複数ペアで評価し、全ペアで取引+利益する
+    汎化戦略を進化させる。anchor 取引枯渇 (cross-pair pair_failure) + anchor
+    低性能を学習側で根本対処。
+
+    - ``enable=False`` (default) は単一ペア = 現挙動 bit-exact。
+    - ``enable=True`` 時、``scope`` のステージ fitness を ``pairs`` で評価し
+      ``aggregate`` (min=全ペア機能強制 / mean) で集約。
+    - spike: ``scope="stage_a"`` のみ (Stage B/C は target 現状維持)。
+    """
+
+    enable: bool = False
+    pairs: tuple[str, ...] = ()
+    aggregate: str = "min"  # "min" | "mean"
+    scope: str = "stage_a"  # spike: stage_a のみ
+
+    def __post_init__(self) -> None:
+        if self.aggregate not in ("min", "mean"):
+            raise ValueError(
+                f"MultiPairTrainingConfig.aggregate must be min|mean: "
+                f"{self.aggregate}"
+            )
+        if self.scope != "stage_a":
+            raise ValueError(
+                f"MultiPairTrainingConfig.scope must be stage_a (spike): "
+                f"{self.scope}"
+            )
+        if self.enable and len(self.pairs) < 2:
+            raise ValueError(
+                "MultiPairTrainingConfig.enable=True requires >=2 pairs "
+                f"(target + anchor(s)): got {self.pairs}"
+            )
+        if len(set(self.pairs)) != len(self.pairs):
+            raise ValueError(
+                f"MultiPairTrainingConfig.pairs must be unique: {self.pairs}"
+            )
+
+
+@dataclass(frozen=True)
 class AlphaFactoryConfig:
     """Alpha Factory 全体 config。loader から返される SSOT 構造。
 
@@ -428,6 +469,9 @@ class AlphaFactoryConfig:
     )
     phase2: Phase2Config = field(default_factory=Phase2Config)  # B step 1 で追加
     phase4: Phase4Config = field(default_factory=Phase4Config)  # PR4 で追加
+    multi_pair_training: MultiPairTrainingConfig = field(  # T117
+        default_factory=MultiPairTrainingConfig
+    )
 
     @property
     def live_criteria(self) -> Mapping[str, float | int]:
@@ -711,6 +755,21 @@ def load_config(
         schema_contract=_build_schema_contract(raw.get("schema_contract") or {}),
         phase2=phase2,
         phase4=phase4,  # PR4
+        multi_pair_training=_build_multi_pair_training(  # T117
+            raw.get("multi_pair_training") or {}
+        ),
+    )
+
+
+def _build_multi_pair_training(raw: Mapping[str, Any]) -> MultiPairTrainingConfig:
+    """T117: ``multi_pair_training`` yaml section → config (default OFF)。"""
+    pairs_raw = raw.get("pairs") or []
+    pairs = tuple(str(p) for p in pairs_raw) if pairs_raw else ()
+    return MultiPairTrainingConfig(
+        enable=_strict_bool(raw.get("enable", False), False),
+        pairs=pairs,
+        aggregate=str(raw.get("aggregate", "min")),
+        scope=str(raw.get("scope", "stage_a")),
     )
 
 

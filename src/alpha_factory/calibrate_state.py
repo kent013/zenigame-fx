@@ -96,6 +96,15 @@ def compute_base_config_hash(cfg: AlphaFactoryConfig) -> str:
             "spread_stress_multiplier": cfg.stage_gate.spread_stress_multiplier,
             "trade_count_min_for_sharpe": cfg.stage_gate.trade_count_min_for_sharpe,
         },
+        # T117: multi-pair training は Stage A fitness を変える = cross-run scope
+        # key 構成要素 (single-pair 時代の threshold が multi-pair run に誤適用
+        # されないように hash 反映)。
+        "multi_pair_training": {
+            "enable": cfg.multi_pair_training.enable,
+            "pairs": list(cfg.multi_pair_training.pairs),
+            "aggregate": cfg.multi_pair_training.aggregate,
+            "scope": cfg.multi_pair_training.scope,
+        },
     }
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()

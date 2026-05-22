@@ -189,6 +189,23 @@ class RegistryEvaluator:
         new._strict_aux_required = False  # preflight は親 instance で済んでいる
         return new
 
+    def with_pair(self, pair: str) -> RegistryEvaluator:
+        """T117: pair だけ差し替えた新 instance を返す (aux/strict 等は維持)。
+
+        multi-pair training で anchor ペアを評価する際、pair_specific primitive
+        (例 M4 EconomicEventGate が ``ctx.pair`` でイベント通貨を選択) が anchor
+        文脈で正しく評価されるよう pair を差し替える。
+        """
+        new = RegistryEvaluator.__new__(RegistryEvaluator)
+        new._pair = pair
+        new._aux_series = dict(self._aux_series)
+        new._aux_pair_mid_close = dict(self._aux_pair_mid_close)
+        new._event_snapshot = self._event_snapshot
+        new._vix_snapshot = self._vix_snapshot
+        new._strict_snapshot_required = self._strict_snapshot_required
+        new._strict_aux_required = False  # preflight は親 instance で済んでいる
+        return new
+
     def evaluate(
         self, bars: list[PriceBar], idx: int, signal: SignalConfig
     ) -> float:

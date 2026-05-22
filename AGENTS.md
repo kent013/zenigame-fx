@@ -208,6 +208,12 @@ R87 で cross-pair 汎化 0/599 (EUR_JPY mission 個体は in-sample 過学習) 
 - effective 判定は `_resolve_cross_pair_selection_pressure(cfg)` 単一 helper (selection_pressure=False / enable=False / nsga2_selection_enabled=True で no-op)。summary に `selection_key_schema` (v3_3/v3_4) + effective/reason 記録。
 - 閾値緩和でなく加点。aggregate_fitness は Structural シグナル (Reactive Parametric でない)。
 
+#### T117 multi-pair training (最小 spike)
+- cross-pair 0 汎化の真因 (falsification): EUR_JPY 単一学習個体は anchor で取引枯渇 (pair_failure) or 取引しても低性能 (mean_sharpe<<0.15)。選択圧 (T115/T116) では不十分 → 学習側で根本対処。
+- `multi_pair_training.enable=True` (default OFF=単一=現挙動 bit-exact) 時、Stage A fitness を `pairs` (target+anchor) で評価し `aggregate=min` (全ペアで機能強制) で集約 → anchor 取引枯渇個体を淘汰。Stage B/C は target 現状維持 (spike scope=stage_a)。
+- CLI: `--multi-pair-training --multi-pair-pairs EUR_JPY,USD_JPY`。anchor は Stage A-only ロード (holdout 不要)。anchor 評価は `RegistryEvaluator.with_pair(anchor)` で pair_specific primitive を anchor 文脈に。
+- base_config_hash に multi_pair_training を反映 (calibrate cross-run 汚染防止)。観測: payload mp_fitness_pen_min/mean/per_pair。
+
 #### T116 連続値化 + pass 条件観測
 - T115 bool tie-break `int(margin>0)` は gen0 飽和で勾配ゼロ (R88 ii_lite_pass 0/619) → **連続値化**: `_selection_key` で cross_pair margin の連続値 `float(m) if finite else -inf` を tie-break に。`selection_key_schema` は ON 時 `v3_5_cross_pair_pressure_continuous` (OFF=v3_3、bool v3_4 破棄)。
 - `selection_pressure_margin_threshold` は連続値経路で未使用 → `selection_pressure=True & threshold!=0.0` は `__post_init__` で ValueError fail-closed。
