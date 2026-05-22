@@ -540,6 +540,25 @@ class TestComputeConfigHash:
         h2 = compute_base_config_hash(cfg2)
         assert h1 != h2
 
+    def test_base_hash_changes_with_multi_pair_training(self, af_cfg) -> None:
+        """T117: multi-pair training 切替で calibrated threshold の誤適用を防ぐ."""
+        from dataclasses import replace
+
+        from src.alpha_factory.config import MultiPairTrainingConfig
+
+        h1 = compute_base_config_hash(af_cfg)
+        cfg2 = replace(
+            af_cfg,
+            multi_pair_training=MultiPairTrainingConfig(
+                enable=True,
+                pairs=("EUR_JPY", "USD_JPY"),
+                aggregate="min",
+                scope="stage_a",
+            ),
+        )
+        h2 = compute_base_config_hash(cfg2)
+        assert h1 != h2
+
 
 class TestThresholdSourceCliOverridesHistory:
     """T054 詳細設計 §A: CLI override が history より優先 (test_threshold_source_cli_overrides_history)."""

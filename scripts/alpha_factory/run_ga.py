@@ -101,6 +101,7 @@ from src.alpha_factory.observability import (
 from src.alpha_factory.parallel_eval import (
     GenomeEvaluator,
     LaneEvalContext,
+    MultiPairTrainInputs,
     PreflightPayload,
     measure_peak_rss_mb,
 )
@@ -211,7 +212,8 @@ class IndividualCacheEntry:
     @property
     def selection_score(self) -> tuple[int, float, int, int, int, int, int, int, int, float]:
         """Lexicographic 10-tuple v3.3 (cycle 5 で 9→10 要素化):
-        ``(feasible, -violation, stage_b_pass_and_feasible, stage_b_pass, stage_c_feasible, C_pass, B_pass, A_pass, fold_robust, fitness_pen)``.
+        ``(feasible, -violation, stage_b_pass_and_feasible, stage_b_pass,
+        stage_c_feasible, C_pass, B_pass, A_pass, fold_robust, fitness_pen)``.
 
         cycle 5: ``stage_b_pass_and_feasible`` (3 要素目) を昇格。
         Stage B pass かつ entry_count adequate (= feasible) 個体を最優先化し、
@@ -402,6 +404,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--cross-pair-selection-pressure",
         action="store_const", const=True, default=None,
     )
+    # T117: multi-pair training (Stage A fitness を複数ペアで min 集約)。
+    # 未指定=None で yaml default(False)。
+    p.add_argument(
+        "--multi-pair-training", action="store_const", const=True, default=None
+    )
+    p.add_argument(
+        "--multi-pair-pairs", type=str, default=None,
+        help="multi-pair training の対象ペア (comma 区切り、target + anchor)。",
+    )
     p.add_argument(
         "--no-report",
         action="store_true",
@@ -554,6 +565,15 @@ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "cross_pair": {
             "enable": args.cross_pair_enable,
             "selection_pressure": args.cross_pair_selection_pressure,
+        },
+        # T117: multi-pair training override (None なら yaml default 尊重)。
+        "multi_pair_training": {
+            "enable": getattr(args, "multi_pair_training", None),
+            "pairs": (
+                [p.strip() for p in args.multi_pair_pairs.split(",") if p.strip()]
+                if getattr(args, "multi_pair_pairs", None)
+                else None
+            ),
         },
     }
 
@@ -711,12 +731,66 @@ def _meta_from_pair(pair: CurrencyPair) -> InstrumentMeta:
     )
 
 
+def _build_multi_pair_train_inputs(
+    cfg: AlphaFactoryConfig,
+    bt_factory: Callable[[str], BacktestConfig],
+) -> MultiPairTrainInputs | None:
+    """T117: multi-pair training の anchor 入力を構築 (default None)。
+
+    ``multi_pair_training.enable=True`` 時のみ、target を除く anchor ペアの
+    Stage A bars + meta + bt_cfg を ``_load_lane_bars`` (Stage A/B 区間、
+    holdout_only でない) でロードし :class:`MultiPairTrainInputs` を返す。
+    enable=False は None = 単一ペア現挙動 bit-exact。
+    """
+    mp = cfg.multi_pair_training
+    if not mp.enable:
+        return None
+    target = cfg.dataset.instrument
+    anchors = tuple(p for p in mp.pairs if p != target)
+    if not anchors:
+        raise RuntimeError(
+            "multi_pair_training.enable=True but no anchor pairs distinct from "
+            f"target ({target}); pairs={mp.pairs}"
+        )
+    bars_a_map: dict[str, tuple[PriceBar, ...]] = {}
+    meta_map: dict[str, InstrumentMeta] = {}
+    bt_cfg_map: dict[str, BacktestConfig] = {}
+    for anchor in anchors:
+        # T117: anchor は Stage A fitness のみ使用 → holdout 不要 (Codex Warning3)。
+        anchor_bundle = _load_lane_bars(
+            anchor, cfg.dataset, cfg.stage_windows, require_holdout=False
+        )
+        bars_a_map[anchor] = tuple(anchor_bundle.bars_stage_a)
+        meta_map[anchor] = anchor_bundle.meta
+        bt_cfg_map[anchor] = bt_factory(anchor)
+    logger.info(
+        "run_ga.multi_pair_training.enabled",
+        target=target,
+        anchors=list(anchors),
+        aggregate=mp.aggregate,
+        scope=mp.scope,
+    )
+    return MultiPairTrainInputs(
+        anchor_pairs=anchors,
+        bars_a_map=bars_a_map,
+        meta_map=meta_map,
+        bt_cfg_map=bt_cfg_map,
+        aggregate=mp.aggregate,
+    )
+
+
 def _load_lane_bars(
     instrument: str,
     dataset: DatasetConfig,
     stage_windows: StageWindowsConfig,
+    *,
+    require_holdout: bool = True,
 ) -> LaneBarsBundle:
     """DB から Stage A/B/C の 3 区間 bars + meta を取得する (T087)。
+
+    T117: ``require_holdout=False`` で holdout ロード/fail-closed を省略
+    (multi-pair training の anchor は Stage A fitness のみ使用 → holdout 不要、
+    I/O・失敗面を削減)。bars_holdout は空 list。
 
     - Stage A bars = ``[dataset.end - stage_a_window, dataset.end)``
     - Stage B bars = ``[dataset.start, dataset.end - stage_a_window)``
@@ -757,20 +831,24 @@ def _load_lane_bars(
         holdout_end = dataset.end + timedelta(
             days=stage_windows.stage_c_holdout_days
         )
-        bars_holdout = _stream_bars(
-            session,
-            pair_id=pair_id,
-            pair_name=instrument,
-            start=dataset.end,
-            end=holdout_end,
-        )
-        _log_phase_marker(
-            "after_holdout_load",
-            instrument=instrument,
-            bar_count=len(bars_holdout),
-        )
+        if require_holdout:
+            bars_holdout = _stream_bars(
+                session,
+                pair_id=pair_id,
+                pair_name=instrument,
+                start=dataset.end,
+                end=holdout_end,
+            )
+            _log_phase_marker(
+                "after_holdout_load",
+                instrument=instrument,
+                bar_count=len(bars_holdout),
+            )
+        else:
+            # T117: multi-pair anchor は Stage A fitness のみ → holdout 不要。
+            bars_holdout = []
 
-    if not bars_holdout:
+    if require_holdout and not bars_holdout:
         # T087: fallback slice (Stage B 末尾を holdout に再利用) は廃止 (partition
         # guard の disjoint 検証と矛盾するため)。 test fixture は test-only helper で
         # LaneBarsBundle を直接構築する経路に切り替えること。
@@ -794,19 +872,23 @@ def _load_lane_bars(
     bars_stage_a = bars_stage_b_full[-stage_a_n_bars:]
     bars_stage_b = bars_stage_b_full[:-stage_a_n_bars]
 
-    logger.info(
-        "run_ga.lane_bars_loaded",
-        instrument=instrument,
-        stage_a_bar_first=bars_stage_a[0].bar_time.isoformat(),
-        stage_a_bar_last=bars_stage_a[-1].bar_time.isoformat(),
-        stage_a_count=len(bars_stage_a),
-        stage_b_bar_first=bars_stage_b[0].bar_time.isoformat(),
-        stage_b_bar_last=bars_stage_b[-1].bar_time.isoformat(),
-        stage_b_count=len(bars_stage_b),
-        holdout_bar_first=bars_holdout[0].bar_time.isoformat(),
-        holdout_bar_last=bars_holdout[-1].bar_time.isoformat(),
-        holdout_count=len(bars_holdout),
-    )
+    log_payload: dict[str, Any] = {
+        "instrument": instrument,
+        "stage_a_bar_first": bars_stage_a[0].bar_time.isoformat(),
+        "stage_a_bar_last": bars_stage_a[-1].bar_time.isoformat(),
+        "stage_a_count": len(bars_stage_a),
+        "stage_b_bar_first": bars_stage_b[0].bar_time.isoformat(),
+        "stage_b_bar_last": bars_stage_b[-1].bar_time.isoformat(),
+        "stage_b_count": len(bars_stage_b),
+        "holdout_count": len(bars_holdout),
+        "require_holdout": require_holdout,
+    }
+    if require_holdout:
+        log_payload.update(
+            holdout_bar_first=bars_holdout[0].bar_time.isoformat(),
+            holdout_bar_last=bars_holdout[-1].bar_time.isoformat(),
+        )
+    logger.info("run_ga.lane_bars_loaded", **log_payload)
 
     return LaneBarsBundle(
         meta=meta,
@@ -1866,7 +1948,7 @@ def _derive_max_tasks_per_child(
     configured: int | None,
     population_size: int,
     max_workers: int,
-) -> tuple[int | None, str]:
+) -> tuple[int, str]:
     """GenomeEvaluator に渡す maxtasksperchild の実効値を決定する。
 
     - configured が非 None: その値をそのまま使う (source="config")。
@@ -2370,6 +2452,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     logger.info("stage_b_fold_guard.passed", lane_id=lane_id)
 
+    # T117: multi-pair training。enable 時 anchor ペアの Stage A bars + meta +
+    # bt_cfg をロードし mp_train_inputs を構築 (default None=単一=現挙動 bit-exact)。
+    _mp_inputs = _build_multi_pair_train_inputs(cfg, bt_factory)
+
     lane_ctx = LaneEvalContext(
         lane_id=lane_id,
         bars_a=tuple(bundle.bars_stage_a),
@@ -2381,15 +2467,17 @@ def main(argv: list[str] | None = None) -> int:
         preflight_underfilled=preflight_underfilled,
         preflight_payload=preflight_payload,
         aux_bundle=aux_bundle,  # T057 Phase 2: stage 別 align 用 raw container
+        mp_train_inputs=_mp_inputs,  # T117: multi-pair training (default None)
     )
     # T052: max_workers が available memory budget を超えたら warning
     # (--strict-memory-guard 指定時のみ fail-fast)
     _check_memory_budget(cfg.ga.max_workers, args.strict_memory_guard)
-    if cfg.ga.max_workers > os.cpu_count() if os.cpu_count() else False:
+    cpu_count = os.cpu_count()
+    if cpu_count is not None and cfg.ga.max_workers > cpu_count:
         logger.warning(
             "run_ga.max_workers_exceeds_cpu_count",
             requested=cfg.ga.max_workers,
-            cpu_count=os.cpu_count(),
+            cpu_count=cpu_count,
         )
     logger.info(
         "run_ga.parallel_mode",

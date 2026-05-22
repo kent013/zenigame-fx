@@ -492,6 +492,35 @@ def test_load_lane_bars_disjoint_stage_a_b(
     )
 
 
+def test_load_lane_bars_can_skip_holdout_for_stage_a_only_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T117: multi-pair anchor は Stage A のみ使うため holdout 不在でもロード可能。"""
+    pair, stage_b_rows, _holdout_rows = _prepare_smoke_inputs(
+        fallback_holdout=True
+    )
+    sessions = _install_mock_session(
+        monkeypatch,
+        pair,
+        stage_b_rows,
+        [],
+        datetime(2026, 1, 8, tzinfo=UTC),
+    )
+    from src.alpha_factory.config import load_config as _load
+
+    cfg = _load(CONFIG_PATH)
+    bundle = run_ga_module._load_lane_bars(
+        cfg.dataset.instrument,
+        cfg.dataset,
+        cfg.stage_windows,
+        require_holdout=False,
+    )
+    assert bundle.bars_stage_a
+    assert bundle.bars_stage_b
+    assert bundle.bars_holdout == []
+    assert sessions[-1].bars_calls == ["stage_b"]
+
+
 def test_load_lane_bars_raises_when_dataset_smaller_or_equal_to_stage_a(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

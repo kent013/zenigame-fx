@@ -22,9 +22,9 @@ import logging
 import multiprocessing
 import multiprocessing.pool
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from src.alpha_factory.aux_loader import AlignedAuxBundle, AuxAlignmentCache, AuxBundle
 from src.alpha_factory.cross_pair import (
@@ -33,6 +33,7 @@ from src.alpha_factory.cross_pair import (
 )
 from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
 from src.alpha_factory.stage_gate import (
+    SYSTEM_FAILURE_FITNESS,
     CrossPairResult,
     StageGateConfig,
     StageResult,
@@ -51,6 +52,7 @@ __all__ = [
     "GenomeEvaluator",
     "GenomeStageResult",
     "LaneEvalContext",
+    "MultiPairTrainInputs",
     "PreflightPayload",
     "evaluate_genome",
     "measure_peak_rss_mb",
@@ -126,6 +128,62 @@ class CrossPairLaneInputs:
 
 
 @dataclass(frozen=True)
+class MultiPairTrainInputs:
+    """T117: multi-pair training (Stage A fitness 集約) 用入力。
+
+    ``enable=False`` (default) では ``LaneEvalContext.mp_train_inputs=None`` で
+    常に skip = 単一ペア現挙動 bit-exact。enable 時は **anchor ペアの Stage A
+    bars + meta + bt_cfg** を保持し、evaluate_genome が target (ctx.bars_a) +
+    anchor で Stage A を評価し fitness_pen を ``aggregate`` (min/mean) で集約。
+
+    target ペアは ctx.bars_a/meta/bt_cfg を使うため本 inputs には含めない
+    (anchor のみ)。深い不変性は CrossPairLaneInputs と同様 (MappingProxyType)。
+    """
+
+    anchor_pairs: tuple[str, ...]
+    bars_a_map: Mapping[str, tuple[PriceBar, ...]]
+    meta_map: Mapping[str, InstrumentMeta]
+    bt_cfg_map: Mapping[str, BacktestConfig]
+    aggregate: str = "min"
+
+    def __post_init__(self) -> None:
+        frozen_bars = MappingProxyType(
+            {k: tuple(v) for k, v in self.bars_a_map.items()}
+        )
+        object.__setattr__(self, "bars_a_map", frozen_bars)
+        object.__setattr__(self, "meta_map", MappingProxyType(dict(self.meta_map)))
+        object.__setattr__(
+            self, "bt_cfg_map", MappingProxyType(dict(self.bt_cfg_map))
+        )
+
+    def __getstate__(self) -> dict[str, Any]:
+        return {
+            "anchor_pairs": self.anchor_pairs,
+            "bars_a_map": {k: tuple(v) for k, v in self.bars_a_map.items()},
+            "meta_map": dict(self.meta_map),
+            "bt_cfg_map": dict(self.bt_cfg_map),
+            "aggregate": self.aggregate,
+        }
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        object.__setattr__(self, "anchor_pairs", state["anchor_pairs"])
+        object.__setattr__(
+            self,
+            "bars_a_map",
+            MappingProxyType(
+                {k: tuple(v) for k, v in state["bars_a_map"].items()}
+            ),
+        )
+        object.__setattr__(
+            self, "meta_map", MappingProxyType(dict(state["meta_map"]))
+        )
+        object.__setattr__(
+            self, "bt_cfg_map", MappingProxyType(dict(state["bt_cfg_map"]))
+        )
+        object.__setattr__(self, "aggregate", state["aggregate"])
+
+
+@dataclass(frozen=True)
 class LaneEvalContext:
     """RUN 中 immutable な lane 評価用コンテキスト。
 
@@ -150,6 +208,9 @@ class LaneEvalContext:
     # T057 Phase 2 Gate B: aux 生データ。各 stage で AlignedAuxBundle に展開して
     # primitive_evaluator に注入する。Pool initargs 経由で worker に broadcast.
     aux_bundle: AuxBundle | None = None
+    # T117: multi-pair training。non-None 時のみ Stage A fitness を anchor ペアと
+    # 集約 (default None = 単一ペア現挙動 bit-exact)。
+    mp_train_inputs: MultiPairTrainInputs | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.bars_a, tuple):
@@ -264,6 +325,73 @@ def _evaluator_for_stage(
     return base.with_aux(**aligned.as_evaluator_kwargs())
 
 
+def _payload_fitness_pen(stage_result: StageResult) -> float | None:
+    """StageResult.metrics["payload"]["fitness_pen"] を float で返す (defensive)。"""
+    payload = stage_result.metrics.get("payload")
+    if not isinstance(payload, Mapping):
+        return None
+    fp = payload.get("fitness_pen")
+    if isinstance(fp, bool) or not isinstance(fp, int | float):
+        return None
+    return float(fp)
+
+
+def _aggregate_multi_pair_stage_a(
+    genome: Genome,
+    ctx: LaneEvalContext,
+    mp: MultiPairTrainInputs,
+    stage_gate_cfg: StageGateConfig,
+    primitive_evaluator: RegistryEvaluator,
+    target_a_result: StageResult,
+) -> StageResult:
+    """T117: target + anchor の Stage A fitness_pen を集約し a_result を再構築。
+
+    各 anchor で ``evaluate_stage_a`` を実行し fitness_pen を取得、target と
+    ``mp.aggregate`` (min=全ペア機能強制 / mean) で集約。集約値を target
+    a_result の payload.fitness_pen に上書き (selection に流れる)。passed/その他は
+    target のまま (Stage B/C は target で評価=現状維持)。anchor 取引枯渇個体は
+    sentinel fitness_pen が min に効いて淘汰される。
+    """
+    target_fp = _payload_fitness_pen(target_a_result)
+    if target_fp is None:
+        return target_a_result  # payload 不在 (sentinel 経路等) はそのまま
+    per_pair: dict[str, float] = {mp_target_key(ctx): target_fp}
+    fps: list[float] = [target_fp]
+    for pair in mp.anchor_pairs:
+        bars = mp.bars_a_map[pair]
+        meta = mp.meta_map[pair]
+        bt = mp.bt_cfg_map[pair]
+        # T117 (Codex Critical): anchor 評価は pair=anchor の evaluator を使う
+        # (pair_specific primitive=M4 EconomicEventGate 等が ctx.pair を参照する
+        # ため、target 固定だと anchor fitness が歪む)。
+        ev = _evaluator_for_stage(primitive_evaluator, ctx, bars).with_pair(pair)
+        try:
+            anchor_res = evaluate_stage_a(
+                genome, list(bars), meta, bt, ev, stage_gate_cfg
+            )
+            afp = _payload_fitness_pen(anchor_res)
+            afp = afp if afp is not None else SYSTEM_FAILURE_FITNESS
+        except Exception:
+            afp = SYSTEM_FAILURE_FITNESS  # anchor 評価失敗 → 最悪 (淘汰)
+        per_pair[pair] = afp
+        fps.append(afp)
+    agg = min(fps) if mp.aggregate == "min" else (sum(fps) / len(fps))
+    new_payload = dict(cast(Mapping[str, object], target_a_result.metrics["payload"]))
+    new_payload["fitness_pen"] = agg
+    # 診断用 (selection 非影響、観測のみ)
+    new_payload["mp_fitness_pen_min"] = min(fps)
+    new_payload["mp_fitness_pen_mean"] = sum(fps) / len(fps)
+    new_payload["mp_per_pair_fitness_pen"] = per_pair
+    new_metrics = dict(target_a_result.metrics)
+    new_metrics["payload"] = new_payload
+    return replace(target_a_result, metrics=new_metrics)
+
+
+def mp_target_key(ctx: LaneEvalContext) -> str:
+    """multi-pair 診断用 target ラベル (lane_id ベース)。"""
+    return f"target:{ctx.lane_id}"
+
+
 def evaluate_genome(
     genome: Genome,
     ctx: LaneEvalContext,
@@ -296,6 +424,13 @@ def evaluate_genome(
         )
     except Exception as exc:
         return _to_error_result(genome.name, "A", exc)
+    # T117: multi-pair training。enable 時 target+anchor の Stage A fitness_pen を
+    # 集約し selection 用 fitness_pen を min(全ペア) に置換 (default None=現挙動)。
+    if ctx.mp_train_inputs is not None:
+        a_result = _aggregate_multi_pair_stage_a(
+            genome, ctx, ctx.mp_train_inputs, stage_gate_cfg,
+            primitive_evaluator, a_result,
+        )
     if not a_result.passed:
         return GenomeStageResult(
             genome_name=genome.name,
