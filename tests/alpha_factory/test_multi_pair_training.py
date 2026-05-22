@@ -123,6 +123,35 @@ class TestAggregateMultiPairStageA:
         # min(2.0, 3.0) = 2.0
         assert out.metrics["payload"]["fitness_pen"] == 2.0
 
+    def test_mean_aggregation_retains_target_signal(self, monkeypatch) -> None:
+        """T118: mean 集約は target 改善を半重みで報酬 (min-collapse 回避)。
+
+        target=2.0 (高), anchor=-1.0 (低) → mean=0.5 (>min の -1.0)。target を
+        改善すると mean が target/2 重みで上昇 = target 信号が selection に残る。
+        """
+        from src.alpha_factory import parallel_eval as pe
+
+        def fake_eval(genome, bars, meta, bt, ev, cfg):
+            return _stage_a_result(-1.0)  # anchor は低性能
+
+        monkeypatch.setattr(pe, "evaluate_stage_a", fake_eval)
+        mp = pe.MultiPairTrainInputs(
+            anchor_pairs=("USD_JPY",),
+            bars_a_map={"USD_JPY": ()},
+            meta_map={"USD_JPY": object()},
+            bt_cfg_map={"USD_JPY": object()},
+            aggregate="mean",
+        )
+        ctx = _make_ctx(mp)
+        target = _stage_a_result(2.0)
+        out = pe._aggregate_multi_pair_stage_a(
+            object(), ctx, mp, object(), _StubEval(), target
+        )
+        payload = out.metrics["payload"]
+        # mean(2.0, -1.0) = 0.5 (min なら -1.0 で淘汰される個体が mean では生存)
+        assert payload["fitness_pen"] == pytest.approx(0.5)
+        assert payload["mp_fitness_pen_min"] == -1.0
+
     def test_anchor_exception_uses_sentinel(self, monkeypatch) -> None:
         from src.alpha_factory import parallel_eval as pe
         from src.alpha_factory.stage_gate import SYSTEM_FAILURE_FITNESS

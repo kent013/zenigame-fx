@@ -213,6 +213,7 @@ R87 で cross-pair 汎化 0/599 (EUR_JPY mission 個体は in-sample 過学習) 
 - `multi_pair_training.enable=True` (default OFF=単一=現挙動 bit-exact) 時、Stage A fitness を `pairs` (target+anchor) で評価し `aggregate=min` (全ペアで機能強制) で集約 → anchor 取引枯渇個体を淘汰。Stage B/C は target 現状維持 (spike scope=stage_a)。
 - CLI: `--multi-pair-training --multi-pair-pairs EUR_JPY,USD_JPY`。anchor は Stage A-only ロード (holdout 不要)。anchor 評価は `RegistryEvaluator.with_pair(anchor)` で pair_specific primitive を anchor 文脈に。
 - base_config_hash に multi_pair_training を反映 (calibrate cross-run 汚染防止)。観測: payload mp_fitness_pen_min/mean/per_pair。
+- T118 (cycle 9): min 集約は **min-collapse** (anchor が普遍的に低性能だと min が target 改善への選抜圧を消し集団崩壊、R90 A/B/C 0/0/0) → `--multi-pair-aggregate {min,mean}` CLI 追加。**mean** は target 改善を半重みで報酬し min-collapse 回避 (R91 で検証)。
 
 #### T116 連続値化 + pass 条件観測
 - T115 bool tie-break `int(margin>0)` は gen0 飽和で勾配ゼロ (R88 ii_lite_pass 0/619) → **連続値化**: `_selection_key` で cross_pair margin の連続値 `float(m) if finite else -inf` を tie-break に。`selection_key_schema` は ON 時 `v3_5_cross_pair_pressure_continuous` (OFF=v3_3、bool v3_4 破棄)。
