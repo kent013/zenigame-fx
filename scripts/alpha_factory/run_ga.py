@@ -413,6 +413,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--multi-pair-pairs", type=str, default=None,
         help="multi-pair training の対象ペア (comma 区切り、target + anchor)。",
     )
+    # T118: multi-pair fitness 集約方式。未指定=None で yaml default(min)。
+    # cycle 9: min は min-collapse (target 選抜圧消失) → mean で target 信号保持。
+    p.add_argument(
+        "--multi-pair-aggregate", type=str, default=None,
+        choices=["min", "mean"],
+        help="multi-pair training の fitness 集約方式 (min|mean)。",
+    )
     p.add_argument(
         "--no-report",
         action="store_true",
@@ -566,7 +573,7 @@ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
             "enable": args.cross_pair_enable,
             "selection_pressure": args.cross_pair_selection_pressure,
         },
-        # T117: multi-pair training override (None なら yaml default 尊重)。
+        # T117/T118: multi-pair training override (None なら yaml default 尊重)。
         "multi_pair_training": {
             "enable": getattr(args, "multi_pair_training", None),
             "pairs": (
@@ -574,6 +581,7 @@ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
                 if getattr(args, "multi_pair_pairs", None)
                 else None
             ),
+            "aggregate": getattr(args, "multi_pair_aggregate", None),
         },
     }
 

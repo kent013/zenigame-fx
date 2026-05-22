@@ -768,8 +768,9 @@ def _build_multi_pair_training(raw: Mapping[str, Any]) -> MultiPairTrainingConfi
     return MultiPairTrainingConfig(
         enable=_strict_bool(raw.get("enable", False), False),
         pairs=pairs,
-        aggregate=str(raw.get("aggregate", "min")),
-        scope=str(raw.get("scope", "stage_a")),
+        # None (override 未指定) / 欠落 は default "min" (str(None)="None" 回避)
+        aggregate=str(raw.get("aggregate") or "min"),
+        scope=str(raw.get("scope") or "stage_a"),
     )
 
 
