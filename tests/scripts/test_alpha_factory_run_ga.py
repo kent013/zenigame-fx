@@ -253,7 +253,9 @@ def test_load_config_default_yaml_loads() -> None:
     assert cfg.dataset.instrument == "EUR_JPY"
     assert cfg.ga.population_size == 40
     # live_criteria は yaml top-level から injected
-    assert float(cfg.live_criteria["sharpe_min"]) == 1.0
+    # cycle12 North Star回帰: sharpe_min 1.0→1.5, trade_count_min 50→100 引き上げ
+    assert float(cfg.live_criteria["sharpe_min"]) == 1.5
+    assert int(cfg.live_criteria["trade_count_min"]) == 100
 
 
 def test_parse_args_max_workers_canonical_flag() -> None:

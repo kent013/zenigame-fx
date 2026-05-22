@@ -296,3 +296,10 @@ retroactive 検証 (`scripts/alpha_factory/audit_live_criteria_retroactive.py`):
 4. **バックテスト基盤の設計**: zenigame の alpha_factory を参考にした FX 版 GA / 評価フローの概念設計
 
 進める際は、まず 1 件を `devnotes/YYYYMMDD-HHMM-{topic}/` で概念設計するところから始める。
+
+
+## cycle 12: North Star 回帰 — 閾値引き上げ (cross-pair 汎化追求の戦略転換)
+- cross-pair 汎化 (ii_lite_pass>0) を 7 サイクル (R87-R93) 全 approach (選択圧 T115/T116、multi-pair 訓練 T117/T118 の min/mean×no-ws/ws 2x2) で追求し全て 0。cross_pair は shadow 観測機構で hard 要件でなく、live_criteria 本体は R83 達成済 (annualized sharpe 5.60)。Codex 戦略合議で (D) North Star 回帰 (閾値引き上げ凍結解除) を採用。
+- ★閾値軸の再特定: R89 Stage C 892 個体は sharpe>=1.5 全クリア (hollow、median 4.56)、真に binding なのは trade_count (96% が floor 50 張り付き、max 97、>=100 ゼロ)。現 best=trade51/sharpe5.60 = lucky-few-trade 過学習。
+- 引き上げ (default.yaml、Codex OK): `live_criteria.sharpe_min 1.0→1.5` (品質ガード)、`live_criteria.trade_count_min 50→100` (主 binding、lucky-few-trade 排除)、`ga.feasibility.entry_count_min 50→100` (Stage A 整合圧、GA を高取引数探索へ)。**閾値引き上げのみ・緩和でない。取引増=「取引削減禁止」と整合**。
+- 成功基準: EUR_JPY holdout で sharpe>=1.5 ∧ total_pnl>=50000 ∧ max_dd<=20% ∧ trade_count 100-5000 を満たす個体 1 つ以上 + 別 seed 再現。補助成功: trade_count 分布の右シフト。cross-pair は並行 shadow 観測継続。
