@@ -109,6 +109,7 @@
 | T112 | Phase2 step5a: NSGA-II only selection (_breed_next_gen 多目的化, default OFF) | ga-architecture | Critical | 2026-05-21 18:19 | - |
 | T115 | cross-pair in-loop selection pressure (aggregate_fitness を selection_score に弱く反映、汎化探索圧、default OFF) | cross-pair | High | 2026-05-21 23:34 | - |
 | T116 | cross-pair selection pressure 連続値化 + pass条件観測列 (汎化勾配, default OFF) | cross-pair | High | 2026-05-22 14:55 | - |
+| T117 | multi-pair training 最小spike (Stage A fitnessを複数ペアmin集約で汎化戦略を進化、default OFF) | ga-architecture | Critical | 2026-05-23 01:04 | - |
 
 ## Obsoleted
 
