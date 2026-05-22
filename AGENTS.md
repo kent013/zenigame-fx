@@ -208,6 +208,11 @@ R87 で cross-pair 汎化 0/599 (EUR_JPY mission 個体は in-sample 過学習) 
 - effective 判定は `_resolve_cross_pair_selection_pressure(cfg)` 単一 helper (selection_pressure=False / enable=False / nsga2_selection_enabled=True で no-op)。summary に `selection_key_schema` (v3_3/v3_4) + effective/reason 記録。
 - 閾値緩和でなく加点。aggregate_fitness は Structural シグナル (Reactive Parametric でない)。
 
+#### T116 連続値化 + pass 条件観測
+- T115 bool tie-break `int(margin>0)` は gen0 飽和で勾配ゼロ (R88 ii_lite_pass 0/619) → **連続値化**: `_selection_key` で cross_pair margin の連続値 `float(m) if finite else -inf` を tie-break に。`selection_key_schema` は ON 時 `v3_5_cross_pair_pressure_continuous` (OFF=v3_3、bool v3_4 破棄)。
+- `selection_pressure_margin_threshold` は連続値経路で未使用 → `selection_pressure=True & threshold!=0.0` は `__post_init__` で ValueError fail-closed。
+- archive 観測列 (selection 非影響): `cross_pair_mean_sharpe` / `cross_pair_min_sharpe` / `cross_pair_target_ratio` / `cross_pair_pair_failure_count` (pass 3 条件実値 + 偽陽性監視、天井検証 + proxy 整合性のメタ過学習ガード)。
+
 ---
 
 ## cycle 23: live_criteria.sharpe 単位整合性修正 (2026-05-14 improve-cycle)

@@ -8,11 +8,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from scripts.alpha_factory.run_ga import (
     IndividualCacheEntry,
     _resolve_cross_pair_selection_pressure,
     _selection_key,
 )
+from src.alpha_factory.cross_pair import CrossPairConfig
 
 
 def _entry(*, fitness_pen: float, cross_pair_margin: float | None,
@@ -45,32 +48,59 @@ class TestSelectionKeyPressureOn:
     def test_on_returns_11_tuple_with_tiebreak(self) -> None:
         """ON で fold_robust(8) と fitness_pen(9) の間に tie-break 挿入 → 11-tuple。"""
         e = _entry(fitness_pen=0.5, cross_pair_margin=0.9)
-        key = _selection_key(e, False, selection_pressure=True, margin_threshold=0.0)
+        key = _selection_key(e, False, selection_pressure=True)
         assert len(key) == 11
-        # index 9 が cross-pair tie-break (margin 0.9 > 0.0 → 1)
-        assert key[9] == 1
+        # T116: index 9 は cross-pair margin の連続値 (bool でなく float)
+        assert key[9] == 0.9
         # 末尾は fitness_pen、index 8 は fold_robust (元 score と整合)
         assert key[10] == e.selection_score[9]
         assert key[8] == e.selection_score[8]
 
-    def test_on_positive_margin_ranks_above_negative(self) -> None:
-        """同 fold_robust なら margin>threshold 個体が低 margin 個体より上位。"""
-        hi = _entry(fitness_pen=0.5, cross_pair_margin=0.9)
-        lo = _entry(fitness_pen=0.5, cross_pair_margin=-2.0)
+    def test_on_continuous_higher_margin_ranks_above_lower(self) -> None:
+        """T116 連続値: margin が高いほど上位 (bool 飽和でなく勾配)。"""
+        hi = _entry(fitness_pen=0.5, cross_pair_margin=0.040)
+        mid = _entry(fitness_pen=0.5, cross_pair_margin=0.025)
+        lo = _entry(fitness_pen=0.5, cross_pair_margin=0.010)
         k_hi = _selection_key(hi, False, selection_pressure=True)
+        k_mid = _selection_key(mid, False, selection_pressure=True)
         k_lo = _selection_key(lo, False, selection_pressure=True)
-        assert k_hi > k_lo  # cross-pair 寄与ある個体が selection 上位
+        # bool なら全て >0 で同値だが、連続値なら厳密に hi>mid>lo
+        assert k_hi > k_mid > k_lo
 
-    def test_on_none_margin_treated_as_no_contribution(self) -> None:
+    def test_on_none_or_nan_margin_is_neg_inf(self) -> None:
+        """T116: None/NaN margin → -inf (最下位、cross-pair 評価なしは不利)。"""
         none_e = _entry(fitness_pen=0.9, cross_pair_margin=None)
-        k = _selection_key(none_e, False, selection_pressure=True)
-        assert k[9] == 0  # None → tie-break 0 (無圧)
+        nan_e = _entry(fitness_pen=0.9, cross_pair_margin=float("nan"))
+        pos_e = _entry(fitness_pen=0.5, cross_pair_margin=0.01)
+        k_none = _selection_key(none_e, False, selection_pressure=True)
+        k_nan = _selection_key(nan_e, False, selection_pressure=True)
+        k_pos = _selection_key(pos_e, False, selection_pressure=True)
+        assert k_none[9] == float("-inf")
+        assert k_nan[9] == float("-inf")
+        # 連続値正 margin 個体は -inf 個体より上位
+        assert k_pos > k_none and k_pos > k_nan
 
-    def test_on_threshold_respected(self) -> None:
-        e = _entry(fitness_pen=0.5, cross_pair_margin=0.3)
-        # threshold 0.5 → 0.3 は不満 → 0
-        k = _selection_key(e, False, selection_pressure=True, margin_threshold=0.5)
-        assert k[9] == 0
+    def test_on_inf_margin_is_neg_inf(self) -> None:
+        """T116 (Codex Suggestion): +inf/-inf margin も guard で -inf 最下位。"""
+        pinf = _entry(fitness_pen=0.5, cross_pair_margin=float("inf"))
+        ninf = _entry(fitness_pen=0.5, cross_pair_margin=float("-inf"))
+        assert _selection_key(pinf, False, selection_pressure=True)[9] == float("-inf")
+        assert _selection_key(ninf, False, selection_pressure=True)[9] == float("-inf")
+
+
+class TestConfigFailClosed:
+    def test_threshold_nonzero_with_pressure_raises(self) -> None:
+        """T116 (Codex Round1 W1): 連続値で死に設定の threshold!=0 は fail-closed。"""
+        from src.alpha_factory.cross_pair import CrossPairConfig
+
+        with pytest.raises(ValueError, match="margin_threshold must be 0"):
+            CrossPairConfig(selection_pressure=True,
+                            selection_pressure_margin_threshold=0.5)
+
+    def test_threshold_zero_with_pressure_ok(self) -> None:
+        c = CrossPairConfig(selection_pressure=True,
+                            selection_pressure_margin_threshold=0.0)
+        assert c.selection_pressure is True
 
 
 class TestResolveSelectionPressure:

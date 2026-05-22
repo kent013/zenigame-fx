@@ -116,6 +116,15 @@ class CrossPairConfig:
             raise ValueError(
                 f"aggregator_lambda must be >= 0: {self.aggregator_lambda}"
             )
+        # T116: 連続値選択圧では margin_threshold は未使用。設定したのに効かない
+        # サイレント挙動を防ぐため fail-closed (Codex Round1 Warning1)。
+        if self.selection_pressure and self.selection_pressure_margin_threshold != 0.0:
+            raise ValueError(
+                "cross_pair.selection_pressure_margin_threshold must be 0.0 when "
+                "selection_pressure=True (T116 continuous selection uses the raw "
+                "cross_pair margin; threshold is no longer applied): "
+                f"got {self.selection_pressure_margin_threshold}"
+            )
         if not 0.0 <= self.sharpe_target_cross_ratio_min <= 1.0:
             raise ValueError(
                 "sharpe_target_cross_ratio_min must be in [0, 1]: "
