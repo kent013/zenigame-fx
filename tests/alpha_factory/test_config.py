@@ -437,3 +437,23 @@ def test_wf_min_folds_required_invalid_zero() -> None:
 
     with pytest.raises(ValueError, match="wf_min_folds_required must be >= 1"):
         StageGateConfig(wf_min_folds_required=0)
+
+
+def test_build_ga_propagates_nsga2_selection_enabled() -> None:
+    """T112: nsga2_selection_enabled が raw dict から GAConfig へ伝搬する
+    (config→GaConfig 4 段伝搬の漏れ回帰、 smoke で検出された loader バグ)。"""
+    from src.alpha_factory.config import _build_ga
+
+    raw_on = {
+        "population_size": 12, "generations": 4, "crossover_rate": 0.7,
+        "mutation_rate": 0.5, "tournament_size": 3, "elite_count": 2,
+        "max_depth": 4, "nsga2_selection_enabled": True,
+    }
+    assert _build_ga(raw_on).nsga2_selection_enabled is True
+    raw_default = {
+        "population_size": 12, "generations": 4, "crossover_rate": 0.7,
+        "mutation_rate": 0.5, "tournament_size": 3, "elite_count": 2,
+        "max_depth": 4,
+    }
+    # 未指定は default False
+    assert _build_ga(raw_default).nsga2_selection_enabled is False

@@ -541,6 +541,8 @@ def _build_ga(raw: Mapping[str, Any]) -> GAConfig:
         ),
         warmstart_ratio=float(raw.get("warmstart_ratio", 0.0)),
         warmstart_motif_archive=raw.get("warmstart_motif_archive"),
+        # T112: NSGA-II selection flag (config→GAConfig 伝搬。 default False)。
+        nsga2_selection_enabled=bool(raw.get("nsga2_selection_enabled", False)),
     )
 
 
