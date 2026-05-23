@@ -303,3 +303,8 @@ retroactive 検証 (`scripts/alpha_factory/audit_live_criteria_retroactive.py`):
 - ★閾値軸の再特定: R89 Stage C 892 個体は sharpe>=1.5 全クリア (hollow、median 4.56)、真に binding なのは trade_count (96% が floor 50 張り付き、max 97、>=100 ゼロ)。現 best=trade51/sharpe5.60 = lucky-few-trade 過学習。
 - 引き上げ (default.yaml、Codex OK): `live_criteria.sharpe_min 1.0→1.5` (品質ガード)、`live_criteria.trade_count_min 50→100` (主 binding、lucky-few-trade 排除)、`ga.feasibility.entry_count_min 50→100` (Stage A 整合圧、GA を高取引数探索へ)。**閾値引き上げのみ・緩和でない。取引増=「取引削減禁止」と整合**。
 - 成功基準: EUR_JPY holdout で sharpe>=1.5 ∧ total_pnl>=50000 ∧ max_dd<=20% ∧ trade_count 100-5000 を満たす個体 1 つ以上 + 別 seed 再現。補助成功: trade_count 分布の右シフト。cross-pair は並行 shadow 観測継続。
+
+## cycle 13: 閾値再設計 — trade_count_min revert + total_pnl_min 引き上げ
+- cycle12の閾値引き上げ(trade_count_min50→100/entry_count_min50→100)はR94でStage C=0(全滅)。分析で構造的問題判明: (1)trade_count vs 品質に単調トレードオフ(R89 Stage C: trade[50,60) sharpe4.64/pnl69970 → [80,98) 3.42/54880、trade>=100個体15は全Stage C落ち holdout sharpe median0.026)、trade_count_min=100は現32-primitive/EUR_JPYで構造的到達不能。(2)entry_count_min=100は短いStage A窓(1日)で100entries強制→hyper-active-1day選抜し高取引数tail抹殺(R94 Stage B max97 vs R89 max668)。(3)50-trade帯は850個体median sharpe4.64=robust品質最適点(lucky過学習でない)。
+- 再設計(Codex OK): trade_count_min 100→50 revert(構造的到達不能、50は品質最適帯)、entry_count_min 100→50 revert(逆効果)、sharpe_min 1.5維持(引き上げ済を緩和しない)、★total_pnl_min 50000→70000引き上げ(50-trade帯median69970でbinding&達成可能、品質直結robustness、緩和でなく引き上げ)。
+- R95成功基準: Stage C pass>0 ∧ mission_candidate>=10 ∧ Stage B trade>=100再出現 ∧ 別seed再現。

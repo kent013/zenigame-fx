@@ -87,7 +87,7 @@ ga:
   # cycle 7 (Codex 推奨): entry_count_min 1→50 で live_criteria.trade_count_min=50 と整合化。
   # 「制約不整合 (設計バグ)」の修正 — trade_count=30 等の下限割れ個体 selection 経路を遮断。
   feasibility:
-    entry_count_min: 100                        # cycle12 North Star: 50→100 (trade_count_min=100と整合、GAを高取引数探索へ。Run-24で trade_count median=30→entry_count_min=50で fold-level trade確保、cycle12でlucky-few-trade排除のため100へ)
+    entry_count_min: 50                         # cycle13: 100→50 revert (entry_count_min=100は短いStage A窓で100entries強制→hyper-active-1day選抜し高取引数tail抹殺=R94逆効果。Run-24で trade_count median30→entry50でfold-level trade確保)
     apply_from_generation: 0                    # 0 世代目から制約適用
     enable_fallback_when_all_infeasible: true   # 全個体 infeasible で旧 4 要素にフォールバック
 
@@ -99,9 +99,9 @@ ga:
 # 学術引用: Andrew W. Lo (2002), "The Statistics of Sharpe Ratios".
 live_criteria:
   sharpe_min: 1.5           # cycle12 North Star回帰: 1.0→1.5引き上げ (annualized、達成済sharpe5.60で品質ガード)
-  total_pnl_min: 50000      # 50k JPY over dataset window
+  total_pnl_min: 70000      # cycle13 North Star: 50000→70000引き上げ (50-trade帯median pnl69970でbinding&達成可能、品質直結robustness。緩和でなく引き上げ)
   max_drawdown_max: 0.2     # 20%
-  trade_count_min: 100      # cycle12 North Star: 50→100引き上げ (lucky-few-trade過学習排除、binding、取引増=削減禁止と整合)
+  trade_count_min: 50       # cycle13: 100→50 revert (trade_count_min=100は品質トレードオフで構造的到達不能=R94 Stage C0、50-60帯が品質最適850個体median sharpe4.64)
   trade_count_max: 5000
 
 # Stage A/B/C ゲート設定 (T014 実装)
