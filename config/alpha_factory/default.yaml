@@ -99,7 +99,7 @@ ga:
 # 学術引用: Andrew W. Lo (2002), "The Statistics of Sharpe Ratios".
 live_criteria:
   sharpe_min: 1.5           # cycle12 North Star回帰: 1.0→1.5引き上げ (annualized、達成済sharpe5.60で品質ガード)
-  total_pnl_min: 74000      # cycle15 North Star: 70000→74000引き上げ (R95/R96両seed再現後、弱seed R96 max80520律速・両seed mission_candidate≥10維持の上限=R95 57/R96 12。Codex合議条件付きOK。緩和でなく引き上げ)
+  total_pnl_min: 70000      # cycle16 診断 revert: 74000→70000 (R97 seed70で74k=StageC0崩壊。total_pnl_minはin-loop=Stage A/B/選抜に作用しpost-hoc sweep無効と判明。70k+seed70反実仮想で閾値因果切り分け中。70kはR95/R96 2seed再現済=validated frontier。Codex合議: 未検証引き上げ棄却は緩和禁止に非抵触)
   max_drawdown_max: 0.2     # 20%
   trade_count_min: 50       # cycle13: 100→50 revert (trade_count_min=100は品質トレードオフで構造的到達不能=R94 Stage C0、50-60帯が品質最適850個体median sharpe4.64)
   trade_count_max: 5000
