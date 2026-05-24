@@ -257,11 +257,11 @@ def test_load_config_default_yaml_loads() -> None:
     # trade_count_min は cycle12で100へ上げたが構造的到達不能(R94 Stage C0)で cycle13に50へ revert。
     # cycle15: 70000→74000 引き上げたが R97(seed70)で StageC=0 崩壊 (total_pnl_min は in-loop 作用)。
     # cycle16: 74000→70000 診断revert (70k+seed70 反実仮想で閾値因果切り分け。70kは R95/R96 2seed validated)。
-    # cycle17: dd厳格化 max_drawdown_max 0.20→0.05 (R99 in-loop検証中)。
+    # cycle17-18: dd厳格化 0.20→0.05(R99ビット同一=安全)→0.03(R100 in-loop検証中、初のbinding)。
     assert float(cfg.live_criteria["sharpe_min"]) == 1.5
     assert int(cfg.live_criteria["trade_count_min"]) == 50
     assert float(cfg.live_criteria["total_pnl_min"]) == 70000
-    assert float(cfg.live_criteria["max_drawdown_max"]) == 0.05
+    assert float(cfg.live_criteria["max_drawdown_max"]) == 0.03
 
 
 def test_parse_args_max_workers_canonical_flag() -> None:
