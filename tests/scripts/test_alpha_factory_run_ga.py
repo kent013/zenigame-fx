@@ -261,7 +261,7 @@ def test_load_config_default_yaml_loads() -> None:
     assert float(cfg.live_criteria["sharpe_min"]) == 1.5
     assert int(cfg.live_criteria["trade_count_min"]) == 50
     assert float(cfg.live_criteria["total_pnl_min"]) == 70000
-    assert float(cfg.live_criteria["max_drawdown_max"]) == 0.02
+    assert float(cfg.live_criteria["max_drawdown_max"]) == 0.015
 
 
 def test_parse_args_max_workers_canonical_flag() -> None:

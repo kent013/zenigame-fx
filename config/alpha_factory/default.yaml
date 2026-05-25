@@ -100,7 +100,7 @@ ga:
 live_criteria:
   sharpe_min: 1.5           # cycle12 North Star回帰: 1.0→1.5引き上げ (annualized、達成済sharpe5.60で品質ガード)
   total_pnl_min: 70000      # cycle16 診断 revert: 74000→70000 (R97 seed70で74k=StageC0崩壊。total_pnl_minはin-loop=Stage A/B/選抜に作用しpost-hoc sweep無効と判明。70k+seed70反実仮想で閾値因果切り分け中。70kはR95/R96 2seed再現済=validated frontier。Codex合議: 未検証引き上げ棄却は緩和禁止に非抵触)
-  max_drawdown_max: 0.02    # cycle19 dd厳格化: 3%→2% (dd5%/3%はビット同一=non-pivotal/hollow。dd2%は達成tail13個体[dd2-2.676%]を初めて拘束=binding開始点。R101 seed70でselection-pivotal化検証。post-hoc予測621。旧20%/5%/3%)
+  max_drawdown_max: 0.015   # cycle20 dd厳格化: 2%→1.5% (dd2%でpivotal化&改善方向=StageC634→723/ann5.205→5.582。dd1.5%は達成median1.483%付近で約半分拘束=さらなる品質向上検証。R102 seed70。旧20%/5%/3%/2%)
   trade_count_min: 50       # cycle13: 100→50 revert (trade_count_min=100は品質トレードオフで構造的到達不能=R94 Stage C0、50-60帯が品質最適850個体median sharpe4.64)
   trade_count_max: 5000
 
