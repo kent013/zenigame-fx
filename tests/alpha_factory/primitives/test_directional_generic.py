@@ -436,3 +436,125 @@ class TestViaRegistryEvaluator:
             val = ev.evaluate(bars, 90, sig)
             assert isinstance(val, float)
             assert -1.0 - 1e-9 <= val <= 1.0 + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# F15 MTFTrendPullback (experimental opt-in, cycle24)
+# ---------------------------------------------------------------------------
+
+
+class TestF15MTFTrendPullback:
+    def _f15_params(self) -> dict:
+        return {
+            "htf_min": 15,
+            "trend_fast_n": 5,
+            "trend_slow_n": 20,
+            "entry_n": 14,
+            "k_entry": 1.5,
+        }
+
+    def test_not_in_default_registry_bit_exact(self):
+        """default(ensure_registered のみ)で F15 は registry に無い=既存32本(bit-exact)."""
+        from src.alpha_factory.primitives import _registry as R
+        from src.alpha_factory.primitives.directional_generic import (
+            register_experimental,
+        )
+
+        R.clear()
+        R.ensure_registered()
+        ids = {s.id for s in R.list_all()}
+        assert "F15" not in ids
+        assert len(ids) == 32
+        register_experimental()
+        ids2 = {s.id for s in R.list_all()}
+        assert "F15" in ids2
+        assert len(ids2) == 33
+        # cleanup: 後続テストへ漏らさない
+        R.clear()
+        R.ensure_registered()
+
+    def test_output_bounded(self):
+        from src.alpha_factory.primitives.directional_generic import F15_SPEC
+
+        bars = _build_bars(600, seed=7, step=timedelta(minutes=1))
+        ctx = EvaluationContext(
+            bars=bars, idx=599, pair="EUR_USD", params=self._f15_params()
+        )
+        arr = F15_SPEC.compute_all_bars(ctx)
+        valid = arr[np.isfinite(arr)]
+        assert len(valid) > 0
+        assert np.all(valid >= -1.0 - 1e-9)
+        assert np.all(valid <= 1.0 + 1e-9)
+
+    def test_no_look_ahead(self):
+        """後続 bar 追加で過去 index の値が不変 (look-ahead bias なし)。
+
+        Codex impl-review Warning 対応: equal_nan=True で NaN→finite リークも検知。
+        """
+        from src.alpha_factory.primitives.directional_generic import F15_SPEC
+
+        bars = _build_bars(600, seed=8, step=timedelta(minutes=1))
+        p = self._f15_params()
+        arr1 = F15_SPEC.compute_all_bars(
+            EvaluationContext(bars=bars, idx=599, pair="EUR_USD", params=p)
+        )
+        # 極端な未来 bar を 5 本追加
+        extra = _build_bars(5, seed=999, step=timedelta(minutes=1),
+                            base_time=bars[-1].bar_time + timedelta(minutes=1))
+        arr2 = F15_SPEC.compute_all_bars(
+            EvaluationContext(bars=bars + extra, idx=604, pair="EUR_USD", params=p)
+        )
+        # 全要素比較 (NaN 位置含む) で NaN→finite リークも検知
+        np.testing.assert_allclose(
+            arr1, arr2[: len(arr1)], atol=1e-12, equal_nan=True
+        )
+
+    def test_weekend_gap_and_single_bucket(self):
+        """週末ギャップ (bucket id 不連続) と単一 bucket 未満の edge case。
+
+        Codex impl-review Warning 対応。
+        """
+        from src.alpha_factory.primitives.directional_generic import F15_SPEC
+
+        p = self._f15_params()
+        # bucket(htf_min=15) 未満の 10 bar → 完全に閉じた HTF 無し → 全 NaN
+        few = _build_bars(10, seed=3, step=timedelta(minutes=1))
+        arr_few = F15_SPEC.compute_all_bars(
+            EvaluationContext(bars=few, idx=9, pair="EUR_USD", params=p)
+        )
+        assert np.all(np.isnan(arr_few))
+        # 週末ギャップ: 前半300本 + 2日gap + 後半300本。look-ahead不変 + bounded。
+        first = _build_bars(300, seed=4, step=timedelta(minutes=1))
+        second = _build_bars(
+            300, seed=5, step=timedelta(minutes=1),
+            base_time=first[-1].bar_time + timedelta(days=2),
+        )
+        bars = first + second
+        arr = F15_SPEC.compute_all_bars(
+            EvaluationContext(bars=bars, idx=599, pair="EUR_USD", params=p)
+        )
+        valid = arr[np.isfinite(arr)]
+        assert len(valid) > 0
+        assert np.all(valid >= -1.0 - 1e-9) and np.all(valid <= 1.0 + 1e-9)
+        extra = _build_bars(
+            3, seed=6, step=timedelta(minutes=1),
+            base_time=bars[-1].bar_time + timedelta(minutes=1),
+        )
+        arr2 = F15_SPEC.compute_all_bars(
+            EvaluationContext(bars=bars + extra, idx=602, pair="EUR_USD", params=p)
+        )
+        np.testing.assert_allclose(arr, arr2[: len(arr)], atol=1e-12, equal_nan=True)
+
+    def test_compute_matches_compute_all_bars(self):
+        from src.alpha_factory.primitives.directional_generic import F15_SPEC
+
+        bars = _build_bars(400, seed=9, step=timedelta(minutes=1))
+        p = self._f15_params()
+        arr = F15_SPEC.compute_all_bars(
+            EvaluationContext(bars=bars, idx=399, pair="EUR_USD", params=p)
+        )
+        single = F15_SPEC.compute(
+            EvaluationContext(bars=bars, idx=399, pair="EUR_USD", params=p)
+        )
+        expected = 0.0 if not np.isfinite(arr[399]) else float(arr[399])
+        assert abs(single - expected) < 1e-12

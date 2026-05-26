@@ -106,7 +106,11 @@ from src.alpha_factory.parallel_eval import (
     measure_peak_rss_mb,
 )
 from src.alpha_factory.pareto_features import ParetoFeaturesLite
-from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
+from src.alpha_factory.primitives import (
+    RegistryEvaluator,
+    clear as _clear_registry,
+    ensure_registered,
+)
 from src.alpha_factory.run_context import RunContext, generate_epoch_id_stub
 from src.alpha_factory.schema_contract import (
     CASCADE_CONTRACT_VERSION,
@@ -394,6 +398,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     # 未指定=None で yaml default(False)尊重、 指定で True override。
     p.add_argument(
         "--nsga2-selection", action="store_const", const=True, default=None
+    )
+    # cycle24: experimental primitive F15 MTFTrendPullback (マルチTF) を母集団へ投入。
+    # 未指定=OFF で registry 32本のまま (bit-exact)。指定時のみ register_experimental()。
+    p.add_argument(
+        "--enable-mtf-primitive", action="store_true", default=False
     )
     # T114: cross-pair (ii-lite) shadow 有効化。未指定=None で yaml default(False)尊重。
     p.add_argument(
@@ -2205,7 +2214,20 @@ def main(argv: list[str] | None = None) -> int:
         dataset_epoch_id=dataset_epoch_id,
     )
 
+    # cycle24 Codex impl-review Critical: registry を per-run で再構築し、同一
+    # プロセス内の前 run (experimental ON) の状態 (F15 残留) が OFF run に漏れるのを
+    # 防ぐ。clear()→ensure_registered() で常に 32本基準、flag ON 時のみ F15 追加。
+    _clear_registry()
     ensure_registered()
+    if getattr(args, "enable_mtf_primitive", False):
+        # cycle24: opt-in で experimental primitive F15 を registry に追加してから
+        # pool を構築。default(未指定) では呼ばれず registry 32本 = bit-exact。
+        from src.alpha_factory.primitives.directional_generic import (
+            register_experimental,
+        )
+
+        register_experimental()
+        logger.info("run_ga.experimental_primitive.enabled kind=mtf_trend_pullback id=F15")
     rg_registry = build_random_gen_registry()
 
     bundle = _load_lane_bars(

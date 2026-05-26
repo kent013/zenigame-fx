@@ -636,6 +636,122 @@ F14_SPEC = PrimitiveSpec(
 
 
 # ---------------------------------------------------------------------------
+# F15 MTFTrendPullback (TREND_FOLLOW, experimental opt-in / cycle24)
+# ---------------------------------------------------------------------------
+# 上位足 (HTF) トレンド方向 × 下位足 (LTF=M1) プルバックの合成。現 32-primitive は
+# 実質 single-TF (vol/session ゲートはあるが HTF構造×LTFエントリの合成なし)。
+# ★ look-ahead bias 防止 (設計の最重要点):
+#   - HTF バーは timestamp を htf_min 分境界で bucket 化して集約。M1 bar i (bucket B
+#     に属する) は **直近で完全に閉じた bucket (B-1) の HTF 指標のみ** を参照する。
+#     bucket B の集約値は M1 bar i 時点で未確定 (B 内の未来 M1 bar を含む) ため不参照。
+#   - 最初の bucket (B-1 が存在しない) の M1 bar は NaN (= neutral)。
+#   - LTF (ema/atr on M1) は recurrence で過去のみ参照 → 安全。
+#   - 後続 bar 改変で過去 index 不変 (property test で検証)。
+
+
+def _f15_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, h, low, c = _bars_to_mid_ohlc(ctx.bars)
+    htf_min = _get_int_param(ctx.params, "htf_min")
+    trend_fast_n = _get_int_param(ctx.params, "trend_fast_n")
+    trend_slow_n = _get_int_param(ctx.params, "trend_slow_n")
+    entry_n = _get_int_param(ctx.params, "entry_n")
+    k_entry = _get_float_param(ctx.params, "k_entry")
+
+    n_bars = len(ctx.bars)
+    out = np.full(n_bars, np.nan, dtype=np.float64)
+    if n_bars == 0:
+        return out
+    if htf_min < 1:
+        htf_min = 1
+
+    # M1 bar を htf_min 分境界で bucket 化 (epoch 分 // htf_min)。bars は時系列昇順
+    # ゆえ bkt は非減少。週末ギャップは bucket id 不連続として自然に扱われる。
+    epoch_min = np.fromiter(
+        (int(b.bar_time.timestamp()) // 60 for b in ctx.bars),
+        dtype=np.int64,
+        count=n_bars,
+    )
+    bkt = epoch_min // int(htf_min)
+
+    # bucket 境界 (各 bucket の最初の M1 index)。uniq は昇順、start_idx は増加列。
+    uniq, start_idx = np.unique(bkt, return_index=True)
+    n_buckets = len(uniq)
+    if n_buckets < 2:
+        # 完全に閉じた HTF bucket が無い → 全 bar neutral(NaN)
+        return out
+
+    # 各 bucket の HTF OHLC を集約 (open=最初, high=max, low=min, close=最後)。
+    end_excl = np.append(start_idx[1:], n_bars)  # 各 bucket の終端 (exclusive)
+    htf_high = np.maximum.reduceat(h, start_idx)
+    htf_low = np.minimum.reduceat(low, start_idx)
+    htf_close = c[end_excl - 1]
+
+    # HTF 指標 (length = n_buckets)。atr の HTF 窓は trend_slow_n を流用 (最小実装)。
+    hf = ema(htf_close, trend_fast_n)
+    hs = ema(htf_close, trend_slow_n)
+    ha = atr(htf_high, htf_low, htf_close, trend_slow_n)
+    htf_trend_raw = (hf - hs) / (ha + _EPS)
+    htf_valid = ~(np.isnan(hf) | np.isnan(hs) | np.isnan(ha))
+
+    # 各 M1 bar の bucket 位置 → 直近確定 bucket (pos-1) の HTF 値を参照 (look-ahead 防止)
+    pos = np.searchsorted(uniq, bkt)  # bkt は uniq の要素ゆえ pos は bucket index
+    completed = pos - 1
+    use = completed >= 0  # 最初の bucket の bar は確定 HTF 無し → NaN
+
+    trend = np.full(n_bars, np.nan, dtype=np.float64)
+    ci = completed[use]
+    cv = htf_valid[ci]
+    rows = np.nonzero(use)[0][cv]
+    trend[rows] = np.tanh(htf_trend_raw[ci[cv]])
+
+    # LTF (M1) プルバック: ema/atr は recurrence で過去のみ参照
+    ema_ltf = ema(c, entry_n)
+    atr_ltf = atr(h, low, c, entry_n)
+    pullback = np.tanh((ema_ltf - c) / (k_entry * atr_ltf + _EPS))
+
+    align = np.maximum(0.0, trend * pullback)
+    res = trend * align
+    mask = np.isnan(trend) | np.isnan(ema_ltf) | np.isnan(atr_ltf)
+    out = np.where(mask, np.nan, res)
+    return out
+
+
+F15_SPEC = PrimitiveSpec(
+    id="F15",
+    name="MTFTrendPullback",
+    category="TREND_FOLLOW",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="htf_min", low=5, high=30, is_int=True, default=15),
+        ParamSpec(name="trend_fast_n", low=2, high=12, is_int=True, default=5),
+        ParamSpec(name="trend_slow_n", low=8, high=36, is_int=True, default=20),
+        ParamSpec(name="entry_n", low=5, high=40, is_int=True, default=14),
+        ParamSpec(name="k_entry", low=0.5, high=3.0, is_int=False, default=1.5),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f15_compute_all),
+    compute_all_bars=_f15_compute_all,
+)
+
+# F15 は experimental (opt-in)。_ALL_SPECS には含めず、flag ON 時のみ
+# register_experimental() で registry に追加 → default OFF で bit-exact (32本)。
+EXPERIMENTAL_SPECS: tuple[PrimitiveSpec, ...] = (F15_SPEC,)
+
+
+def register_experimental() -> None:
+    """experimental primitive (F15 等) を registry に登録する (opt-in、冪等)。
+
+    GA entry が ``ga.experimental.mtf_trend_pullback_enabled`` 等の flag ON 時のみ
+    呼ぶ。default path (ensure_registered のみ) では呼ばれず、registry は 32 本の
+    まま = random_gen pool 不変 = bit-exact。
+    """
+    from src.alpha_factory.primitives._registry import register_if_absent
+
+    for spec in EXPERIMENTAL_SPECS:
+        register_if_absent(spec)
+
+
+# ---------------------------------------------------------------------------
 # 登録
 # ---------------------------------------------------------------------------
 
