@@ -889,3 +889,42 @@ class TestMeasurePeakRss:
         result = measure_peak_rss_mb(pool_pids=set())
         assert result["n_ga_workers"] == 0.0
         assert result["n_all_children"] == 0.0
+
+
+class TestInitWorkerExperimentalPropagation:
+    """cycle25: spawn worker registry への experimental primitive 伝播。
+
+    R105 invalid 化の根本原因 = main process で register_experimental() しても
+    spawn worker は ensure_registered() の 32 本のみ持ち、F15 含み genome が
+    Stage A で KeyError 全滅した。_init_worker(enable_experimental=True) が
+    worker 側でも register_experimental() を呼ぶことを検証する。
+    """
+
+    def teardown_method(self) -> None:
+        # 他テストへ汚染しないよう registry を基準 32 本へ戻す
+        import src.alpha_factory.primitives as prims
+
+        prims.clear()
+        prims.ensure_registered()
+
+    def test_off_is_bit_exact_32_without_f15(self) -> None:
+        import src.alpha_factory.primitives as prims
+        from src.alpha_factory.parallel_eval import _init_worker
+
+        prims.clear()
+        _init_worker(MagicMock(), MagicMock(), MagicMock(), {})
+        ids = [s.id for s in prims.list_all()]
+        assert len(ids) == 32
+        assert "F15" not in ids
+
+    def test_on_registers_f15_in_worker(self) -> None:
+        import src.alpha_factory.primitives as prims
+        from src.alpha_factory.parallel_eval import _init_worker
+
+        prims.clear()
+        _init_worker(
+            MagicMock(), MagicMock(), MagicMock(), {}, enable_experimental=True
+        )
+        ids = [s.id for s in prims.list_all()]
+        assert len(ids) == 33
+        assert "F15" in ids

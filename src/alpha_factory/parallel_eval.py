@@ -632,15 +632,29 @@ def _init_worker(
     cross_pair_cfg: CrossPairConfig,
     prim_evaluator: RegistryEvaluator,
     lane_contexts: dict[str, LaneEvalContext],
+    enable_experimental: bool = False,
 ) -> None:
     """Pool initializer。spawn された worker process で 1 度だけ呼ばれる。
 
     primitive registry を ``ensure_registered()`` で再構築 (spawn 経由で
     module-global が空のため必須)。
+
+    cycle25: ``enable_experimental=True`` のとき ``register_experimental()`` も
+    呼び、main process の random generator が生成する experimental primitive
+    (例 F15) を worker 側 evaluator registry にも登録する。これを欠くと spawn
+    worker は ``ensure_registered()`` の 32 本のみ持ち、F15 含み genome が
+    ``KeyError: primitive 'F15' not in registry`` で Stage A 全滅する
+    (R105 invalid 化の根本原因)。default ``False`` で従来挙動 bit-exact。
     """
     global _WORKER_STAGE_GATE_CFG, _WORKER_CROSS_PAIR_CFG
     global _WORKER_PRIM_EVALUATOR, _WORKER_LANE_CONTEXTS
     ensure_registered()
+    if enable_experimental:
+        from src.alpha_factory.primitives.directional_generic import (
+            register_experimental,
+        )
+
+        register_experimental()
     _WORKER_STAGE_GATE_CFG = stage_gate_cfg
     _WORKER_CROSS_PAIR_CFG = cross_pair_cfg
     _WORKER_PRIM_EVALUATOR = prim_evaluator
@@ -687,6 +701,7 @@ class GenomeEvaluator:
         lane_contexts: Mapping[str, LaneEvalContext],
         *,
         max_tasks_per_child: int | None = None,
+        enable_experimental: bool = False,
     ) -> None:
         """``max_tasks_per_child``: worker が指定タスク数を処理したら
         プロセスごと退役 → 新規 spawn でリサイクルする (``Pool`` の
@@ -711,6 +726,7 @@ class GenomeEvaluator:
             )
         self._max_workers = max_workers
         self._max_tasks_per_child = max_tasks_per_child
+        self._enable_experimental = enable_experimental
         self._stage_gate_cfg = stage_gate_cfg
         self._cross_pair_cfg = cross_pair_cfg
         self._prim_evaluator = prim_evaluator
@@ -730,6 +746,7 @@ class GenomeEvaluator:
                     cross_pair_cfg,
                     prim_evaluator,
                     dict(self._lane_contexts),
+                    enable_experimental,
                 ),
                 # None = 従来通りリサイクルなし。int 指定で worker 定期退役。
                 maxtasksperchild=max_tasks_per_child,

@@ -2542,6 +2542,9 @@ def main(argv: list[str] | None = None) -> int:
         cross_pair_cfg=cfg.cross_pair,
         prim_evaluator=primitive_evaluator,
         lane_contexts={lane_id: lane_ctx},
+        # cycle25: spawn worker registry にも experimental primitive (F15) を
+        # 登録させる。ON 時のみ True。OFF (default) は False で従来 bit-exact。
+        enable_experimental=getattr(args, "enable_mtf_primitive", False),
     ) as genome_evaluator:
         lane_manager = LaneManager(
             tier1={lane_id: tier1_lane},
