@@ -205,7 +205,7 @@ stage_gate:
     # CLI override 可: --stage-b-gate-kind {legacy, profit_safe_pfr}。
     # 詳細: devnotes/20260513-2007-fx-improve/detailed-design.md (Codex Round 3 APPROVED)
     gate_kind: legacy             # default 行動完全不変、 1 RUN smoke は CLI で profit_safe_pfr に切替
-    profit_safe_pfr_threshold: 0.55  # cycle21: 0.4→0.55 fold一貫性robustness引き上げ(Codex(A)、新直交品質軸=OOS一貫性)。達成StageC pfr≥0.55:720/723、StageB 105cut軽度binding。R103 seed70=R101反実仮想でdd型(安全)/74k型(崩壊)検証。旧0.4
+    profit_safe_pfr_threshold: 0.4  # cycle21確定: 0.4最適。pfr0.55(R103)はholdout品質と非連動(StageC723→428減・pnl82150→79720/ann5.582→5.278微減、Codex条件2/3未達)=形式的追認で打ち切り・0.4revert(非緩和)。74k型崩壊ではない(StageC428健在)が dd2%型品質向上でもない。
     profit_safe_pfr_min_n_fold: 20  # n_fold_effective 最小要件 (Codex MODIFY: 解釈安定化)
   stage_c:
     holdout_days: 60
