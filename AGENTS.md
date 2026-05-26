@@ -308,3 +308,16 @@ retroactive 検証 (`scripts/alpha_factory/audit_live_criteria_retroactive.py`):
 - cycle12の閾値引き上げ(trade_count_min50→100/entry_count_min50→100)はR94でStage C=0(全滅)。分析で構造的問題判明: (1)trade_count vs 品質に単調トレードオフ(R89 Stage C: trade[50,60) sharpe4.64/pnl69970 → [80,98) 3.42/54880、trade>=100個体15は全Stage C落ち holdout sharpe median0.026)、trade_count_min=100は現32-primitive/EUR_JPYで構造的到達不能。(2)entry_count_min=100は短いStage A窓(1日)で100entries強制→hyper-active-1day選抜し高取引数tail抹殺(R94 Stage B max97 vs R89 max668)。(3)50-trade帯は850個体median sharpe4.64=robust品質最適点(lucky過学習でない)。
 - 再設計(Codex OK): trade_count_min 100→50 revert(構造的到達不能、50は品質最適帯)、entry_count_min 100→50 revert(逆効果)、sharpe_min 1.5維持(引き上げ済を緩和しない)、★total_pnl_min 50000→70000引き上げ(50-trade帯median69970でbinding&達成可能、品質直結robustness、緩和でなく引き上げ)。
 - R95成功基準: Stage C pass>0 ∧ mission_candidate>=10 ∧ Stage B trade>=100再出現 ∧ 別seed再現。
+## cycle 14-22: 閾値引き上げ + 探索効率キャンペーン総括 (R94-R104、11 full run、2026-05-23〜26 improve-cycle)
+全閾値軸と探索効率レバーを seed 固定の in-loop 反実仮想で網羅検証し、**確定 frontier (sharpe1.5/pnl70k/dd2%/trade50/pfr0.4、tournament selection)** に収束。R101 で **723 個体が全 live_criteria 達成** (holdout: annualized sharpe median 5.582 / total_pnl median 82k / max_dd 全個体 <2% / pnl max 92k)。North Star (live_criteria 全達成個体を多数 + 達成後引き上げ) を robust に達成。
+
+### ★ 最重要知見 top3 (Codex 合議で確定、運用の前提とする)
+1. **dd2% (max_drawdown_max 20%→2%) だけが真に品質向上をもたらした閾値引き上げ** — Stage C の量 (634→723) と質 (ann 5.205→5.582) が同時改善。低dd 選抜圧が holdout-robust 個体を促進する好循環。dd1.5% は over-tightening (StageC 723→398・品質微減) で 2% が最適点。
+2. **pnl 閾値は 70k が frontier、74k で in-loop 崩壊する pivotal 軸** — 連続改善でなく相転移的。74k は GA を「高 fold-sum + cross-pair basin (holdout pnl 犠牲)」へ移動させ StageC=0 (R97)。同一 seed の 70k 反実仮想 (R98) は StageC=634 で因果確定。70k は 3 seed (R95/R96/R98) validated。
+3. **selection は tournament が mission 優位、nsga2-selection は tail 改善のみで中央値を悪化** (採用不適) — R104 で nsga2 は Pareto tail (pnl max 108810=全run最高単一個体) を伸ばすが median 退行 (ann 5.582→4.681、mission 429<723)。「robust 達成個体を多数」には tournament が優る。
+
+### 補助知見
+- sharpe_min=1.5 は hollow (達成 ann median 5.2-5.6 >> 1.5、形式的追認のみ)。trade_count_min=50 は floor 最適 (100 は構造的到達不能)。fold一貫性 (profit_safe_pfr 0.4→0.55) は holdout 品質と非連動 (R103 pnl/ann 微減) で打ち切り・0.4 維持。
+- **運用ルール (確立)**: 閾値引き上げ採用は (1) 同一 seed の in-loop 反実仮想で検証 (post-hoc sweep は pivotal 閾値で無効、74k 教訓)、(2) 独立 2 seed 以上で mission_candidate>0 再現、(3) holdout 品質と連動を確認。
+- cross-pair 汎化 (ii_lite_pass) は cycle12 までの 7 連敗に加え本キャンペーン全 run で 0 継続 (shadow 観測)。74k 副作用で ii_lite=188 が出たが holdout 品質と逆相関 (mission 両立不可)。
+- 既存フレーム (32-primitive / EUR_JPY / pop96-gen60 / tournament / warmstart0.1) での「閾値引き上げ」「探索効率」両レバーは限界に到達。さらなる品質向上は構造的手段 (新 primitive / cross-pair 別 framework) = 次フェーズ研究テーマ。frontier を基準線として固定済。
