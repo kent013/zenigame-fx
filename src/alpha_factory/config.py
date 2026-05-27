@@ -604,8 +604,9 @@ def _build_ga(raw: Mapping[str, Any]) -> GAConfig:
         # T112: NSGA-II selection flag (config→GAConfig 伝搬。 default False)。
         nsga2_selection_enabled=bool(raw.get("nsga2_selection_enabled", False)),
         # cycle26 (D): anti-overfit 選択圧 (config→GAConfig 伝搬。 default False)。
-        robust_selection_enabled=bool(
-            raw.get("robust_selection_enabled", False)
+        # _strict_bool で "false" 等の文字列も正しく解釈 (default OFF bit-exact 担保)。
+        robust_selection_enabled=_strict_bool(
+            raw.get("robust_selection_enabled"), default=False
         ),
         robust_w_pfre=float(raw.get("robust_w_pfre", 0.4)),
         robust_w_sign=float(raw.get("robust_w_sign", 0.3)),

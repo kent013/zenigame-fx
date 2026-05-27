@@ -1,0 +1,583 @@
+commit 645202308617a7aee73dee85f6e8a1c4f2d122e1
+Author: ISHITOYA Kentaro <kentaro.ishitoya@gmail.com>
+Date:   Wed May 27 15:23:36 2026 +0900
+
+    feat: cycle26 (D) anti-overfit 選択圧 --robust-selection (opt-in, default OFF bit-exact)
+    
+    Codex合議(D)実装。fold-CV安定性を連続値selection keyに織り込み過学習を抑制。
+    holdout情報は一切不使用 (Stage B fold統計のみ)。
+    
+    変更:
+    - stage_gate: per-fold OOS PnL の IQR (oos_total_pnl_iqr) を算出 (n_fold>=2、statistics.quantiles)。
+      Stage B pass/fail・GA RNG・selection順序(OFF時)に無影響な観測値追加。
+    - archive: oos_total_pnl_iqr 列追加 (nullable, 70→71列)。in-memory row + parquet 永続化。
+    - config: GAConfig.robust_selection_enabled / robust_w_pfre/sign/disp (default False/0.4/0.3/0.3)。
+    - run_ga: _compute_robust_score (= w_pfre·pfre + w_sign·(1-fold_sign_ratio) + w_disp·(1-norm_iqr), clip[0,1]),
+      _resolve_robust_selection SSOT, _selection_key に robust_score を fold_robust と fitness_pen の間
+      (cross_pair margin より上位) に挿入。--robust-selection + 重み CLI flag。
+    - _update_cache/_tournament/_breed_next_gen/_select_best に robust_selection thread。
+    
+    bit-exact: robust_selection_enabled=False (default) で _selection_key は従来10-tuple のまま。
+    並列決定論テスト含む全2784テストpass。新規テスト: _compute_robust_score 6件 + _selection_key OFF/ON 3件 + archive schema。
+    stale test_v31 (8-tuple→10-tuple v3.3) も修正。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+diff --git a/scripts/alpha_factory/run_ga.py b/scripts/alpha_factory/run_ga.py
+index 76147db..d7e23f7 100644
+--- a/scripts/alpha_factory/run_ga.py
++++ b/scripts/alpha_factory/run_ga.py
+@@ -212,6 +212,12 @@ class IndividualCacheEntry:
+     # default OFF では selection_score (10-tuple) に一切寄与せず bit-exact。None は
+     # cross-pair 未実行 (enable=False / skipped)。
+     cross_pair_margin: float | None = None
++    # cycle26 (D): anti-overfit 連続値スコア (archive fold 統計由来、[0,1])。
++    # ga.robust_selection_enabled=True 時のみ _selection_key が fold_robust と
++    # fitness_pen の間 (cross_pair_margin より上位) に挿入。default OFF では
++    # selection_score (10-tuple) に一切寄与せず bit-exact。None は fold 統計欠損
++    # (= selection 上不利 -inf 扱い、 pass 整合)。
++    robust_score: float | None = None
+ 
+     @property
+     def selection_score(self) -> tuple[int, float, int, int, int, int, int, int, int, float]:
+@@ -263,12 +269,65 @@ class IndividualCacheEntry:
+         )
+ 
+ 
++def _compute_robust_score(
++    row: Mapping[str, Any],
++    *,
++    w_pfre: float,
++    w_sign: float,
++    w_disp: float,
++) -> float | None:
++    """cycle26 (D): fold-CV 安定性の連続値 robust_score を archive row から算出.
++
++    ``robust_score = w_pfre*pfre + w_sign*(1-fold_sign_ratio)
++                     + w_disp*(1-norm_iqr)`` を [0,1] に clip。
++    - ``pfre`` = positive_fold_ratio_effective (fold の正 sharpe 比率、高=一貫)。
++    - ``fold_sign_ratio`` = 符号反転比率 (低=方向安定) → (1-ratio)。
++    - ``norm_iqr`` = clip(oos_total_pnl_iqr / (|median_oos_total_pnl| + eps), 0, 1)
++      (低=fold 間 PnL magnitude 安定) → (1-norm_iqr)。
++    holdout 情報は一切不使用 (Stage B fold 統計のみ)。pfre / fold_sign_ratio が欠損なら
++    安定性シグナル無しとして ``None`` (selection 上 -inf 扱い)。IQR / median 欠損時は
++    分散項のみ中立 0.5 を補完 (符号一貫性シグナルは活かす)。
++    """
++    pfre = _coerce_optional_float(row.get("positive_fold_ratio_effective"))
++    sign_ratio = _coerce_optional_float(row.get("fold_sign_ratio"))
++    if pfre is None or sign_ratio is None:
++        return None
++    iqr = _coerce_optional_float(row.get("oos_total_pnl_iqr"))
++    med = _coerce_optional_float(row.get("median_oos_total_pnl"))
++    if iqr is not None and med is not None and math.isfinite(iqr) and math.isfinite(med):
++        norm_iqr = iqr / (abs(med) + 1e-9)
++        norm_iqr = min(1.0, max(0.0, norm_iqr))
++        disp_term = 1.0 - norm_iqr
++    else:
++        # 分散項を中立 0.5 で補完 (n_fold<2 等で IQR 未算出のケース)。
++        disp_term = 0.5
++    score = (
++        w_pfre * pfre
++        + w_sign * (1.0 - sign_ratio)
++        + w_disp * disp_term
++    )
++    return min(1.0, max(0.0, float(score)))
++
++
++def _resolve_robust_selection(cfg: Any) -> tuple[bool, str]:
++    """cycle26 (D): anti-overfit 選択圧の effective 判定 (単一 SSOT)。
++
++    nsga2 経路は _selection_key を tie-break に使わないため no-op。
++    """
++    if not getattr(cfg.ga, "robust_selection_enabled", False):
++        return False, "robust_selection_enabled=False"
++    if getattr(cfg.ga, "nsga2_selection_enabled", False):
++        return False, "nsga2_selection_enabled=True (legacy tournament 経路でないため no-op)"
++    return True, "enabled"
++
++
+ def _selection_key(
+     entry: IndividualCacheEntry,
+     fallback_active: bool,
+     *,
+     selection_pressure: bool = False,
+     margin_threshold: float = 0.0,
++    robust_selection: bool = False,
+ ) -> tuple[Any, ...]:
+     """selection 用 lexicographic key.
+ 
+@@ -288,16 +347,24 @@ def _selection_key(
+     if fallback_active:
+         return entry._legacy_selection_score
+     score = entry.selection_score
+-    if not selection_pressure:
++    if not selection_pressure and not robust_selection:
+         return score
+-    # ON (T116 連続値化): fold_robust(index 8) と fitness_pen(index 9) の間に
+-    # cross-pair margin の **連続値** を挿入 (T115 bool tie-break は gen0 飽和で
+-    # 勾配ゼロだったため、連続値で pass 閾値方向の勾配を継続付与)。None/NaN/inf は
+-    # -inf (最下位、cross-pair 評価なし個体は不利、pass 整合)。margin_threshold は
+-    # 連続値経路では未使用 (CrossPairConfig.__post_init__ で !=0.0 を fail-closed)。
+-    m = entry.cross_pair_margin
+-    cp_val = float(m) if (m is not None and math.isfinite(m)) else -math.inf
+-    return (*score[:9], cp_val, score[9])
++    # fold_robust(index 8) と fitness_pen(index 9) の間に連続値 tie-break を挿入。
++    # 優先順位: robust_score (anti-overfit, cycle26) > cross_pair margin (T116) >
++    # fitness_pen。いずれも None/NaN/inf は -inf (最下位、シグナルなし個体は不利、
++    # pass 整合)。default (両 OFF) は上の早期 return で 10-tuple のまま bit-exact。
++    inserts: list[float] = []
++    if robust_selection:
++        r = entry.robust_score
++        inserts.append(
++            float(r) if (r is not None and math.isfinite(r)) else -math.inf
++        )
++    if selection_pressure:
++        m = entry.cross_pair_margin
++        inserts.append(
++            float(m) if (m is not None and math.isfinite(m)) else -math.inf
++        )
++    return (*score[:9], *inserts, score[9])
+ 
+ 
+ def _resolve_cross_pair_selection_pressure(cfg: Any) -> tuple[bool, str]:
+@@ -413,6 +480,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+         "--cross-pair-selection-pressure",
+         action="store_const", const=True, default=None,
+     )
++    # cycle26 (D): anti-overfit 選択圧 (fold-CV 安定性連続値を selection tie-break に挿入)。
++    # 未指定=None で yaml default(False)尊重、 指定で True override。重み 3 つは
++    # 未指定=None で default(0.4/0.3/0.3)。
++    p.add_argument(
++        "--robust-selection", action="store_const", const=True, default=None
++    )
++    p.add_argument("--robust-w-pfre", type=float, default=None)
++    p.add_argument("--robust-w-sign", type=float, default=None)
++    p.add_argument("--robust-w-disp", type=float, default=None)
+     # T117: multi-pair training (Stage A fitness を複数ペアで min 集約)。
+     # 未指定=None で yaml default(False)。
+     p.add_argument(
+@@ -571,6 +647,12 @@ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
+             "warmstart_ratio": args.warmstart_ratio,
+             "warmstart_motif_archive": args.warmstart_motif_archive,
+             "nsga2_selection_enabled": args.nsga2_selection,
++            # cycle26 (D): anti-overfit 選択圧 override (None なら yaml default 尊重)。
++            # getattr 防御 (多 pair override と同パターン、 最小 Namespace test 互換)。
++            "robust_selection_enabled": getattr(args, "robust_selection", None),
++            "robust_w_pfre": getattr(args, "robust_w_pfre", None),
++            "robust_w_sign": getattr(args, "robust_w_sign", None),
++            "robust_w_disp": getattr(args, "robust_w_disp", None),
+         },
+         # PR4: --fitness-mode CLI override (= yaml phase4.fitness_mode より優先)。
+         # None なら _build_phase4 が dataclass default を尊重する。
+@@ -1015,10 +1097,12 @@ def _tournament(
+     *,
+     selection_pressure: bool = False,
+     margin_threshold: float = 0.0,
++    robust_selection: bool = False,
+ ) -> Genome:
+     """``feasibility_cfg`` を見て fallback (cache 全体 infeasible) 判定後に max.
+ 
+     T115: selection_pressure を _selection_key に thread (default False=現行不変)。
++    cycle26: robust_selection も同様に thread (default False=現行不変)。
+     """
+     sample = rng.sample(pop, k=min(k, len(pop)))
+     fallback = _is_all_infeasible(cache.values(), feasibility_cfg)
+@@ -1029,6 +1113,7 @@ def _tournament(
+             fallback,
+             selection_pressure=selection_pressure,
+             margin_threshold=margin_threshold,
++            robust_selection=robust_selection,
+         ),
+     )
+ 
+@@ -1137,6 +1222,7 @@ def _breed_next_gen(
+     *,
+     selection_pressure: bool = False,
+     margin_threshold: float = 0.0,
++    robust_selection: bool = False,
+ ) -> tuple[list[Genome], dict[str, tuple[str | None, str | None]]]:
+     """次世代 genomes を生成。elite → crossover/mutate で埋める。
+ 
+@@ -1163,6 +1249,7 @@ def _breed_next_gen(
+             fallback,
+             selection_pressure=selection_pressure,
+             margin_threshold=margin_threshold,
++            robust_selection=robust_selection,
+         ),
+         reverse=True,
+     )
+@@ -1179,11 +1266,13 @@ def _breed_next_gen(
+             prev_pop, cache, rng, ga_cfg.tournament_size, feasibility_cfg,
+             selection_pressure=selection_pressure,
+             margin_threshold=margin_threshold,
++            robust_selection=robust_selection,
+         )
+         p2 = _tournament(
+             prev_pop, cache, rng, ga_cfg.tournament_size, feasibility_cfg,
+             selection_pressure=selection_pressure,
+             margin_threshold=margin_threshold,
++            robust_selection=robust_selection,
+         )
+         if rng.random() < ga_cfg.crossover_rate:
+             c1, c2 = crossover(p1, p2, rng, max_depth=ga_cfg.max_depth)
+@@ -1296,6 +1385,9 @@ def _update_cache(
+     feasibility_cfg: GAFeasibilityConfig,
+     stage_c_feasibility_apply: bool = True,
+     fold_robust_threshold: float = 0.4,
++    robust_w_pfre: float = 0.4,
++    robust_w_sign: float = 0.3,
++    robust_w_disp: float = 0.3,
+ ) -> None:
+     """archive の row から fitness_pen / stage pass / feasibility を取り出し cache 更新.
+ 
+@@ -1407,6 +1499,14 @@ def _update_cache(
+             cross_pair_margin=_coerce_optional_float(
+                 row.get("cross_pair_aggregate_fitness")
+             ),
++            # cycle26 (D): anti-overfit robust_score (fold 統計由来、観測値の計算のみ)。
++            # robust_selection OFF 時は _selection_key が無視するため bit-exact。
++            robust_score=_compute_robust_score(
++                row,
++                w_pfre=robust_w_pfre,
++                w_sign=robust_w_sign,
++                w_disp=robust_w_disp,
++            ),
+         )
+ 
+ 
+@@ -1416,6 +1516,7 @@ def _select_best(
+     *,
+     selection_pressure: bool = False,
+     margin_threshold: float = 0.0,
++    robust_selection: bool = False,
+ ) -> tuple[str, IndividualCacheEntry]:
+     if not cache:
+         raise RuntimeError("no individuals evaluated")
+@@ -1427,6 +1528,7 @@ def _select_best(
+             fallback,
+             selection_pressure=selection_pressure,
+             margin_threshold=margin_threshold,
++            robust_selection=robust_selection,
+         ),
+     )
+ 
+@@ -2576,6 +2678,17 @@ def main(argv: list[str] | None = None) -> int:
+             requested=cfg.cross_pair.selection_pressure,
+             margin_threshold=_cp_sel_threshold,
+         )
++        # cycle26 (D): anti-overfit 選択圧の effective 判定 (RUN 中不変)。
++        _robust_sel, _robust_reason = _resolve_robust_selection(cfg)
++        logger.info(
++            "run_ga.robust_selection",
++            effective=_robust_sel,
++            reason=_robust_reason,
++            requested=cfg.ga.robust_selection_enabled,
++            w_pfre=cfg.ga.robust_w_pfre,
++            w_sign=cfg.ga.robust_w_sign,
++            w_disp=cfg.ga.robust_w_disp,
++        )
+ 
+         _log_phase_marker("before_ga_loop", generations=cfg.ga.generations)
+ 
+@@ -2653,6 +2766,7 @@ def main(argv: list[str] | None = None) -> int:
+                     run_id,
+                     selection_pressure=_cp_sel_pressure,
+                     margin_threshold=_cp_sel_threshold,
++                    robust_selection=_robust_sel,
+                 )
+ 
+             for g in population:
+@@ -2685,6 +2799,9 @@ def main(argv: list[str] | None = None) -> int:
+                 cfg.ga.feasibility,
+                 stage_c_feasibility_apply=cfg.stage_gate.stage_c_feasibility_apply,
+                 fold_robust_threshold=cfg.stage_gate.fold_robust_threshold,
++                robust_w_pfre=cfg.ga.robust_w_pfre,
++                robust_w_sign=cfg.ga.robust_w_sign,
++                robust_w_disp=cfg.ga.robust_w_disp,
+             )
+ 
+             best_fp = max(
+@@ -2745,6 +2862,7 @@ def main(argv: list[str] | None = None) -> int:
+         cfg.ga.feasibility,
+         selection_pressure=_cp_sel_pressure,
+         margin_threshold=_cp_sel_threshold,
++        robust_selection=_robust_sel,
+     )
+     best_row = archive.get_row_snapshot(
+         lane_id, best_entry.generation, best_name
+diff --git a/src/alpha_factory/archive.py b/src/alpha_factory/archive.py
+index fc7987d..a6c84a1 100644
+--- a/src/alpha_factory/archive.py
++++ b/src/alpha_factory/archive.py
+@@ -158,6 +158,10 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
+         # 詳細: devnotes/20260513-2007-fx-improve/detailed-design.md
+         pa.field("median_oos_total_pnl", pa.float64(), nullable=True),
+         pa.field("sum_oos_total_pnl", pa.float64(), nullable=True),
++        # cycle26 (D): per-fold OOS total_pnl の IQR (Q3-Q1)。robust-selection
++        # (anti-overfit 選択圧) の magnitude 安定性入力。default OFF では selection に
++        # 一切寄与せず観測列扱い (bit-exact)。n_fold<2 は None。
++        pa.field("oos_total_pnl_iqr", pa.float64(), nullable=True),
+         pa.field("stage_b_gate_kind", pa.string(), nullable=True),
+         # PR2: Stage B 持続性予測 shadow score (selection 影響なし、 audit only)。
+         # 計算式: clip(0.7 * positive_fold_ratio_effective + 0.3 * fold_sign_ratio, 0, 1)。
+@@ -294,6 +298,8 @@ def _create_row_template() -> dict[str, Any]:
+         # T099 cycle 22: profit_safe_pfr observability (collect_stage_b で書込)
+         "median_oos_total_pnl": None,
+         "sum_oos_total_pnl": None,
++        # cycle26 (D): per-fold OOS total_pnl IQR (collect_stage_b で書込)
++        "oos_total_pnl_iqr": None,
+         "stage_b_gate_kind": None,
+         # PR2: Stage B 持続性予測 shadow score (collect_stage_b で計算・書込)
+         "persistence_score_shadow": None,
+@@ -770,6 +776,10 @@ class GenomeArchive:
+         sum_oos_total_pnl = _opt_float(payload, "sum_oos_total_pnl")
+         if sum_oos_total_pnl is not None:
+             row["sum_oos_total_pnl"] = sum_oos_total_pnl
++        # cycle26 (D): OOS PnL IQR を転記 (robust-selection 入力、観測列)。
++        oos_total_pnl_iqr = _opt_float(payload, "oos_total_pnl_iqr")
++        if oos_total_pnl_iqr is not None:
++            row["oos_total_pnl_iqr"] = oos_total_pnl_iqr
+         gate_kind = payload.get("stage_b_gate_kind")
+         if isinstance(gate_kind, str):
+             row["stage_b_gate_kind"] = gate_kind
+diff --git a/src/alpha_factory/config.py b/src/alpha_factory/config.py
+index 216b39b..1c1bc76 100644
+--- a/src/alpha_factory/config.py
++++ b/src/alpha_factory/config.py
+@@ -173,10 +173,26 @@ class GAConfig:
+     # の non-dominated sort + crowding に置換。default False で従来 tournament と
+     # bit-exact 一致。軸は archive pareto_b_* 列 (T111/T112) 由来。
+     nsga2_selection_enabled: bool = False
++    # cycle26 (D, anti-overfit 選択圧): True で _selection_key の fold_robust と
++    # fitness_pen の間に連続値 robust_score を挿入し、fold-CV 安定性 (positive_fold_ratio /
++    # fold_sign_ratio / OOS PnL IQR) の高い個体を優先する。holdout 情報は不使用。
++    # default False で従来 selection と bit-exact 一致。robust_score の重み 3 つは合計
++    # 任意 (内部で正規化せず素朴加重)。詳細: devnotes/20260527-1500-fx-improve/detailed-design.md
++    robust_selection_enabled: bool = False
++    robust_w_pfre: float = 0.4
++    robust_w_sign: float = 0.3
++    robust_w_disp: float = 0.3
+ 
+     def __post_init__(self) -> None:
+         if self.population_size < 1:
+             raise ValueError("ga.population_size must be >= 1")
++        for _wn, _wv in (
++            ("robust_w_pfre", self.robust_w_pfre),
++            ("robust_w_sign", self.robust_w_sign),
++            ("robust_w_disp", self.robust_w_disp),
++        ):
++            if not 0.0 <= _wv <= 1.0:
++                raise ValueError(f"ga.{_wn} must be in [0, 1]: {_wv}")
+         if not 0.0 <= self.warmstart_ratio <= 1.0:
+             raise ValueError(
+                 f"ga.warmstart_ratio must be in [0, 1]: {self.warmstart_ratio}"
+@@ -587,6 +603,13 @@ def _build_ga(raw: Mapping[str, Any]) -> GAConfig:
+         warmstart_motif_archive=raw.get("warmstart_motif_archive"),
+         # T112: NSGA-II selection flag (config→GAConfig 伝搬。 default False)。
+         nsga2_selection_enabled=bool(raw.get("nsga2_selection_enabled", False)),
++        # cycle26 (D): anti-overfit 選択圧 (config→GAConfig 伝搬。 default False)。
++        robust_selection_enabled=bool(
++            raw.get("robust_selection_enabled", False)
++        ),
++        robust_w_pfre=float(raw.get("robust_w_pfre", 0.4)),
++        robust_w_sign=float(raw.get("robust_w_sign", 0.3)),
++        robust_w_disp=float(raw.get("robust_w_disp", 0.3)),
+     )
+ 
+ 
+diff --git a/src/alpha_factory/stage_gate.py b/src/alpha_factory/stage_gate.py
+index 8a0b23b..a8ff4ab 100644
+--- a/src/alpha_factory/stage_gate.py
++++ b/src/alpha_factory/stage_gate.py
+@@ -1572,9 +1572,16 @@ def evaluate_stage_b(
+     # T099 cycle 22: profit_safe_pfr 用 PnL 集計
+     median_oos_total_pnl: float | None = None
+     sum_oos_total_pnl: float | None = None
++    # cycle26 (D, anti-overfit 選択圧): per-fold OOS PnL の四分位範囲 (IQR)。
++    # robust-selection の magnitude 安定性指標 (低=fold 間の利益ばらつき小)。
++    # holdout 不使用 (Stage B fold 統計のみ)。n_fold>=2 のときのみ算出、未満は None。
++    # 観測値の追加のみで Stage B pass/fail・GA RNG・selection 順序 (OFF 時) に無影響。
++    oos_total_pnl_iqr: float | None = None
+     if len(oos_total_pnls) >= 2:
+         median_oos_total_pnl = float(_stats.median(oos_total_pnls))
+         sum_oos_total_pnl = float(sum(oos_total_pnls))
++        _q = _stats.quantiles(oos_total_pnls, n=4, method="inclusive")
++        oos_total_pnl_iqr = float(_q[2] - _q[0])
+     elif len(oos_total_pnls) == 1:
+         median_oos_total_pnl = float(oos_total_pnls[0])
+         sum_oos_total_pnl = float(oos_total_pnls[0])
+@@ -1717,6 +1724,8 @@ def evaluate_stage_b(
+             "stage_b_gate_kind": stage_config.stage_b_gate_kind,
+             "median_oos_total_pnl": median_oos_total_pnl,
+             "sum_oos_total_pnl": sum_oos_total_pnl,
++            # cycle26: anti-overfit 選択圧用 OOS PnL IQR (archive 列化、selection 消費)。
++            "oos_total_pnl_iqr": oos_total_pnl_iqr,
+             "oos_total_pnls": tuple(oos_total_pnls),
+             "profit_safe_pfr_threshold": stage_config.profit_safe_pfr_threshold,
+             "profit_safe_pfr_min_n_fold": stage_config.profit_safe_pfr_min_n_fold,
+diff --git a/tests/alpha_factory/test_archive.py b/tests/alpha_factory/test_archive.py
+index 27b1097..b44b8ff 100644
+--- a/tests/alpha_factory/test_archive.py
++++ b/tests/alpha_factory/test_archive.py
+@@ -187,7 +187,8 @@ def test_schema_has_58_columns() -> None:
+     # T115 (cross-pair selection pressure): cross_pair_aggregate_fitness (65→66)
+     # T116 (continuous + pass観測): cross_pair_mean_sharpe/min_sharpe/target_ratio/
+     #     pair_failure_count の 4 列追加 (66→70)
+-    assert len(GENOMES_SCHEMA.names) == 70
++    # cycle26 (D, anti-overfit 選択圧): oos_total_pnl_iqr の 1 列追加 (70→71)
++    assert len(GENOMES_SCHEMA.names) == 71
+     expected = {
+         "run_id", "run_number", "generation", "individual_name",
+         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
+@@ -230,6 +231,8 @@ def test_schema_has_58_columns() -> None:
+         "mission_signed_margin_c_shadow",
+         # T099 cycle 22: profit_safe_pfr observability 3 列
+         "median_oos_total_pnl", "sum_oos_total_pnl", "stage_b_gate_kind",
++        # cycle26 (D): OOS PnL IQR (anti-overfit 選択圧入力)
++        "oos_total_pnl_iqr",
+         # T112: NSGA-II selection 用 Stage B pooled fold-CV Pareto 軸
+         "pareto_b_net_pnl", "pareto_b_pooled_dd",
+         "pareto_b_mission_inf_gap", "pareto_b_axis_usable",
+@@ -1062,6 +1065,8 @@ def test_schema_nullable_attributes() -> None:
+         "mission_signed_margin_c_shadow",
+         # T099 cycle 22: profit_safe_pfr observability (collect_stage_b で書込、 nullable=True)
+         "median_oos_total_pnl", "sum_oos_total_pnl", "stage_b_gate_kind",
++        # cycle26 (D): OOS PnL IQR (collect_stage_b で書込、 nullable=True)
++        "oos_total_pnl_iqr",
+         # T112: NSGA-II selection 用 Pareto 軸 (collect_stage_b で書込、 nullable=True)
+         "pareto_b_net_pnl", "pareto_b_pooled_dd",
+         "pareto_b_mission_inf_gap", "pareto_b_axis_usable",
+diff --git a/tests/scripts/test_alpha_factory_run_ga_feasibility.py b/tests/scripts/test_alpha_factory_run_ga_feasibility.py
+index 7395ce5..bc492b3 100644
+--- a/tests/scripts/test_alpha_factory_run_ga_feasibility.py
++++ b/tests/scripts/test_alpha_factory_run_ga_feasibility.py
+@@ -11,10 +11,11 @@ from __future__ import annotations
+ 
+ import math
+ import random
+-from typing import Any
++from typing import Any, ClassVar
+ 
+ from scripts.alpha_factory.run_ga import (
+     IndividualCacheEntry,
++    _compute_robust_score,
+     _is_all_infeasible,
+     _selection_key,
+     _tournament,
+@@ -68,7 +69,11 @@ def test_legacy_selection_score_falls_back_to_4_tuple() -> None:
+ 
+ 
+ def test_v31_selection_key_includes_stage_b_priority() -> None:
+-    """T046 v3.1: _selection_key は 8 要素 (stage_b_pass を stage_c_feasible 前に挿入)."""
++    """v3.3: _selection_key は 10 要素 (cycle4/5 で 8→10 化).
++
++    順序: (feasible, -violation, stage_b_pass_and_feasible, stage_b_pass,
++    stage_c_feasible, C_pass, B_pass, A_pass, fold_robust, fitness_pen)。
++    """
+     e = _make_entry(
+         fitness_pen=1.5,
+         a=True,
+@@ -77,9 +82,44 @@ def test_v31_selection_key_includes_stage_b_priority() -> None:
+         violation=0.0,
+         stage_c_feasible=True,
+     )
+-    v31 = _selection_key(e, fallback_active=False)
+-    # (feasible, -violation, stage_b_pass, stage_c_feasible, C_pass, B_pass, A_pass, fitness_pen)
+-    assert v31 == (1, -0.0, 1, 1, 0, 1, 1, 1.5)
++    v33 = _selection_key(e, fallback_active=False)
++    # fold_robust は _make_entry default False → 0
++    assert v33 == (1, -0.0, 1, 1, 1, 0, 1, 1, 0, 1.5)
++
++
++def test_robust_selection_off_is_bit_exact_10_tuple() -> None:
++    """cycle26 (D): robust_selection=False (default) で従来 10-tuple のまま (bit-exact)."""
++    e = _make_entry(fitness_pen=1.5, a=True, b=True, feasible=True)
++    base = _selection_key(e, fallback_active=False)
++    off = _selection_key(e, fallback_active=False, robust_selection=False)
++    assert off == base
++    assert len(off) == 10
++
++
++def test_robust_selection_on_inserts_score_above_fitness_pen() -> None:
++    """cycle26 (D): robust_selection=True で robust_score を index 9 (fitness_pen 直前) に挿入."""
++    from dataclasses import replace as _replace
++
++    e = _replace(
++        _make_entry(fitness_pen=1.5, a=True, b=True, feasible=True),
++        robust_score=0.73,
++    )
++    key = _selection_key(e, fallback_active=False, robust_selection=True)
++    assert len(key) == 11
++    assert key[9] == 0.73  # fold_robust(8) と fitness_pen(10) の間
++    assert key[10] == 1.5  # fitness_pen は末尾のまま
++
++
++def test_robust_selection_none_score_is_worst() -> None:
++    """cycle26 (D): robust_score=None (fold 統計欠損) は -inf 扱いで最下位."""
++    from dataclasses import replace as _replace
++
++    e = _replace(
++        _make_entry(fitness_pen=1.5, a=True, b=True, feasible=True),
++        robust_score=None,
++    )
++    key = _selection_key(e, fallback_active=False, robust_selection=True)
++    assert key[9] == -math.inf
+ 
+ 
+ def test_v31_stage_b_pass_wins_over_stage_c_feasible_only() -> None:
+@@ -568,3 +608,55 @@ class TestT091UpdateCacheFullDataset:
+         assert cache["g0_i0"].feasible is False
+         # 0 はそのまま 0 (None に潰さない)
+         assert cache["g0_i0"].trade_count_full_dataset == 0
++
++
++class TestComputeRobustScore:
++    """cycle26 (D): _compute_robust_score の anti-overfit 連続値算出."""
++
++    _W: ClassVar[dict[str, float]] = {
++        "w_pfre": 0.4, "w_sign": 0.3, "w_disp": 0.3
++    }
++
++    def test_known_row_value(self) -> None:
++        # pfre=1.0, fold_sign_ratio=0.0(方向安定), iqr=0 → disp_term=1.0
++        # score = 0.4*1.0 + 0.3*(1-0.0) + 0.3*1.0 = 1.0 → clip 1.0
++        row = {
++            "positive_fold_ratio_effective": 1.0,
++            "fold_sign_ratio": 0.0,
++            "oos_total_pnl_iqr": 0.0,
++            "median_oos_total_pnl": 1000.0,
++        }
++        assert _compute_robust_score(row, **self._W) == 1.0
++
++    def test_high_dispersion_lowers_score(self) -> None:
++        # iqr == |median| → norm_iqr=1 → disp_term=0
++        row = {
++            "positive_fold_ratio_effective": 1.0,
++            "fold_sign_ratio": 0.0,
++            "oos_total_pnl_iqr": 1000.0,
++            "median_oos_total_pnl": 1000.0,
++        }
++        # score = 0.4 + 0.3 + 0.0 = 0.7
++        assert abs(_compute_robust_score(row, **self._W) - 0.7) < 1e-9
++
++    def test_missing_pfre_returns_none(self) -> None:
++        row = {"fold_sign_ratio": 0.0, "oos_total_pnl_iqr": 0.0,
++               "median_oos_total_pnl": 1.0}
++        assert _compute_robust_score(row, **self._W) is None
++
++    def test_missing_sign_ratio_returns_none(self) -> None:
++        row = {"positive_fold_ratio_effective": 1.0}
++        assert _compute_robust_score(row, **self._W) is None
++
++    def test_missing_iqr_uses_neutral_disp(self) -> None:
++        # iqr/median 欠損 → disp_term=0.5
++        # score = 0.4*1.0 + 0.3*1.0 + 0.3*0.5 = 0.85
++        row = {"positive_fold_ratio_effective": 1.0, "fold_sign_ratio": 0.0}
++        assert abs(_compute_robust_score(row, **self._W) - 0.85) < 1e-9
++
++    def test_clipped_to_unit_interval(self) -> None:
++        row = {"positive_fold_ratio_effective": 1.0, "fold_sign_ratio": 0.0,
++               "oos_total_pnl_iqr": 0.0, "median_oos_total_pnl": 1.0}
++        # 重み合計>1 でも clip 1.0
++        s = _compute_robust_score(row, w_pfre=1.0, w_sign=1.0, w_disp=1.0)
++        assert s == 1.0

@@ -74,5 +74,17 @@ robust_score = clip( w_pfre * positive_fold_ratio_effective
 
 ## リスク
 - nsga2 と同様 median 退行の懸念 → Gate1 で監視。robust_score は連続 tie-break (lexicographic 下位、
-  feasibility/stage 通過の後) なので、生存集合は変えず順序のみ変える設計。崩壊回避が主目的。
-- schema bump の後方互換 → 欠損列 NaN 埋めテストで担保。
+  feasibility/stage 通過の後) なので、**同一 prefix 群内の勝者**のみ変え、elite/tournament 経由で
+  世代遷移は変化する (=意図通り; Codex impl-review Round1 で「生存集合不変」表現を訂正)。崩壊回避が主目的。
+- schema は GENOME_ENTRY_SCHEMA_VERSION を bump せず nullable 列を加算 (後方互換)。欠損列 NaN 埋めテストで担保。
+
+## Codex impl-review Round1 対応 (実装後)
+- [Critical] summary.json に robust 状態を反映 → robust_selection ブロック + selection_key_schema に
+  `+robust_selection` suffix + best.robust_score / robust_selection_effective を追加。修正済。
+- [Warning] config bool パース → `_strict_bool` に変更 ("false" 文字列誤解釈防止)。修正済。
+- [Warning] calibrate_state.base_config_hash に robust 未追加 → **意図的に非追加**。理由: (1) nsga2 /
+  cross_pair selection flag も同 hash に非含 (既存パターン整合)、(2) selection 手法は stage_a_threshold
+  calibration と直交、(3) R107(ON) vs R101(OFF) 反実仮想では calibrate 履歴を共有する方が stage_a 閾値を
+  揃えて robust 効果を分離できる (hash 分割すると未較正状態から始まり交絡)。
+- [Warning] 「生存集合不変」表現訂正 (上記リスク欄)。
+- [Nit] test 名 test_schema_has_58_columns は 71 列検証 (歴史的命名)。

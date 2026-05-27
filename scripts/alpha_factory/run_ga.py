@@ -1735,6 +1735,10 @@ def _write_reports(
     dataset_epoch_id = run_context.dataset_epoch_id
     # T115: cross-pair selection pressure の effective 判定 (run loop と同一 helper SSOT)。
     _cp_sel_eff, _cp_sel_reason = _resolve_cross_pair_selection_pressure(cfg)
+    # cycle26 (D): anti-overfit 選択圧の effective 判定 (run loop と同一 helper SSOT)。
+    # summary に robust 状態を反映し、 ON run を summary 単独で監査可能にする
+    # (Codex impl-review Round1 Critical)。
+    _robust_eff, _robust_reason = _resolve_robust_selection(cfg)
 
     best_fitness_val, best_finite = _safe_finite(best_entry.fitness_pen)
     best_fitness_str = _fitness_to_str(best_entry.fitness_pen)
@@ -1869,11 +1873,27 @@ def _write_reports(
             ),
         },
         "cross_pair_runtime_mode": cross_pair_mode,
+        # cycle26 (D): anti-overfit 選択圧の effective 状態 + 重み (summary 監査用)。
+        "robust_selection": {
+            "requested": bool(cfg.ga.robust_selection_enabled),
+            "effective": _robust_eff,
+            "reason": _robust_reason,
+            "w_pfre": float(cfg.ga.robust_w_pfre),
+            "w_sign": float(cfg.ga.robust_w_sign),
+            "w_disp": float(cfg.ga.robust_w_disp),
+        },
         # T116: pressure ON 時は selection_key が 11-tuple で cross-pair margin 連続値
         # (v3_5_continuous)、OFF は 10-tuple (v3_3)。R88(bool,v3_4) と R89(continuous,
         # v3_5) を A/B 監査で識別可能にする (Codex Round1 Critical)。
+        # cycle26: robust ON で robust_score を fold_robust と (cp margin/)fitness_pen の間に
+        # 挿入するため、 schema 文字列に +robust suffix を付与し A/B 監査で識別可能にする。
         "selection_key_schema": (
-            "v3_5_cross_pair_pressure_continuous" if _cp_sel_eff else "v3_3"
+            (
+                "v3_5_cross_pair_pressure_continuous"
+                if _cp_sel_eff
+                else "v3_3"
+            )
+            + ("+robust_selection" if _robust_eff else "")
         ),
         "per_generation": sanitized_per_generation,
         "best": {
@@ -1903,6 +1923,14 @@ def _write_reports(
                 float(best_fitness_val),
             ],
             "selection_score_schema": "v3_3_stage_b_feasible_priority",
+            # cycle26 (D): robust ON 時の robust_score 実値 (best 個体)。OFF / None は
+            # null。summary 単独で robust 状態と best の安定性スコアを監査可能にする。
+            "robust_selection_effective": _robust_eff,
+            "robust_score": (
+                float(best_entry.robust_score)
+                if (_robust_eff and best_entry.robust_score is not None)
+                else None
+            ),
             "fold_robust": bool(best_entry.fold_robust),
             "stage_b_pass_and_feasible": bool(  # cycle 5
                 bool(best_entry.stage_b_pass) and bool(best_entry.feasible)
