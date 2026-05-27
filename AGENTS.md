@@ -338,3 +338,9 @@ retroactive 検証 (`scripts/alpha_factory/audit_live_criteria_retroactive.py`):
 - 確定 frontier **sharpe1.5/pnl70k/dd2%/trade50/pfr0.4 (tournament)、R101=723 個体 @ ann5.58/pnl82k/dd<2%** を頑健な達成上限として固定。閾値引き上げ・探索効率・構造手段 (新 primitive / anti-overfit 選択圧 / cross-pair) の全レバーが同一の **holdout 汎化の壁** に当たることが独立軸で再現確認された (= 局所失敗でなく現制約下の構造上限シグナル)。
 - F15 / robust-selection の実装は **opt-in 維持・default OFF で bit-exact・コード保持 (投入せず)**。default 挙動は cycle23 以前と完全一致。
 - **将来再挑戦の唯一の方向** (北極星=閾値引き上げを諦めない場合): **低自由度 (low-DOF) の regime 条件 primitive (時間帯 or volatility regime) を 1 系統だけ追加**。高 DOF (F15=5 params) は overfit したため、低 DOF で過学習容量を抑える仮説。反証条件を先に固定: 3 seed で stage_c_pass が control 比 95% 未満 or ann 中央値 0.2 以上悪化なら即 REJECT。成功条件: pnl>=74k 達成個体が 2/3 seed で出現 ∧ ann 中央値非劣化。別研究トラックとして分離管理。
+
+## cycle 27: 総括 D' 最終化 — 構造手段の探索を正式に閉じ frontier を最終達成上限に固定
+cycle26 で残した「低DOF regime primitive」を実装前 analyze で精査した結果、**regime 条件付けは既に default 32-primitive に実装済**と判明し、Codex 設計合議 (Round) で **総括 D' を最終化** (低DOF regime 追加は不採用)。
+- **regime 条件 (vol/session/trend) は default 32 primitive (M1 ATRRegimeGate=pure OHLC vol regime ゲート / M2 SessionGate=Tokyo/London/NY セッション hour ゲート / M6 TrendStrengthGate=ADX trend regime) で既に探索空間へ実装済みであり、frontier (sharpe1.5/pnl70k/dd2%/trade50/pfr0.4, R101=723 個体 @ ann5.58) はその包含空間で達成された運用上限として扱う。** 近傍の 1-2 param OHLC ゲートを足しても情報直交性より相関重複・探索希釈リスクが勝つ (構造施策の実証負けと整合)。
+- **improve-cycle 運用 (確定)**: 構造拡張 RUN を停止し monitoring/shadow のみに切替。**データ前提の変更 (新データ種 / 通貨ペア追加 / 市場構造変化 / 評価契約変更) が起きるまで構造探索を凍結**。frontier はその間 最終達成上限として固定。北極星 (live_criteria 全達成個体多数) は R101=723 個体で達成済・再現済 (3 seed)。
+- 凍結解除条件: 上記データ前提が変わる、またはユーザーが新目標を指示した場合のみ、新規構造 RUN を再開する。
