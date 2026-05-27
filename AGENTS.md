@@ -321,3 +321,20 @@ retroactive 検証 (`scripts/alpha_factory/audit_live_criteria_retroactive.py`):
 - **運用ルール (確立)**: 閾値引き上げ採用は (1) 同一 seed の in-loop 反実仮想で検証 (post-hoc sweep は pivotal 閾値で無効、74k 教訓)、(2) 独立 2 seed 以上で mission_candidate>0 再現、(3) holdout 品質と連動を確認。
 - cross-pair 汎化 (ii_lite_pass) は cycle12 までの 7 連敗に加え本キャンペーン全 run で 0 継続 (shadow 観測)。74k 副作用で ii_lite=188 が出たが holdout 品質と逆相関 (mission 両立不可)。
 - 既存フレーム (32-primitive / EUR_JPY / pop96-gen60 / tournament / warmstart0.1) での「閾値引き上げ」「探索効率」両レバーは限界に到達。さらなる品質向上は構造的手段 (新 primitive / cross-pair 別 framework) = 次フェーズ研究テーマ。frontier を基準線として固定済。
+
+## cycle 24-26: 構造的手段の実証否定 → 総括 D' (frontier を頑健な達成上限として固定)
+構造的手段 2 方向 (Codex 合議で選定) を full run + in-loop 反実仮想で検証し、**両方とも実証的に否定**。Codex Round2 再合議で **総括 D' (現 frontier = 頑健な達成上限) を正式採用**。新規実装 run は停止し、将来再挑戦は下記 1 方向のみ別研究トラックに分離。
+
+### 否定された構造レバー (full run 検証済)
+1. **(B) 新 primitive F15 MTFTrendPullback** (上位足トレンド×下位足プルバック、5 params、opt-in): R106 で正しく実評価 (R105 は spawn worker registry 伝播バグで KeyError 全滅= INVALID、修正済 `parallel_eval._init_worker(enable_experimental)`)。F15 含み個体は **Stage A 76 / Stage B 41 通過も Stage C(holdout) 0** = MTF edge は holdout に非汎化 (overfit)。stage_c 全体も 534<723 に低下 (探索予算希釈)。**REJECTED**。
+2. **(D) anti-overfit 選択圧 --robust-selection** (fold-CV 安定性 = pfre/fold_sign_ratio/OOS PnL IQR を連続値 selection key に挿入、holdout 不使用、opt-in): R107a (pnl70k, seed70, robust ON) で **Gate1 大幅退行**: stage_c_pass 247 (<650)、median ann 4.87 (<5.4)。robust breeding 圧が fold 安定だが高性能でない個体に population を誘導し **達成 frontier を崩壊** (nsga2 型 median 退行と同型)。**REJECTED**。
+
+### ★ 最重要教訓 top3 (Codex 確定、運用の前提とする)
+1. **Proxy 最適化は禁物 (Goodhart)**: fold 安定性や中間 KPI を選択圧に入れると holdout 品質と乖離する。robust-selection の frontier 崩壊が実証。
+2. **探索空間拡張は予算希釈リスク**: 新 primitive 追加は holdout 改善を伴わない限り frontier を下げる (F15 が実証、stage_c 534<723)。
+3. **採用条件は in-loop 反実仮想 + 複数 seed 再現が必須**: 単発改善・post-hoc は不採用。dd2% のように因果確認できたものだけ採用。
+
+### frontier 固定 (運用ルール)
+- 確定 frontier **sharpe1.5/pnl70k/dd2%/trade50/pfr0.4 (tournament)、R101=723 個体 @ ann5.58/pnl82k/dd<2%** を頑健な達成上限として固定。閾値引き上げ・探索効率・構造手段 (新 primitive / anti-overfit 選択圧 / cross-pair) の全レバーが同一の **holdout 汎化の壁** に当たることが独立軸で再現確認された (= 局所失敗でなく現制約下の構造上限シグナル)。
+- F15 / robust-selection の実装は **opt-in 維持・default OFF で bit-exact・コード保持 (投入せず)**。default 挙動は cycle23 以前と完全一致。
+- **将来再挑戦の唯一の方向** (北極星=閾値引き上げを諦めない場合): **低自由度 (low-DOF) の regime 条件 primitive (時間帯 or volatility regime) を 1 系統だけ追加**。高 DOF (F15=5 params) は overfit したため、低 DOF で過学習容量を抑える仮説。反証条件を先に固定: 3 seed で stage_c_pass が control 比 95% 未満 or ann 中央値 0.2 以上悪化なら即 REJECT。成功条件: pnl>=74k 達成個体が 2/3 seed で出現 ∧ ann 中央値非劣化。別研究トラックとして分離管理。
