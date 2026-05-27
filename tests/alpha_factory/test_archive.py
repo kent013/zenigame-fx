@@ -187,7 +187,8 @@ def test_schema_has_58_columns() -> None:
     # T115 (cross-pair selection pressure): cross_pair_aggregate_fitness (65→66)
     # T116 (continuous + pass観測): cross_pair_mean_sharpe/min_sharpe/target_ratio/
     #     pair_failure_count の 4 列追加 (66→70)
-    assert len(GENOMES_SCHEMA.names) == 70
+    # cycle26 (D, anti-overfit 選択圧): oos_total_pnl_iqr の 1 列追加 (70→71)
+    assert len(GENOMES_SCHEMA.names) == 71
     expected = {
         "run_id", "run_number", "generation", "individual_name",
         "instrument", "lane_id", "parent_a", "parent_b", "genome_json",
@@ -230,6 +231,8 @@ def test_schema_has_58_columns() -> None:
         "mission_signed_margin_c_shadow",
         # T099 cycle 22: profit_safe_pfr observability 3 列
         "median_oos_total_pnl", "sum_oos_total_pnl", "stage_b_gate_kind",
+        # cycle26 (D): OOS PnL IQR (anti-overfit 選択圧入力)
+        "oos_total_pnl_iqr",
         # T112: NSGA-II selection 用 Stage B pooled fold-CV Pareto 軸
         "pareto_b_net_pnl", "pareto_b_pooled_dd",
         "pareto_b_mission_inf_gap", "pareto_b_axis_usable",
@@ -1062,6 +1065,8 @@ def test_schema_nullable_attributes() -> None:
         "mission_signed_margin_c_shadow",
         # T099 cycle 22: profit_safe_pfr observability (collect_stage_b で書込、 nullable=True)
         "median_oos_total_pnl", "sum_oos_total_pnl", "stage_b_gate_kind",
+        # cycle26 (D): OOS PnL IQR (collect_stage_b で書込、 nullable=True)
+        "oos_total_pnl_iqr",
         # T112: NSGA-II selection 用 Pareto 軸 (collect_stage_b で書込、 nullable=True)
         "pareto_b_net_pnl", "pareto_b_pooled_dd",
         "pareto_b_mission_inf_gap", "pareto_b_axis_usable",

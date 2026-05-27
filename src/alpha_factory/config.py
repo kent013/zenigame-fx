@@ -173,10 +173,26 @@ class GAConfig:
     # の non-dominated sort + crowding に置換。default False で従来 tournament と
     # bit-exact 一致。軸は archive pareto_b_* 列 (T111/T112) 由来。
     nsga2_selection_enabled: bool = False
+    # cycle26 (D, anti-overfit 選択圧): True で _selection_key の fold_robust と
+    # fitness_pen の間に連続値 robust_score を挿入し、fold-CV 安定性 (positive_fold_ratio /
+    # fold_sign_ratio / OOS PnL IQR) の高い個体を優先する。holdout 情報は不使用。
+    # default False で従来 selection と bit-exact 一致。robust_score の重み 3 つは合計
+    # 任意 (内部で正規化せず素朴加重)。詳細: devnotes/20260527-1500-fx-improve/detailed-design.md
+    robust_selection_enabled: bool = False
+    robust_w_pfre: float = 0.4
+    robust_w_sign: float = 0.3
+    robust_w_disp: float = 0.3
 
     def __post_init__(self) -> None:
         if self.population_size < 1:
             raise ValueError("ga.population_size must be >= 1")
+        for _wn, _wv in (
+            ("robust_w_pfre", self.robust_w_pfre),
+            ("robust_w_sign", self.robust_w_sign),
+            ("robust_w_disp", self.robust_w_disp),
+        ):
+            if not 0.0 <= _wv <= 1.0:
+                raise ValueError(f"ga.{_wn} must be in [0, 1]: {_wv}")
         if not 0.0 <= self.warmstart_ratio <= 1.0:
             raise ValueError(
                 f"ga.warmstart_ratio must be in [0, 1]: {self.warmstart_ratio}"
@@ -587,6 +603,13 @@ def _build_ga(raw: Mapping[str, Any]) -> GAConfig:
         warmstart_motif_archive=raw.get("warmstart_motif_archive"),
         # T112: NSGA-II selection flag (config→GAConfig 伝搬。 default False)。
         nsga2_selection_enabled=bool(raw.get("nsga2_selection_enabled", False)),
+        # cycle26 (D): anti-overfit 選択圧 (config→GAConfig 伝搬。 default False)。
+        robust_selection_enabled=bool(
+            raw.get("robust_selection_enabled", False)
+        ),
+        robust_w_pfre=float(raw.get("robust_w_pfre", 0.4)),
+        robust_w_sign=float(raw.get("robust_w_sign", 0.3)),
+        robust_w_disp=float(raw.get("robust_w_disp", 0.3)),
     )
 
 

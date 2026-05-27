@@ -1572,9 +1572,16 @@ def evaluate_stage_b(
     # T099 cycle 22: profit_safe_pfr 用 PnL 集計
     median_oos_total_pnl: float | None = None
     sum_oos_total_pnl: float | None = None
+    # cycle26 (D, anti-overfit 選択圧): per-fold OOS PnL の四分位範囲 (IQR)。
+    # robust-selection の magnitude 安定性指標 (低=fold 間の利益ばらつき小)。
+    # holdout 不使用 (Stage B fold 統計のみ)。n_fold>=2 のときのみ算出、未満は None。
+    # 観測値の追加のみで Stage B pass/fail・GA RNG・selection 順序 (OFF 時) に無影響。
+    oos_total_pnl_iqr: float | None = None
     if len(oos_total_pnls) >= 2:
         median_oos_total_pnl = float(_stats.median(oos_total_pnls))
         sum_oos_total_pnl = float(sum(oos_total_pnls))
+        _q = _stats.quantiles(oos_total_pnls, n=4, method="inclusive")
+        oos_total_pnl_iqr = float(_q[2] - _q[0])
     elif len(oos_total_pnls) == 1:
         median_oos_total_pnl = float(oos_total_pnls[0])
         sum_oos_total_pnl = float(oos_total_pnls[0])
@@ -1717,6 +1724,8 @@ def evaluate_stage_b(
             "stage_b_gate_kind": stage_config.stage_b_gate_kind,
             "median_oos_total_pnl": median_oos_total_pnl,
             "sum_oos_total_pnl": sum_oos_total_pnl,
+            # cycle26: anti-overfit 選択圧用 OOS PnL IQR (archive 列化、selection 消費)。
+            "oos_total_pnl_iqr": oos_total_pnl_iqr,
             "oos_total_pnls": tuple(oos_total_pnls),
             "profit_safe_pfr_threshold": stage_config.profit_safe_pfr_threshold,
             "profit_safe_pfr_min_n_fold": stage_config.profit_safe_pfr_min_n_fold,

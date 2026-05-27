@@ -158,6 +158,10 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
         # 詳細: devnotes/20260513-2007-fx-improve/detailed-design.md
         pa.field("median_oos_total_pnl", pa.float64(), nullable=True),
         pa.field("sum_oos_total_pnl", pa.float64(), nullable=True),
+        # cycle26 (D): per-fold OOS total_pnl の IQR (Q3-Q1)。robust-selection
+        # (anti-overfit 選択圧) の magnitude 安定性入力。default OFF では selection に
+        # 一切寄与せず観測列扱い (bit-exact)。n_fold<2 は None。
+        pa.field("oos_total_pnl_iqr", pa.float64(), nullable=True),
         pa.field("stage_b_gate_kind", pa.string(), nullable=True),
         # PR2: Stage B 持続性予測 shadow score (selection 影響なし、 audit only)。
         # 計算式: clip(0.7 * positive_fold_ratio_effective + 0.3 * fold_sign_ratio, 0, 1)。
@@ -294,6 +298,8 @@ def _create_row_template() -> dict[str, Any]:
         # T099 cycle 22: profit_safe_pfr observability (collect_stage_b で書込)
         "median_oos_total_pnl": None,
         "sum_oos_total_pnl": None,
+        # cycle26 (D): per-fold OOS total_pnl IQR (collect_stage_b で書込)
+        "oos_total_pnl_iqr": None,
         "stage_b_gate_kind": None,
         # PR2: Stage B 持続性予測 shadow score (collect_stage_b で計算・書込)
         "persistence_score_shadow": None,
@@ -770,6 +776,10 @@ class GenomeArchive:
         sum_oos_total_pnl = _opt_float(payload, "sum_oos_total_pnl")
         if sum_oos_total_pnl is not None:
             row["sum_oos_total_pnl"] = sum_oos_total_pnl
+        # cycle26 (D): OOS PnL IQR を転記 (robust-selection 入力、観測列)。
+        oos_total_pnl_iqr = _opt_float(payload, "oos_total_pnl_iqr")
+        if oos_total_pnl_iqr is not None:
+            row["oos_total_pnl_iqr"] = oos_total_pnl_iqr
         gate_kind = payload.get("stage_b_gate_kind")
         if isinstance(gate_kind, str):
             row["stage_b_gate_kind"] = gate_kind

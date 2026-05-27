@@ -212,6 +212,12 @@ class IndividualCacheEntry:
     # default OFF では selection_score (10-tuple) に一切寄与せず bit-exact。None は
     # cross-pair 未実行 (enable=False / skipped)。
     cross_pair_margin: float | None = None
+    # cycle26 (D): anti-overfit 連続値スコア (archive fold 統計由来、[0,1])。
+    # ga.robust_selection_enabled=True 時のみ _selection_key が fold_robust と
+    # fitness_pen の間 (cross_pair_margin より上位) に挿入。default OFF では
+    # selection_score (10-tuple) に一切寄与せず bit-exact。None は fold 統計欠損
+    # (= selection 上不利 -inf 扱い、 pass 整合)。
+    robust_score: float | None = None
 
     @property
     def selection_score(self) -> tuple[int, float, int, int, int, int, int, int, int, float]:
@@ -263,12 +269,65 @@ class IndividualCacheEntry:
         )
 
 
+def _compute_robust_score(
+    row: Mapping[str, Any],
+    *,
+    w_pfre: float,
+    w_sign: float,
+    w_disp: float,
+) -> float | None:
+    """cycle26 (D): fold-CV 安定性の連続値 robust_score を archive row から算出.
+
+    ``robust_score = w_pfre*pfre + w_sign*(1-fold_sign_ratio)
+                     + w_disp*(1-norm_iqr)`` を [0,1] に clip。
+    - ``pfre`` = positive_fold_ratio_effective (fold の正 sharpe 比率、高=一貫)。
+    - ``fold_sign_ratio`` = 符号反転比率 (低=方向安定) → (1-ratio)。
+    - ``norm_iqr`` = clip(oos_total_pnl_iqr / (|median_oos_total_pnl| + eps), 0, 1)
+      (低=fold 間 PnL magnitude 安定) → (1-norm_iqr)。
+    holdout 情報は一切不使用 (Stage B fold 統計のみ)。pfre / fold_sign_ratio が欠損なら
+    安定性シグナル無しとして ``None`` (selection 上 -inf 扱い)。IQR / median 欠損時は
+    分散項のみ中立 0.5 を補完 (符号一貫性シグナルは活かす)。
+    """
+    pfre = _coerce_optional_float(row.get("positive_fold_ratio_effective"))
+    sign_ratio = _coerce_optional_float(row.get("fold_sign_ratio"))
+    if pfre is None or sign_ratio is None:
+        return None
+    iqr = _coerce_optional_float(row.get("oos_total_pnl_iqr"))
+    med = _coerce_optional_float(row.get("median_oos_total_pnl"))
+    if iqr is not None and med is not None and math.isfinite(iqr) and math.isfinite(med):
+        norm_iqr = iqr / (abs(med) + 1e-9)
+        norm_iqr = min(1.0, max(0.0, norm_iqr))
+        disp_term = 1.0 - norm_iqr
+    else:
+        # 分散項を中立 0.5 で補完 (n_fold<2 等で IQR 未算出のケース)。
+        disp_term = 0.5
+    score = (
+        w_pfre * pfre
+        + w_sign * (1.0 - sign_ratio)
+        + w_disp * disp_term
+    )
+    return min(1.0, max(0.0, float(score)))
+
+
+def _resolve_robust_selection(cfg: Any) -> tuple[bool, str]:
+    """cycle26 (D): anti-overfit 選択圧の effective 判定 (単一 SSOT)。
+
+    nsga2 経路は _selection_key を tie-break に使わないため no-op。
+    """
+    if not getattr(cfg.ga, "robust_selection_enabled", False):
+        return False, "robust_selection_enabled=False"
+    if getattr(cfg.ga, "nsga2_selection_enabled", False):
+        return False, "nsga2_selection_enabled=True (legacy tournament 経路でないため no-op)"
+    return True, "enabled"
+
+
 def _selection_key(
     entry: IndividualCacheEntry,
     fallback_active: bool,
     *,
     selection_pressure: bool = False,
     margin_threshold: float = 0.0,
+    robust_selection: bool = False,
 ) -> tuple[Any, ...]:
     """selection 用 lexicographic key.
 
@@ -288,16 +347,24 @@ def _selection_key(
     if fallback_active:
         return entry._legacy_selection_score
     score = entry.selection_score
-    if not selection_pressure:
+    if not selection_pressure and not robust_selection:
         return score
-    # ON (T116 連続値化): fold_robust(index 8) と fitness_pen(index 9) の間に
-    # cross-pair margin の **連続値** を挿入 (T115 bool tie-break は gen0 飽和で
-    # 勾配ゼロだったため、連続値で pass 閾値方向の勾配を継続付与)。None/NaN/inf は
-    # -inf (最下位、cross-pair 評価なし個体は不利、pass 整合)。margin_threshold は
-    # 連続値経路では未使用 (CrossPairConfig.__post_init__ で !=0.0 を fail-closed)。
-    m = entry.cross_pair_margin
-    cp_val = float(m) if (m is not None and math.isfinite(m)) else -math.inf
-    return (*score[:9], cp_val, score[9])
+    # fold_robust(index 8) と fitness_pen(index 9) の間に連続値 tie-break を挿入。
+    # 優先順位: robust_score (anti-overfit, cycle26) > cross_pair margin (T116) >
+    # fitness_pen。いずれも None/NaN/inf は -inf (最下位、シグナルなし個体は不利、
+    # pass 整合)。default (両 OFF) は上の早期 return で 10-tuple のまま bit-exact。
+    inserts: list[float] = []
+    if robust_selection:
+        r = entry.robust_score
+        inserts.append(
+            float(r) if (r is not None and math.isfinite(r)) else -math.inf
+        )
+    if selection_pressure:
+        m = entry.cross_pair_margin
+        inserts.append(
+            float(m) if (m is not None and math.isfinite(m)) else -math.inf
+        )
+    return (*score[:9], *inserts, score[9])
 
 
 def _resolve_cross_pair_selection_pressure(cfg: Any) -> tuple[bool, str]:
@@ -413,6 +480,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--cross-pair-selection-pressure",
         action="store_const", const=True, default=None,
     )
+    # cycle26 (D): anti-overfit 選択圧 (fold-CV 安定性連続値を selection tie-break に挿入)。
+    # 未指定=None で yaml default(False)尊重、 指定で True override。重み 3 つは
+    # 未指定=None で default(0.4/0.3/0.3)。
+    p.add_argument(
+        "--robust-selection", action="store_const", const=True, default=None
+    )
+    p.add_argument("--robust-w-pfre", type=float, default=None)
+    p.add_argument("--robust-w-sign", type=float, default=None)
+    p.add_argument("--robust-w-disp", type=float, default=None)
     # T117: multi-pair training (Stage A fitness を複数ペアで min 集約)。
     # 未指定=None で yaml default(False)。
     p.add_argument(
@@ -571,6 +647,12 @@ def _args_to_overrides(args: argparse.Namespace) -> dict[str, Any]:
             "warmstart_ratio": args.warmstart_ratio,
             "warmstart_motif_archive": args.warmstart_motif_archive,
             "nsga2_selection_enabled": args.nsga2_selection,
+            # cycle26 (D): anti-overfit 選択圧 override (None なら yaml default 尊重)。
+            # getattr 防御 (多 pair override と同パターン、 最小 Namespace test 互換)。
+            "robust_selection_enabled": getattr(args, "robust_selection", None),
+            "robust_w_pfre": getattr(args, "robust_w_pfre", None),
+            "robust_w_sign": getattr(args, "robust_w_sign", None),
+            "robust_w_disp": getattr(args, "robust_w_disp", None),
         },
         # PR4: --fitness-mode CLI override (= yaml phase4.fitness_mode より優先)。
         # None なら _build_phase4 が dataclass default を尊重する。
@@ -1015,10 +1097,12 @@ def _tournament(
     *,
     selection_pressure: bool = False,
     margin_threshold: float = 0.0,
+    robust_selection: bool = False,
 ) -> Genome:
     """``feasibility_cfg`` を見て fallback (cache 全体 infeasible) 判定後に max.
 
     T115: selection_pressure を _selection_key に thread (default False=現行不変)。
+    cycle26: robust_selection も同様に thread (default False=現行不変)。
     """
     sample = rng.sample(pop, k=min(k, len(pop)))
     fallback = _is_all_infeasible(cache.values(), feasibility_cfg)
@@ -1029,6 +1113,7 @@ def _tournament(
             fallback,
             selection_pressure=selection_pressure,
             margin_threshold=margin_threshold,
+            robust_selection=robust_selection,
         ),
     )
 
@@ -1137,6 +1222,7 @@ def _breed_next_gen(
     *,
     selection_pressure: bool = False,
     margin_threshold: float = 0.0,
+    robust_selection: bool = False,
 ) -> tuple[list[Genome], dict[str, tuple[str | None, str | None]]]:
     """次世代 genomes を生成。elite → crossover/mutate で埋める。
 
@@ -1163,6 +1249,7 @@ def _breed_next_gen(
             fallback,
             selection_pressure=selection_pressure,
             margin_threshold=margin_threshold,
+            robust_selection=robust_selection,
         ),
         reverse=True,
     )
@@ -1179,11 +1266,13 @@ def _breed_next_gen(
             prev_pop, cache, rng, ga_cfg.tournament_size, feasibility_cfg,
             selection_pressure=selection_pressure,
             margin_threshold=margin_threshold,
+            robust_selection=robust_selection,
         )
         p2 = _tournament(
             prev_pop, cache, rng, ga_cfg.tournament_size, feasibility_cfg,
             selection_pressure=selection_pressure,
             margin_threshold=margin_threshold,
+            robust_selection=robust_selection,
         )
         if rng.random() < ga_cfg.crossover_rate:
             c1, c2 = crossover(p1, p2, rng, max_depth=ga_cfg.max_depth)
@@ -1296,6 +1385,9 @@ def _update_cache(
     feasibility_cfg: GAFeasibilityConfig,
     stage_c_feasibility_apply: bool = True,
     fold_robust_threshold: float = 0.4,
+    robust_w_pfre: float = 0.4,
+    robust_w_sign: float = 0.3,
+    robust_w_disp: float = 0.3,
 ) -> None:
     """archive の row から fitness_pen / stage pass / feasibility を取り出し cache 更新.
 
@@ -1407,6 +1499,14 @@ def _update_cache(
             cross_pair_margin=_coerce_optional_float(
                 row.get("cross_pair_aggregate_fitness")
             ),
+            # cycle26 (D): anti-overfit robust_score (fold 統計由来、観測値の計算のみ)。
+            # robust_selection OFF 時は _selection_key が無視するため bit-exact。
+            robust_score=_compute_robust_score(
+                row,
+                w_pfre=robust_w_pfre,
+                w_sign=robust_w_sign,
+                w_disp=robust_w_disp,
+            ),
         )
 
 
@@ -1416,6 +1516,7 @@ def _select_best(
     *,
     selection_pressure: bool = False,
     margin_threshold: float = 0.0,
+    robust_selection: bool = False,
 ) -> tuple[str, IndividualCacheEntry]:
     if not cache:
         raise RuntimeError("no individuals evaluated")
@@ -1427,6 +1528,7 @@ def _select_best(
             fallback,
             selection_pressure=selection_pressure,
             margin_threshold=margin_threshold,
+            robust_selection=robust_selection,
         ),
     )
 
@@ -2576,6 +2678,17 @@ def main(argv: list[str] | None = None) -> int:
             requested=cfg.cross_pair.selection_pressure,
             margin_threshold=_cp_sel_threshold,
         )
+        # cycle26 (D): anti-overfit 選択圧の effective 判定 (RUN 中不変)。
+        _robust_sel, _robust_reason = _resolve_robust_selection(cfg)
+        logger.info(
+            "run_ga.robust_selection",
+            effective=_robust_sel,
+            reason=_robust_reason,
+            requested=cfg.ga.robust_selection_enabled,
+            w_pfre=cfg.ga.robust_w_pfre,
+            w_sign=cfg.ga.robust_w_sign,
+            w_disp=cfg.ga.robust_w_disp,
+        )
 
         _log_phase_marker("before_ga_loop", generations=cfg.ga.generations)
 
@@ -2653,6 +2766,7 @@ def main(argv: list[str] | None = None) -> int:
                     run_id,
                     selection_pressure=_cp_sel_pressure,
                     margin_threshold=_cp_sel_threshold,
+                    robust_selection=_robust_sel,
                 )
 
             for g in population:
@@ -2685,6 +2799,9 @@ def main(argv: list[str] | None = None) -> int:
                 cfg.ga.feasibility,
                 stage_c_feasibility_apply=cfg.stage_gate.stage_c_feasibility_apply,
                 fold_robust_threshold=cfg.stage_gate.fold_robust_threshold,
+                robust_w_pfre=cfg.ga.robust_w_pfre,
+                robust_w_sign=cfg.ga.robust_w_sign,
+                robust_w_disp=cfg.ga.robust_w_disp,
             )
 
             best_fp = max(
@@ -2745,6 +2862,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg.ga.feasibility,
         selection_pressure=_cp_sel_pressure,
         margin_threshold=_cp_sel_threshold,
+        robust_selection=_robust_sel,
     )
     best_row = archive.get_row_snapshot(
         lane_id, best_entry.generation, best_name

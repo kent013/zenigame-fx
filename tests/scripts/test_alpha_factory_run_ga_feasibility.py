@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Any
+from typing import Any, ClassVar
 
 from scripts.alpha_factory.run_ga import (
     IndividualCacheEntry,
+    _compute_robust_score,
     _is_all_infeasible,
     _selection_key,
     _tournament,
@@ -68,7 +69,11 @@ def test_legacy_selection_score_falls_back_to_4_tuple() -> None:
 
 
 def test_v31_selection_key_includes_stage_b_priority() -> None:
-    """T046 v3.1: _selection_key は 8 要素 (stage_b_pass を stage_c_feasible 前に挿入)."""
+    """v3.3: _selection_key は 10 要素 (cycle4/5 で 8→10 化).
+
+    順序: (feasible, -violation, stage_b_pass_and_feasible, stage_b_pass,
+    stage_c_feasible, C_pass, B_pass, A_pass, fold_robust, fitness_pen)。
+    """
     e = _make_entry(
         fitness_pen=1.5,
         a=True,
@@ -77,9 +82,44 @@ def test_v31_selection_key_includes_stage_b_priority() -> None:
         violation=0.0,
         stage_c_feasible=True,
     )
-    v31 = _selection_key(e, fallback_active=False)
-    # (feasible, -violation, stage_b_pass, stage_c_feasible, C_pass, B_pass, A_pass, fitness_pen)
-    assert v31 == (1, -0.0, 1, 1, 0, 1, 1, 1.5)
+    v33 = _selection_key(e, fallback_active=False)
+    # fold_robust は _make_entry default False → 0
+    assert v33 == (1, -0.0, 1, 1, 1, 0, 1, 1, 0, 1.5)
+
+
+def test_robust_selection_off_is_bit_exact_10_tuple() -> None:
+    """cycle26 (D): robust_selection=False (default) で従来 10-tuple のまま (bit-exact)."""
+    e = _make_entry(fitness_pen=1.5, a=True, b=True, feasible=True)
+    base = _selection_key(e, fallback_active=False)
+    off = _selection_key(e, fallback_active=False, robust_selection=False)
+    assert off == base
+    assert len(off) == 10
+
+
+def test_robust_selection_on_inserts_score_above_fitness_pen() -> None:
+    """cycle26 (D): robust_selection=True で robust_score を index 9 (fitness_pen 直前) に挿入."""
+    from dataclasses import replace as _replace
+
+    e = _replace(
+        _make_entry(fitness_pen=1.5, a=True, b=True, feasible=True),
+        robust_score=0.73,
+    )
+    key = _selection_key(e, fallback_active=False, robust_selection=True)
+    assert len(key) == 11
+    assert key[9] == 0.73  # fold_robust(8) と fitness_pen(10) の間
+    assert key[10] == 1.5  # fitness_pen は末尾のまま
+
+
+def test_robust_selection_none_score_is_worst() -> None:
+    """cycle26 (D): robust_score=None (fold 統計欠損) は -inf 扱いで最下位."""
+    from dataclasses import replace as _replace
+
+    e = _replace(
+        _make_entry(fitness_pen=1.5, a=True, b=True, feasible=True),
+        robust_score=None,
+    )
+    key = _selection_key(e, fallback_active=False, robust_selection=True)
+    assert key[9] == -math.inf
 
 
 def test_v31_stage_b_pass_wins_over_stage_c_feasible_only() -> None:
@@ -568,3 +608,55 @@ class TestT091UpdateCacheFullDataset:
         assert cache["g0_i0"].feasible is False
         # 0 はそのまま 0 (None に潰さない)
         assert cache["g0_i0"].trade_count_full_dataset == 0
+
+
+class TestComputeRobustScore:
+    """cycle26 (D): _compute_robust_score の anti-overfit 連続値算出."""
+
+    _W: ClassVar[dict[str, float]] = {
+        "w_pfre": 0.4, "w_sign": 0.3, "w_disp": 0.3
+    }
+
+    def test_known_row_value(self) -> None:
+        # pfre=1.0, fold_sign_ratio=0.0(方向安定), iqr=0 → disp_term=1.0
+        # score = 0.4*1.0 + 0.3*(1-0.0) + 0.3*1.0 = 1.0 → clip 1.0
+        row = {
+            "positive_fold_ratio_effective": 1.0,
+            "fold_sign_ratio": 0.0,
+            "oos_total_pnl_iqr": 0.0,
+            "median_oos_total_pnl": 1000.0,
+        }
+        assert _compute_robust_score(row, **self._W) == 1.0
+
+    def test_high_dispersion_lowers_score(self) -> None:
+        # iqr == |median| → norm_iqr=1 → disp_term=0
+        row = {
+            "positive_fold_ratio_effective": 1.0,
+            "fold_sign_ratio": 0.0,
+            "oos_total_pnl_iqr": 1000.0,
+            "median_oos_total_pnl": 1000.0,
+        }
+        # score = 0.4 + 0.3 + 0.0 = 0.7
+        assert abs(_compute_robust_score(row, **self._W) - 0.7) < 1e-9
+
+    def test_missing_pfre_returns_none(self) -> None:
+        row = {"fold_sign_ratio": 0.0, "oos_total_pnl_iqr": 0.0,
+               "median_oos_total_pnl": 1.0}
+        assert _compute_robust_score(row, **self._W) is None
+
+    def test_missing_sign_ratio_returns_none(self) -> None:
+        row = {"positive_fold_ratio_effective": 1.0}
+        assert _compute_robust_score(row, **self._W) is None
+
+    def test_missing_iqr_uses_neutral_disp(self) -> None:
+        # iqr/median 欠損 → disp_term=0.5
+        # score = 0.4*1.0 + 0.3*1.0 + 0.3*0.5 = 0.85
+        row = {"positive_fold_ratio_effective": 1.0, "fold_sign_ratio": 0.0}
+        assert abs(_compute_robust_score(row, **self._W) - 0.85) < 1e-9
+
+    def test_clipped_to_unit_interval(self) -> None:
+        row = {"positive_fold_ratio_effective": 1.0, "fold_sign_ratio": 0.0,
+               "oos_total_pnl_iqr": 0.0, "median_oos_total_pnl": 1.0}
+        # 重み合計>1 でも clip 1.0
+        s = _compute_robust_score(row, w_pfre=1.0, w_sign=1.0, w_disp=1.0)
+        assert s == 1.0
