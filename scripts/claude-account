@@ -1,0 +1,611 @@
+#!/usr/bin/env python3
+"""claude-account: save and switch Claude Code login profiles.
+
+Claude Code keeps login state in two places:
+  - Display info (email, org, ...):  <config>/.claude.json -> "oauthAccount"
+  - OAuth tokens ("claudeAiOauth"):
+      macOS : Keychain generic password, service "Claude Code-credentials",
+              plus a plaintext mirror at ~/.claude/.credentials.json (0600)
+      Linux : <config>/.credentials.json (0600) only
+
+A profile is a snapshot of (claudeAiOauth, oauthAccount) stored as a 0600
+JSON file under <config>/account-profiles/. Switching splices those two
+values back into the live locations; everything else in .claude.json and
+the credential store (mcpOAuth, settings, project history) is untouched.
+
+Refresh tokens rotate, so the tokens saved in a profile go stale while the
+account is active elsewhere. To compensate, `switch` re-snapshots the
+currently-active account into its profile (matched by accountUuid) before
+swapping, so you never lose the freshest tokens.
+
+Usage:
+  claude-account current            Show the active account
+  claude-account add [CLAUDE_ARGS]  Add another account: launches claude with
+                                    an isolated throwaway config (login screen
+                                    appears there; the current login and all
+                                    running sessions are untouched) and
+                                    registers the new account on exit
+  claude-account save [NAME]       Snapshot the active login as a profile
+                                    (default NAME: local.domain-plan, e.g.
+                                    ishitoya.rio-team)
+  claude-account list              List saved profiles
+  claude-account switch [NAME]     Swap the active login to a saved profile
+                                    (no NAME: interactive picker)
+  claude-account delete NAME       Remove a saved profile
+  claude-account autosave          Save the active login only if it has no
+                                    profile yet; silent, never fails
+                                    (called by claude-statusline)
+
+Notes:
+  - Switch affects sessions started afterwards. Already-running Claude Code
+    sessions keep using the account they started with.
+  - Right after a switch, a running session may briefly write the old
+    oauthAccount back into .claude.json; Claude Code re-fetches the profile
+    periodically, so the display self-heals. Tokens are what matter.
+  - Registering a second account: `claude-account save` first, run `/login`
+    with the other account inside Claude Code, then `claude-account save`
+    again.
+"""
+
+import getpass
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+KEYCHAIN_SERVICE = "Claude Code-credentials"
+IS_MACOS = sys.platform == "darwin"
+
+_config_dir_env = os.environ.get("CLAUDE_CONFIG_DIR")
+if _config_dir_env:
+    CONFIG_DIR = Path(_config_dir_env)
+    CLAUDE_JSON = CONFIG_DIR / ".claude.json"
+    CREDS_FILE = CONFIG_DIR / ".credentials.json"
+else:
+    CONFIG_DIR = Path.home() / ".claude"
+    CLAUDE_JSON = Path.home() / ".claude.json"
+    CREDS_FILE = CONFIG_DIR / ".credentials.json"
+
+PROFILE_DIR = CONFIG_DIR / "account-profiles"
+
+
+def die(msg: str) -> "NoReturn":
+    print(f"claude-account: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def read_json(path: Path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError as e:
+        die(f"broken JSON in {path}: {e}")
+
+
+def write_json_atomic(path: Path, data: dict, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, separators=(",", ":"))
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# ---------------------------------------------------------------- keychain
+
+def config_dir_service(config_dir: Path) -> str:
+    """Keychain service name Claude Code uses for a non-default config dir:
+    the base service plus the first 8 hex chars of sha256(path)."""
+    suffix = hashlib.sha256(str(config_dir).encode()).hexdigest()[:8]
+    return f"{KEYCHAIN_SERVICE}-{suffix}"
+
+
+def keychain_fail(op: str, proc: subprocess.CompletedProcess) -> "NoReturn":
+    """Explain a failed `security` call. Never re-raises: a CalledProcessError
+    traceback would dump the command line, which contains the tokens."""
+    detail = (proc.stderr or "").strip() or f"exit status {proc.returncode}"
+    hint = ""
+    if proc.returncode == 36:  # errSecInteractionNotAllowed
+        hint = ("\n  the keychain needs an unlock dialog this session cannot"
+                " show (typical over SSH) — run\n"
+                "  `security unlock-keychain ~/Library/Keychains/login.keychain-db`"
+                " and retry")
+    die(f"keychain {op} failed: {detail}{hint}")
+
+
+def keychain_read(service: str = KEYCHAIN_SERVICE):
+    """Return (payload dict, account attr), or (None, None) if the item does
+    not exist. Any other failure (e.g. locked keychain) aborts: proceeding
+    would crash later in keychain_write anyway, and treating it as "absent"
+    could make store_live overwrite the item without the merged mcpOAuth."""
+    proc = subprocess.run(
+        ["security", "find-generic-password", "-s", service, "-w"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        if proc.returncode == 44:  # errSecItemNotFound
+            return None, None
+        keychain_fail("read", proc)
+    attr = subprocess.run(
+        ["security", "find-generic-password", "-s", service],
+        capture_output=True, text=True,
+    )
+    m = re.search(r'"acct"<blob>="([^"]*)"', attr.stdout)
+    account = m.group(1) if m else getpass.getuser()
+    try:
+        return json.loads(proc.stdout.strip()), account
+    except json.JSONDecodeError:
+        die("keychain entry exists but is not JSON; refusing to touch it")
+
+
+def keychain_write(payload: dict, account: str, service: str = KEYCHAIN_SERVICE) -> None:
+    blob = json.dumps(payload, separators=(",", ":"))
+    proc = subprocess.run(
+        ["security", "add-generic-password", "-U",
+         "-s", service, "-a", account, "-w", blob],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        keychain_fail("write", proc)
+
+
+def keychain_delete(service: str) -> None:
+    subprocess.run(
+        ["security", "delete-generic-password", "-s", service],
+        capture_output=True, text=True,
+    )
+
+
+# ------------------------------------------------------------- live state
+
+def load_live(required=True):
+    """Return {"oauth": claudeAiOauth, "account": oauthAccount, "_kc_acct": str|None},
+    or None when nobody is logged in and required is False."""
+    cfg = read_json(CLAUDE_JSON)
+    if cfg is None:
+        die(f"{CLAUDE_JSON} not found — has Claude Code ever run here?")
+    oauth_account = cfg.get("oauthAccount")
+    oauth = None
+    kc_acct = None
+    if IS_MACOS:
+        payload, kc_acct = keychain_read()
+        if payload:
+            oauth = payload.get("claudeAiOauth")
+    if oauth is None:
+        creds = read_json(CREDS_FILE)
+        if creds:
+            oauth = creds.get("claudeAiOauth")
+    if not oauth or not oauth_account:
+        if required:
+            die("no active login found (missing claudeAiOauth or oauthAccount) — "
+                "log in with `claude` or restore one with `claude-account switch`")
+        return None
+    return {"oauth": oauth, "account": oauth_account, "_kc_acct": kc_acct}
+
+
+
+
+def store_live(oauth: dict, oauth_account: dict, kc_acct) -> None:
+    """Splice the given tokens/account into the live locations."""
+    # Keychain (macOS): merge into the existing payload so mcpOAuth survives.
+    if IS_MACOS:
+        payload, existing_acct = keychain_read()
+        payload = payload or {}
+        payload["claudeAiOauth"] = oauth
+        keychain_write(payload, existing_acct or kc_acct or getpass.getuser())
+    # Credentials file (Linux primary; macOS keeps a mirror — update if present
+    # or if we have no keychain to rely on).
+    if not IS_MACOS or CREDS_FILE.exists():
+        creds = read_json(CREDS_FILE) or {}
+        creds["claudeAiOauth"] = oauth
+        if oauth_account.get("organizationUuid"):
+            creds["organizationUuid"] = oauth_account["organizationUuid"]
+        write_json_atomic(CREDS_FILE, creds)
+    # .claude.json: replace only oauthAccount.
+    cfg = read_json(CLAUDE_JSON)
+    cfg["oauthAccount"] = oauth_account
+    write_json_atomic(CLAUDE_JSON, cfg)
+
+
+# -------------------------------------------------------------- profiles
+
+def profile_path(name: str) -> Path:
+    return PROFILE_DIR / f"{name}.json"
+
+
+def valid_name(name: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+        die(f"invalid profile name {name!r} (use letters, digits, . _ -)")
+    return name
+
+
+def plan_of(oauth, account) -> str:
+    """Human-readable plan, e.g. 'team', 'max 20x', 'pro'.
+
+    Prefers claudeAiOauth.subscriptionType; falls back to
+    oauthAccount.organizationType (claude_team -> team). The rate-limit
+    multiplier is appended for max plans, where it distinguishes 5x/20x.
+    """
+    account = account or {}
+    plan = (oauth or {}).get("subscriptionType") \
+        or re.sub(r"^claude_", "", account.get("organizationType") or "")
+    tier = (oauth or {}).get("rateLimitTier") \
+        or account.get("organizationRateLimitTier") or ""
+    m = re.search(r"(\d+x)$", tier)
+    if plan == "max" and m:
+        return f"max {m.group(1)}"
+    return plan
+
+
+def identity(account: dict):
+    """The same person can belong to several orgs (e.g. Max personal + Team),
+    with equal accountUuid but different organizationUuid — so an account
+    identity is the pair."""
+    return (account.get("accountUuid"), account.get("organizationUuid"))
+
+
+def default_name(oauth_account: dict, oauth=None) -> str:
+    """E.g. ishitoya.rio-team, ishitoya.engraphia-max, kentaro.ishitoya.gmail-max.
+
+    Local part alone is ambiguous (same local part across domains, same email
+    across Max/Team orgs), so include the domain's first label and the plan.
+    """
+    email = oauth_account.get("emailAddress", "")
+    local, _, domain = email.partition("@")
+    host = domain.split(".")[0]
+    base = f"{local}.{host}" if host else local
+    plan = plan_of(oauth, oauth_account)
+    name = f"{base}-{plan.split()[0]}" if plan else base
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name).strip("._-") or "default"
+
+
+def load_profiles() -> dict:
+    out = {}
+    if PROFILE_DIR.is_dir():
+        for p in sorted(PROFILE_DIR.glob("*.json")):
+            data = read_json(p)
+            if data and "oauth" in data and "account" in data:
+                out[p.stem] = data
+    return out
+
+
+def save_profile(name: str, live: dict) -> None:
+    write_json_atomic(profile_path(name), {
+        "oauth": live["oauth"],
+        "account": live["account"],
+    })
+
+
+def interactive_pick(rows, start_index: int):
+    """Arrow-key picker on a TTY. Returns the chosen index, or None on cancel
+    (q / Esc / Ctrl-C). Up/Down (and j/k) move, Enter selects, digits jump."""
+    import select
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    idx = max(0, min(start_index, len(rows) - 1))
+    n = len(rows)
+
+    def draw(first=False):
+        if not first:
+            sys.stdout.write(f"\x1b[{n}A")
+        for i, row in enumerate(rows):
+            if i == idx:
+                sys.stdout.write(f"\x1b[2K \x1b[7m❯ {row}\x1b[0m\n")
+            else:
+                sys.stdout.write(f"\x1b[2K   {row}\n")
+        sys.stdout.flush()
+
+    try:
+        tty.setcbreak(fd)
+        draw(first=True)
+        while True:
+            ch = os.read(fd, 1)
+            if ch in (b"\r", b"\n"):
+                return idx
+            if ch in (b"q", b"Q", b"\x03", b"\x04"):
+                return None
+            if ch == b"\x1b":
+                readable, _, _ = select.select([fd], [], [], 0.05)
+                if not readable:
+                    return None  # bare Esc
+                seq = os.read(fd, 2)
+                if seq in (b"[A", b"OA"):
+                    idx = (idx - 1) % n
+                elif seq in (b"[B", b"OB"):
+                    idx = (idx + 1) % n
+            elif ch in (b"k", b"p"):
+                idx = (idx - 1) % n
+            elif ch in (b"j", b"n"):
+                idx = (idx + 1) % n
+            elif ch.isdigit() and 1 <= int(ch) <= n:
+                idx = int(ch) - 1
+                draw()
+                return idx
+            draw()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def label(oauth_account: dict, oauth=None) -> str:
+    email = oauth_account.get("emailAddress", "?")
+    extras = []
+    org = oauth_account.get("organizationName")
+    # Personal orgs are auto-named "<email>'s Organization" — pure noise.
+    if org and not org.endswith("'s Organization"):
+        extras.append(org)
+    plan = plan_of(oauth, oauth_account)
+    if plan:
+        extras.append(plan)
+    return f"{email} ({', '.join(extras)})" if extras else email
+
+
+# -------------------------------------------------------------- commands
+
+def cmd_current(_args):
+    live = load_live(required=False)
+    if not live:
+        print("not logged in — restore one with `claude-account switch`")
+        return
+    print(label(live["account"], live["oauth"]))
+
+
+def cmd_save(args):
+    live = load_live()
+    name = valid_name(args[0]) if args else default_name(live["account"], live["oauth"])
+    existed = profile_path(name).exists()
+    save_profile(name, live)
+    verb = "updated" if existed else "saved"
+    print(f"{verb} profile '{name}' — {label(live['account'], live['oauth'])}")
+
+
+def cmd_list(_args):
+    profiles = load_profiles()
+    if not profiles:
+        print("no profiles saved yet — run `claude-account save` first")
+        return
+    live = load_live(required=False)
+    active = identity(live["account"]) if live else None
+    for name, data in profiles.items():
+        mark = "*" if identity(data["account"]) == active else " "
+        print(f" {mark} {name:<28} {label(data['account'], data['oauth'])}")
+
+
+def cmd_switch(args):
+    profiles = load_profiles()
+    if not profiles:
+        die("no profiles saved yet — run `claude-account save` first")
+    live = load_live(required=False)
+    active = identity(live["account"]) if live else None
+
+    if args:
+        name = args[0]
+        if name not in profiles:
+            die(f"no such profile: {name} (see `claude-account list`)")
+    else:
+        names = list(profiles)
+        marks = ["*" if identity(profiles[n]["account"]) == active else " " for n in names]
+        rows = [f"{m} {n:<28} {label(profiles[n]['account'], profiles[n]['oauth'])}"
+                for m, n in zip(marks, names)]
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            start = marks.index("*") if "*" in marks else 0
+            try:
+                picked = interactive_pick(rows, start)
+            except KeyboardInterrupt:
+                print()
+                return
+            if picked is None:
+                return
+            name = names[picked]
+        else:
+            for i, row in enumerate(rows, 1):
+                print(f" {row[0]} [{i}] {row[2:]}")
+            try:
+                choice = input("switch to> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if not choice:
+                return
+            if choice.isdigit() and 1 <= int(choice) <= len(names):
+                name = names[int(choice) - 1]
+            elif choice in profiles:
+                name = choice
+            else:
+                die(f"no such profile: {choice}")
+
+    target = profiles[name]
+
+    # Re-snapshot the active account so its rotated tokens are not lost.
+    if live:
+        for pname, pdata in profiles.items():
+            if identity(pdata["account"]) == active:
+                save_profile(pname, live)
+                break
+
+    if live and identity(target["account"]) == active:
+        print(f"already on '{name}' — {label(target['account'], target['oauth'])}")
+        return
+
+    store_live(target["oauth"], target["account"], live["_kc_acct"] if live else None)
+    print(f"switched to '{name}' — {label(target['account'], target['oauth'])}")
+    print("note: already-running Claude Code sessions keep their old account;"
+          " new sessions use this one.")
+
+
+def autosave_live(live) -> "str | None":
+    """Register `live` if its identity is unknown; return the new profile
+    name, or None if it was already registered (or live is None)."""
+    if not live:
+        return None
+    me = identity(live["account"])
+    if not me[0]:
+        return None
+    profiles = load_profiles()
+    if any(identity(p["account"]) == me for p in profiles.values()):
+        return None
+    name = default_name(live["account"], live["oauth"])
+    if name in profiles:  # name taken by a different account
+        suffix = 2
+        while f"{name}-{suffix}" in profiles:
+            suffix += 1
+        name = f"{name}-{suffix}"
+    save_profile(name, live)
+    return name
+
+
+def cmd_autosave(_args):
+    """Register the active account if unknown. Silent — statusline calls this."""
+    try:
+        autosave_live(load_live(required=False))
+    except SystemExit:
+        pass
+
+
+def cmd_add(args):
+    """Add another account WITHOUT touching the current login.
+
+    Launches claude against a throwaway CLAUDE_CONFIG_DIR: with no credentials
+    there, it opens its login screen (verified: the isolated config does not
+    pick up the keychain login). After claude exits, the freshly written
+    credentials are harvested into a profile and the throwaway dir is removed.
+    The active login, running sessions, and the VS Code extension are never
+    affected."""
+    live = load_live(required=False)
+    pre_oauth = live["oauth"] if live else None
+
+    tmpdir = CONFIG_DIR / "account-add-tmp"
+    shutil.rmtree(tmpdir, ignore_errors=True)
+    tmpdir.mkdir(parents=True, exist_ok=True)
+    os.chmod(tmpdir, 0o700)
+    # Leave onboarding "incomplete" on purpose: with no credentials, claude's
+    # first-run flow walks straight into login, so nobody has to type /login.
+    # Only the trust dialog for the launch directory is pre-accepted.
+    write_json_atomic(tmpdir / ".claude.json", {
+        "projects": {os.getcwd(): {"hasTrustDialogAccepted": True}},
+    })
+
+    claude_bin = os.environ.get("CLAUDE_ACCOUNT_CLAUDE_BIN")
+    launch_args = list(args)
+    if not claude_bin:
+        sibling = Path(os.path.realpath(__file__)).parent / "claude"
+        if os.access(sibling, os.X_OK):
+            claude_bin = str(sibling)
+            # A login-only session needs no permission bypass, and skipping it
+            # also skips the bypass-mode confirmation prompt. Only the sibling
+            # wrapper understands this flag.
+            launch_args.insert(0, "--no-bypass")
+        else:
+            claude_bin = "claude"
+    print("launching claude with an isolated config — log in with the account"
+          " you want to add when prompted, then exit claude.")
+    print("(your current login is not affected)")
+    env = dict(os.environ, CLAUDE_CONFIG_DIR=str(tmpdir))
+    try:
+        subprocess.run([claude_bin, *launch_args], env=env)
+    except FileNotFoundError:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        die(f"could not launch {claude_bin!r}")
+    except KeyboardInterrupt:
+        pass
+
+    new_account = (read_json(tmpdir / ".claude.json") or {}).get("oauthAccount")
+    new_oauth = (read_json(tmpdir / ".credentials.json") or {}).get("claudeAiOauth")
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+    if IS_MACOS:
+        # On macOS a non-default CLAUDE_CONFIG_DIR gets its own keychain
+        # entry (base service + sha256(path)[:8]) instead of a
+        # .credentials.json — that is where the new login's tokens live.
+        # Harvest them, then remove the throwaway entry.
+        tmp_service = config_dir_service(tmpdir)
+        payload, _ = keychain_read(tmp_service)
+        tmp_oauth = (payload or {}).get("claudeAiOauth")
+        if tmp_oauth:
+            new_oauth = new_oauth or tmp_oauth
+        keychain_delete(tmp_service)
+
+        # Safety net: should the isolated claude have written the shared
+        # keychain entry after all, harvest those tokens and put the
+        # original ones back.
+        payload, kc_acct = keychain_read()
+        kc_oauth = (payload or {}).get("claudeAiOauth")
+        if kc_oauth and pre_oauth and kc_oauth != pre_oauth:
+            new_oauth = new_oauth or kc_oauth
+            payload["claudeAiOauth"] = pre_oauth
+            keychain_write(payload, kc_acct or getpass.getuser())
+        elif kc_oauth and not pre_oauth:
+            new_oauth = new_oauth or kc_oauth
+
+    if not new_account or not new_oauth:
+        print("no new login detected — nothing changed")
+        return
+
+    entry = {"oauth": new_oauth, "account": new_account}
+    name = autosave_live(entry)
+    if name is None:
+        me = identity(new_account)
+        for pname, pdata in load_profiles().items():
+            if identity(pdata["account"]) == me:
+                save_profile(pname, entry)
+                name = pname
+                break
+        print(f"updated profile '{name}' — {label(new_account, new_oauth)}")
+    else:
+        print(f"added profile '{name}' — {label(new_account, new_oauth)}")
+    print(f"use it with: claude-account switch {name}")
+
+
+def cmd_delete(args):
+    if not args:
+        die("usage: claude-account delete NAME")
+    name = args[0]
+    path = profile_path(name)
+    if not path.exists():
+        die(f"no such profile: {name}")
+    path.unlink()
+    print(f"deleted profile '{name}'")
+
+
+COMMANDS = {
+    "current": cmd_current,
+    "add": cmd_add,
+    "save": cmd_save,
+    "list": cmd_list,
+    "ls": cmd_list,
+    "switch": cmd_switch,
+    "autosave": cmd_autosave,
+    "delete": cmd_delete,
+    "rm": cmd_delete,
+}
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
+    handler = COMMANDS.get(argv[0])
+    if handler is None:
+        die(f"unknown command: {argv[0]} (try `claude-account help`)")
+    handler(argv[1:])
+
+
+if __name__ == "__main__":
+    main()

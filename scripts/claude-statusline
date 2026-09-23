@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Claude Code statusline: show model, context window usage, cost, and account.
+
+Receives a JSON blob on stdin from Claude Code's statusLine integration.
+Schema: https://code.claude.com/docs/en/statusline
+
+The logged-in account is not part of the stdin payload, so it is read from
+<config>/.claude.json ("oauthAccount"), honoring CLAUDE_CONFIG_DIR.
+
+Since Claude Code re-runs this script periodically for every session, it also
+doubles as the auto-registration hook: when the active account has no saved
+profile yet (e.g. right after /login with a new account), it invokes
+`claude-account autosave` from the same directory, so every account you log
+in with becomes switchable without a manual `claude-account save`.
+"""
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+
+
+def plan_of(account: dict) -> str:
+    """'team' / 'max 20x' / 'pro', derived from oauthAccount alone (no
+    keychain access — this runs on every statusline render)."""
+    plan = re.sub(r"^claude_", "", account.get("organizationType") or "")
+    tier = account.get("organizationRateLimitTier") or ""
+    m = re.search(r"(\d+x)$", tier)
+    if plan == "max" and m:
+        return f"max {m.group(1)}"
+    return plan
+
+
+def oauth_account() -> dict:
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~")
+    path = os.path.join(config_dir, ".claude.json")
+    try:
+        with open(path) as f:
+            return json.load(f).get("oauthAccount") or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def autosave_if_new(account: dict) -> None:
+    # Identity is (accountUuid, organizationUuid): the same person can belong
+    # to several orgs (Max personal + Team) and those are distinct logins.
+    me = (account.get("accountUuid"), account.get("organizationUuid"))
+    if not me[0]:
+        return
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(
+        os.path.expanduser("~"), ".claude")
+    for path in glob.glob(os.path.join(config_dir, "account-profiles", "*.json")):
+        try:
+            with open(path) as f:
+                saved = json.load(f).get("account") or {}
+            if (saved.get("accountUuid"), saved.get("organizationUuid")) == me:
+                return
+        except (OSError, ValueError):
+            continue
+    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude-account")
+    if os.access(helper, os.X_OK):
+        try:
+            subprocess.run([helper, "autosave"], capture_output=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def main() -> None:
+    try:
+        data = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        return
+
+    parts = []
+
+    model = (data.get("model") or {}).get("display_name") or (data.get("model") or {}).get("id")
+    if model:
+        parts.append(str(model))
+
+    ctx = data.get("context_window") or {}
+    used_pct = ctx.get("used_percentage")
+    size = ctx.get("context_window_size")
+    if used_pct is not None:
+        if size:
+            parts.append(f"ctx {int(used_pct)}% / {int(size / 1000)}k")
+        else:
+            parts.append(f"ctx {int(used_pct)}%")
+
+    cost = (data.get("cost") or {}).get("total_cost_usd")
+    if isinstance(cost, (int, float)):
+        parts.append(f"${cost:.2f}")
+
+    account = oauth_account()
+    email = account.get("emailAddress")
+    if email:
+        plan = plan_of(account)
+        parts.append(f"{email} ({plan})" if plan else email)
+    autosave_if_new(account)
+
+    if parts:
+        print("  ·  ".join(parts))
+
+
+if __name__ == "__main__":
+    main()

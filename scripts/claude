@@ -1,24 +1,106 @@
 #!/bin/sh
-# claude: Launch Claude Code using the Anthropic VSCode extension's native binary.
+# claude: Launch Claude Code using the VSCode extension's native binary.
 # Dynamically finds the latest installed version so it follows extension updates.
-# Supports local (~/.vscode) and remote (~/.vscode-server) installations.
 
-CLAUDE=""
-for base in "$HOME/.vscode-server/extensions" "$HOME/.vscode/extensions"; do
-  [ -d "$base" ] || continue
-  for ext in $(ls -d "$base"/anthropic.claude-code-* 2>/dev/null | sort -V); do
-    candidate="$ext/resources/native-binary/claude"
-    [ -x "$candidate" ] && CLAUDE="$candidate"
+# Detect OS/arch so this works both locally (macOS, ~/.vscode) and on the
+# remote dev box (Linux, ~/.vscode-server).
+case "$(uname -s)" in
+  Darwin) OS=darwin ;;
+  Linux)  OS=linux ;;
+  *)      OS=linux ;;
+esac
+case "$(uname -m)" in
+  arm64|aarch64) ARCH=arm64 ;;
+  x86_64|amd64)  ARCH=x64 ;;
+  *)             ARCH=arm64 ;;
+esac
+PLATFORM="$OS-$ARCH"
+
+# Search both extension roots (local VSCode and remote vscode-server),
+# pick the highest version across both. $1 is the trailing glob suffix
+# ("-$PLATFORM" for an exact platform match, "" for any platform).
+find_latest_ext() {
+  ls -d \
+      "$HOME/.vscode/extensions/anthropic.claude-code-"*"$1" \
+      "$HOME/.vscode-server/extensions/anthropic.claude-code-"*"$1" \
+      2>/dev/null \
+    | sed 's|.*/anthropic\.claude-code-||' \
+    | sort -t- -k1 -V \
+    | tail -1
+}
+
+LATEST_EXT=$(find_latest_ext "-$PLATFORM")
+# Fallback: no exact platform match (e.g. Rosetta makes uname disagree with the
+# installed extension's suffix). Retry with any suffix and warn — the -x check
+# below still rejects a binary that cannot run here.
+if [ -z "$LATEST_EXT" ]; then
+  echo "WARN: no extension for platform $PLATFORM; falling back to any platform" >&2
+  LATEST_EXT=$(find_latest_ext "")
+fi
+if [ -n "$LATEST_EXT" ]; then
+  for root in "$HOME/.vscode/extensions" "$HOME/.vscode-server/extensions"; do
+    cand="$root/anthropic.claude-code-$LATEST_EXT"
+    [ -d "$cand" ] && LATEST_EXT="$cand" && break
   done
-done
+fi
 
-if [ -z "$CLAUDE" ]; then
-  echo "Error: Claude Code VSCode extension not found." >&2
-  echo "Install it from VSCode marketplace first." >&2
+if [ -z "$LATEST_EXT" ] || [ ! -d "$LATEST_EXT" ]; then
+  echo "Error: Claude Code VSCode extension not found (platform: $PLATFORM)." >&2
+  echo "Install it from the VSCode marketplace first." >&2
+  exit 1
+fi
+
+CLAUDE="$LATEST_EXT/resources/native-binary/claude"
+
+if [ ! -x "$CLAUDE" ]; then
+  echo "Error: Native binary not found at $CLAUDE" >&2
   exit 1
 fi
 
 export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
 #export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=75
+
+# Defaults applied by this wrapper:
+#   --dangerously-skip-permissions : bypass permission prompts
+#   statusLine via --settings      : show model, context window %, cost in info bar
+# Opt-out flags handled (and stripped) by this wrapper:
+#   --no-bypass : drop --dangerously-skip-permissions
+#   --no-ctx    : drop the injected statusLine config
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+STATUSLINE_BIN="$SCRIPT_DIR/claude-statusline"
+
+BYPASS=1
+CTX=1
+
+# Forward all args except our wrapper-only flags
+set -- "$@"
+forwarded_count=0
+# Use a temp positional rebuild
+new_args=""
+for arg in "$@"; do
+  case "$arg" in
+    --no-bypass) BYPASS=0 ;;
+    --no-ctx)    CTX=0 ;;
+    *)
+      esc=$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")
+      new_args="$new_args '$esc'"
+      forwarded_count=$((forwarded_count + 1))
+      ;;
+  esac
+done
+
+eval "set -- $new_args"
+
+# Build prepended flags as proper positional args (so JSON braces don't get
+# brace-expanded by the shell when passed inline).
+if [ "$CTX" = "1" ] && [ -x "$STATUSLINE_BIN" ]; then
+  STATUSLINE_JSON='{"statusLine":{"type":"command","command":"'"$STATUSLINE_BIN"'","padding":0}}'
+  set -- --settings "$STATUSLINE_JSON" "$@"
+fi
+
+if [ "$BYPASS" = "1" ]; then
+  set -- --dangerously-skip-permissions "$@"
+fi
 
 exec "$CLAUDE" "$@"
