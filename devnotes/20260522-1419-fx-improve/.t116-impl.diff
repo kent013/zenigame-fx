@@ -1,0 +1,122 @@
+diff --git a/scripts/alpha_factory/run_ga.py b/scripts/alpha_factory/run_ga.py
+index a635db3..329a5df 100644
+--- a/scripts/alpha_factory/run_ga.py
++++ b/scripts/alpha_factory/run_ga.py
+@@ -281,12 +281,14 @@ def _selection_key(
+     score = entry.selection_score
+     if not selection_pressure:
+         return score
+-    # ON: fold_robust(index 8) と fitness_pen(index 9) の間に tie-break を挿入。
+-    cp_pref = int(
+-        entry.cross_pair_margin is not None
+-        and entry.cross_pair_margin > margin_threshold
+-    )
+-    return (*score[:9], cp_pref, score[9])
++    # ON (T116 連続値化): fold_robust(index 8) と fitness_pen(index 9) の間に
++    # cross-pair margin の **連続値** を挿入 (T115 bool tie-break は gen0 飽和で
++    # 勾配ゼロだったため、連続値で pass 閾値方向の勾配を継続付与)。None/NaN/inf は
++    # -inf (最下位、cross-pair 評価なし個体は不利、pass 整合)。margin_threshold は
++    # 連続値経路では未使用 (CrossPairConfig.__post_init__ で !=0.0 を fail-closed)。
++    m = entry.cross_pair_margin
++    cp_val = float(m) if (m is not None and math.isfinite(m)) else -math.inf
++    return (*score[:9], cp_val, score[9])
+ 
+ 
+ def _resolve_cross_pair_selection_pressure(cfg: Any) -> tuple[bool, str]:
+@@ -1663,9 +1665,11 @@ def _write_reports(
+             ),
+         },
+         "cross_pair_runtime_mode": cross_pair_mode,
+-        # T115: pressure ON 時は selection_key が 11-tuple (v3_4)、OFF は 10-tuple (v3_3)。
++        # T116: pressure ON 時は selection_key が 11-tuple で cross-pair margin 連続値
++        # (v3_5_continuous)、OFF は 10-tuple (v3_3)。R88(bool,v3_4) と R89(continuous,
++        # v3_5) を A/B 監査で識別可能にする (Codex Round1 Critical)。
+         "selection_key_schema": (
+-            "v3_4_cross_pair_pressure" if _cp_sel_eff else "v3_3"
++            "v3_5_cross_pair_pressure_continuous" if _cp_sel_eff else "v3_3"
+         ),
+         "per_generation": sanitized_per_generation,
+         "best": {
+diff --git a/src/alpha_factory/archive.py b/src/alpha_factory/archive.py
+index 88753b1..fc7987d 100644
+--- a/src/alpha_factory/archive.py
++++ b/src/alpha_factory/archive.py
+@@ -113,6 +113,13 @@ GENOMES_SCHEMA: pa.Schema = pa.schema(
+         # = mean_sharpe - λ·std)。in-loop selection pressure の源。cross_pair 未実行
+         # (enable=False / skipped) は None。
+         pa.field("cross_pair_aggregate_fitness", pa.float64(), nullable=True),
++        # T116: cross-pair pass 3 条件の実値 + pair_failure 数 (観測専用、selection 非影響)。
++        # 天井検証 (max mean_sharpe が pass 0.15 近傍か) + proxy 整合性監視
++        # (aggregate climb 時 mean_sharpe も climb するか) + 偽陽性検知 (pair_failure)。
++        pa.field("cross_pair_mean_sharpe", pa.float64(), nullable=True),
++        pa.field("cross_pair_min_sharpe", pa.float64(), nullable=True),
++        pa.field("cross_pair_target_ratio", pa.float64(), nullable=True),
++        pa.field("cross_pair_pair_failure_count", pa.int64(), nullable=True),
+         pa.field("graduated", pa.bool_(), nullable=False),
+         # T-sharpe Phase 1A: trade-level Sharpe (v2) と calc version
+         # T044: trade_sharpe_raw は **Stage A 値で固定** (selection 基準と
+@@ -262,6 +269,10 @@ def _create_row_template() -> dict[str, Any]:
+         "dsr": None,
+         "ii_lite_pass": None,
+         "cross_pair_aggregate_fitness": None,  # T115
++        "cross_pair_mean_sharpe": None,  # T116 観測
++        "cross_pair_min_sharpe": None,  # T116 観測
++        "cross_pair_target_ratio": None,  # T116 観測
++        "cross_pair_pair_failure_count": None,  # T116 観測
+         "graduated": False,
+         # T-sharpe Phase 1A
+         "trade_sharpe_raw": None,
+@@ -854,6 +865,10 @@ class GenomeArchive:
+         if skipped or cp_result is None:
+             row["ii_lite_pass"] = None
+             row["cross_pair_aggregate_fitness"] = None  # T115
++            row["cross_pair_mean_sharpe"] = None  # T116
++            row["cross_pair_min_sharpe"] = None
++            row["cross_pair_target_ratio"] = None
++            row["cross_pair_pair_failure_count"] = None
+         else:
+             row["ii_lite_pass"] = bool(cp_result.passed)
+             # T115: cross-pair 実測シグナル (in-loop selection pressure 源)。
+@@ -861,6 +876,22 @@ class GenomeArchive:
+             row["cross_pair_aggregate_fitness"] = _finite_or_none(
+                 cp_result.metrics.get("aggregate_fitness")
+             )
++            # T116: pass 3 条件の実値 (観測専用、selection 非影響)。
++            row["cross_pair_mean_sharpe"] = _finite_or_none(
++                cp_result.metrics.get("mean_sharpe")
++            )
++            row["cross_pair_min_sharpe"] = _finite_or_none(
++                cp_result.metrics.get("min_sharpe")
++            )
++            row["cross_pair_target_ratio"] = _finite_or_none(
++                cp_result.metrics.get("sharpe_target_cross_ratio")
++            )
++            # pair_failure 数: reason_codes の "pair_failure:" prefix を count
++            # (aggregate 上昇の偽陽性=pair_failure で集約値が壊れるケース検知)。
++            row["cross_pair_pair_failure_count"] = sum(
++                1 for r in cp_result.reason_codes
++                if str(r).startswith("pair_failure:")
++            )
+         # T043: mission_score を payload から書き写す (stage_gate 側で計算済)。
+         # base 評価が trade を出さず Sharpe=None だった場合は None になる。
+         row["mission_score"] = _opt_float(payload, "mission_score")
+diff --git a/src/alpha_factory/cross_pair.py b/src/alpha_factory/cross_pair.py
+index f96beff..b1a8544 100644
+--- a/src/alpha_factory/cross_pair.py
++++ b/src/alpha_factory/cross_pair.py
+@@ -116,6 +116,15 @@ class CrossPairConfig:
+             raise ValueError(
+                 f"aggregator_lambda must be >= 0: {self.aggregator_lambda}"
+             )
++        # T116: 連続値選択圧では margin_threshold は未使用。設定したのに効かない
++        # サイレント挙動を防ぐため fail-closed (Codex Round1 Warning1)。
++        if self.selection_pressure and self.selection_pressure_margin_threshold != 0.0:
++            raise ValueError(
++                "cross_pair.selection_pressure_margin_threshold must be 0.0 when "
++                "selection_pressure=True (T116 continuous selection uses the raw "
++                "cross_pair margin; threshold is no longer applied): "
++                f"got {self.selection_pressure_margin_threshold}"
++            )
+         if not 0.0 <= self.sharpe_target_cross_ratio_min <= 1.0:
+             raise ValueError(
+                 "sharpe_target_cross_ratio_min must be in [0, 1]: "

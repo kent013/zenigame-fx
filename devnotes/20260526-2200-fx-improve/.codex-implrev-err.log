@@ -1,0 +1,1920 @@
+OpenAI Codex v0.133.0-alpha.1
+--------
+workdir: /Users/ishitoya/repository/zenigame-fx
+model: gpt-5.3-codex
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019e6464-d0d5-7180-b270-c1b2507b16ec
+--------
+user
+あなたは zenigame-fx の Codex impl-reviewer です。新 primitive F15 MTFTrendPullback (マルチTF, opt-in) の実装を high reasoning でレビューしてください。
+
+# 文脈
+- frontier(sharpe1.5/pnl70k/dd2%/trade50)維持下で達成分布の上限を上げる構造変更。Codex設計合議で(B)新primitive F15(HTFトレンド×LTFプルバック)採用済。
+- ★最重要リスク: look-ahead bias (HTF resampling)。M1 bar i(bucket B)は確定bucket(B-1)のHTF値のみ参照すべき。現bucket Bの集約値(B内の未来M1 bar含む)を参照したらlook-ahead bug=致命的。
+- bit-exact: F15はopt-in(--enable-mtf-primitive)。OFFでregistry32本(既存と完全一致)必須。
+- determinism: GA L1 selection/L2 row-order不変契約。primitiveはpure(過去のみ参照、後続bar改変で過去index不変)。
+
+# レビュー観点 (Critical/Warning/Nit で指摘、Criticalは要修正)
+1. ★look-ahead bias: bucket化・completed=pos-1 mapping・reduceat集約が確実に過去のみ参照か。週末ギャップ(bucket id不連続)での正当性。
+2. bit-exact: F15が_ALL_SPECSに無くregister_experimental()のみ・OFFでpool不変か。
+3. NaN/warmup処理・[-1,+1]bounded・ゼロ除算(_EPS)・determinism(numpy vectorized, 非決定要素なし)。
+4. reduceat/searchsorted/unique の edge case (単一bucket・空・全同値)。
+
+# 実装 (directional_generic.py の F15 部)
+```python
+# F15 MTFTrendPullback (TREND_FOLLOW, experimental opt-in / cycle24)
+# ---------------------------------------------------------------------------
+# 上位足 (HTF) トレンド方向 × 下位足 (LTF=M1) プルバックの合成。現 32-primitive は
+# 実質 single-TF (vol/session ゲートはあるが HTF構造×LTFエントリの合成なし)。
+# ★ look-ahead bias 防止 (設計の最重要点):
+#   - HTF バーは timestamp を htf_min 分境界で bucket 化して集約。M1 bar i (bucket B
+#     に属する) は **直近で完全に閉じた bucket (B-1) の HTF 指標のみ** を参照する。
+#     bucket B の集約値は M1 bar i 時点で未確定 (B 内の未来 M1 bar を含む) ため不参照。
+#   - 最初の bucket (B-1 が存在しない) の M1 bar は NaN (= neutral)。
+#   - LTF (ema/atr on M1) は recurrence で過去のみ参照 → 安全。
+#   - 後続 bar 改変で過去 index 不変 (property test で検証)。
+
+
+def _f15_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    o, h, low, c = _bars_to_mid_ohlc(ctx.bars)
+    htf_min = _get_int_param(ctx.params, "htf_min")
+    trend_fast_n = _get_int_param(ctx.params, "trend_fast_n")
+    trend_slow_n = _get_int_param(ctx.params, "trend_slow_n")
+    entry_n = _get_int_param(ctx.params, "entry_n")
+    k_entry = _get_float_param(ctx.params, "k_entry")
+
+    n_bars = len(ctx.bars)
+    out = np.full(n_bars, np.nan, dtype=np.float64)
+    if n_bars == 0:
+        return out
+    if htf_min < 1:
+        htf_min = 1
+
+    # M1 bar を htf_min 分境界で bucket 化 (epoch 分 // htf_min)。bars は時系列昇順
+    # ゆえ bkt は非減少。週末ギャップは bucket id 不連続として自然に扱われる。
+    epoch_min = np.fromiter(
+        (int(b.bar_time.timestamp()) // 60 for b in ctx.bars),
+        dtype=np.int64,
+        count=n_bars,
+    )
+    bkt = epoch_min // int(htf_min)
+
+    # bucket 境界 (各 bucket の最初の M1 index)。uniq は昇順、start_idx は増加列。
+    uniq, start_idx = np.unique(bkt, return_index=True)
+    n_buckets = len(uniq)
+    if n_buckets < 2:
+        # 完全に閉じた HTF bucket が無い → 全 bar neutral(NaN)
+        return out
+
+    # 各 bucket の HTF OHLC を集約 (open=最初, high=max, low=min, close=最後)。
+    end_excl = np.append(start_idx[1:], n_bars)  # 各 bucket の終端 (exclusive)
+    htf_open = o[start_idx]
+    htf_high = np.maximum.reduceat(h, start_idx)
+    htf_low = np.minimum.reduceat(low, start_idx)
+    htf_close = c[end_excl - 1]
+
+    # HTF 指標 (length = n_buckets)。atr の HTF 窓は trend_slow_n を流用 (最小実装)。
+    hf = ema(htf_close, trend_fast_n)
+    hs = ema(htf_close, trend_slow_n)
+    ha = atr(htf_high, htf_low, htf_close, trend_slow_n)
+    htf_trend_raw = (hf - hs) / (ha + _EPS)
+    htf_valid = ~(np.isnan(hf) | np.isnan(hs) | np.isnan(ha))
+
+    # 各 M1 bar の bucket 位置 → 直近確定 bucket (pos-1) の HTF 値を参照 (look-ahead 防止)
+    pos = np.searchsorted(uniq, bkt)  # bkt は uniq の要素ゆえ pos は bucket index
+    completed = pos - 1
+    use = completed >= 0  # 最初の bucket の bar は確定 HTF 無し → NaN
+
+    trend = np.full(n_bars, np.nan, dtype=np.float64)
+    ci = completed[use]
+    cv = htf_valid[ci]
+    rows = np.nonzero(use)[0][cv]
+    trend[rows] = np.tanh(htf_trend_raw[ci[cv]])
+
+    # LTF (M1) プルバック: ema/atr は recurrence で過去のみ参照
+    ema_ltf = ema(c, entry_n)
+    atr_ltf = atr(h, low, c, entry_n)
+    pullback = np.tanh((ema_ltf - c) / (k_entry * atr_ltf + _EPS))
+
+    align = np.maximum(0.0, trend * pullback)
+    res = trend * align
+    mask = np.isnan(trend) | np.isnan(ema_ltf) | np.isnan(atr_ltf)
+    out = np.where(mask, np.nan, res)
+    return out
+
+
+F15_SPEC = PrimitiveSpec(
+    id="F15",
+    name="MTFTrendPullback",
+    category="TREND_FOLLOW",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="htf_min", low=5, high=30, is_int=True, default=15),
+        ParamSpec(name="trend_fast_n", low=2, high=12, is_int=True, default=5),
+        ParamSpec(name="trend_slow_n", low=8, high=36, is_int=True, default=20),
+        ParamSpec(name="entry_n", low=5, high=40, is_int=True, default=14),
+        ParamSpec(name="k_entry", low=0.5, high=3.0, is_int=False, default=1.5),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f15_compute_all),
+    compute_all_bars=_f15_compute_all,
+)
+
+# F15 は experimental (opt-in)。_ALL_SPECS には含めず、flag ON 時のみ
+# register_experimental() で registry に追加 → default OFF で bit-exact (32本)。
+EXPERIMENTAL_SPECS: tuple[PrimitiveSpec, ...] = (F15_SPEC,)
+def register_experimental(): ... (F15をregister_if_absentで追加、opt-in)
+```
+
+# run_ga.py 配線
+```python
+ensure_registered()  # 32本登録
+if getattr(args, "enable_mtf_primitive", False):
+    register_experimental()  # F15追加(opt-in、OFFでは呼ばれない)
+rg_registry = build_random_gen_registry()  # ensure_registered()→list_all()でpool構築
+```
+build_random_gen_registry は内部で ensure_registered()→list_all() でpool構築 (register_experimental前呼びでF15がlist_allに入る)。
+
+# 検証済 (smoke+unit 4 test pass): default registry32(F15なし)/register_experimental→33/bounded[-1,1]/look-ahead不変(過去index後続bar追加で不変、atol1e-12)/compute=compute_all一致。既存102 test無回帰。
+
+簡潔に。Critical指摘(特にlook-ahead)があれば具体修正案。最後に「総合判定: APPROVE / 要修正(Critical N件)」。
+
+codex
+依頼内容（F15 MTFTrendPullback の実装レビュー）を確認しました。まず `directional_generic.py` と `run_ga.py` の実コードを読み、特に look-ahead 防止・opt-in bit-exact・determinism の3点を先に検証します。
+exec
+/bin/zsh -lc "pwd; rg --files | rg 'directional_generic.py|run_ga.py|primitive|registry'" in /Users/ishitoya/repository/zenigame-fx
+ exited 127 in 0ms:
+/Users/ishitoya/repository/zenigame-fx
+zsh:1: command not found: rg
+zsh:1: command not found: rg
+
+codex
+`rg` が環境に無いため、`find`/`grep` で対象ファイルを特定して読みます。続けて該当実装の行番号つき確認に入ります。
+exec
+/bin/zsh -lc "find . -name 'directional_generic.py' -o -name 'run_ga.py'" in /Users/ishitoya/repository/zenigame-fx
+exec
+/bin/zsh -lc "find . -name '*registry*.py' | head -n 40" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 447ms:
+./tests/alpha_factory/primitives/test_registry_evaluator_with_aux.py
+./tests/alpha_factory/test_primitives_registry.py
+./tests/strategy/test_registry.py
+./worktrees/todo-T081/tests/alpha_factory/primitives/test_registry_evaluator_with_aux.py
+./worktrees/todo-T081/tests/alpha_factory/test_primitives_registry.py
+./worktrees/todo-T081/tests/strategy/test_registry.py
+./worktrees/todo-T081/.venv/lib/python3.11/site-packages/mypyc/primitives/registry.py
+./worktrees/todo-T081/.venv/lib/python3.11/site-packages/mypyc/lower/registry.py
+./worktrees/todo-T081/.venv/lib/python3.11/site-packages/sqlalchemy/orm/path_registry.py
+./worktrees/todo-T081/.venv/lib/python3.11/site-packages/sqlalchemy/orm/clsregistry.py
+./worktrees/todo-T081/.venv/lib/python3.11/site-packages/sqlalchemy/event/registry.py
+./worktrees/todo-T081/.venv/lib/python3.11/site-packages/mypy/message_registry.py
+./worktrees/todo-T081/.venv/lib/python3.11/site-packages/numba/core/rewrites/registry.py
+./worktrees/todo-T081/.venv/lib/python3.11/site-packages/numba/core/registry.py
+./worktrees/todo-T081/.venv/lib/python3.11/site-packages/numba/core/datamodel/registry.py
+./worktrees/todo-T081/src/ga/_dummy_registry.py
+./worktrees/todo-T081/src/alpha_factory/primitives/_registry.py
+./worktrees/todo-T081/src/alpha_factory/_registry_bridge.py
+./worktrees/todo-T081/src/strategy/registry.py
+./.venv/lib/python3.11/site-packages/mypyc/primitives/registry.py
+./.venv/lib/python3.11/site-packages/mypyc/lower/registry.py
+./.venv/lib/python3.11/site-packages/sqlalchemy/orm/path_registry.py
+./.venv/lib/python3.11/site-packages/sqlalchemy/orm/clsregistry.py
+./.venv/lib/python3.11/site-packages/sqlalchemy/event/registry.py
+./.venv/lib/python3.11/site-packages/mypy/message_registry.py
+./.venv/lib/python3.11/site-packages/numba/core/rewrites/registry.py
+./.venv/lib/python3.11/site-packages/numba/core/registry.py
+./.venv/lib/python3.11/site-packages/numba/core/datamodel/registry.py
+./src/ga/_dummy_registry.py
+./src/alpha_factory/primitives/_registry.py
+./src/alpha_factory/_registry_bridge.py
+./src/strategy/registry.py
+
+ succeeded in 583ms:
+./worktrees/todo-T081/scripts/alpha_factory/run_ga.py
+./worktrees/todo-T081/src/alpha_factory/primitives/directional_generic.py
+./scripts/alpha_factory/run_ga.py
+./src/alpha_factory/primitives/directional_generic.py
+
+exec
+/bin/zsh -lc "grep -n \"F15\\|_f15_compute_all\\|EXPERIMENTAL_SPECS\\|register_experimental\" -n src/alpha_factory/primitives/directional_generic.py" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+639:# F15 MTFTrendPullback (TREND_FOLLOW, experimental opt-in / cycle24)
+652:def _f15_compute_all(ctx: EvaluationContext) -> np.ndarray:
+720:F15_SPEC = PrimitiveSpec(
+721:    id="F15",
+733:    compute=_make_compute_single(_f15_compute_all),
+734:    compute_all_bars=_f15_compute_all,
+737:# F15 は experimental (opt-in)。_ALL_SPECS には含めず、flag ON 時のみ
+738:# register_experimental() で registry に追加 → default OFF で bit-exact (32本)。
+739:EXPERIMENTAL_SPECS: tuple[PrimitiveSpec, ...] = (F15_SPEC,)
+742:def register_experimental() -> None:
+743:    """experimental primitive (F15 等) を registry に登録する (opt-in、冪等)。
+751:    for spec in EXPERIMENTAL_SPECS:
+
+exec
+/bin/zsh -lc "grep -n \"enable_mtf_primitive\\|register_experimental\\|build_random_gen_registry\\|ensure_registered\" scripts/alpha_factory/run_ga.py" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+51:from src.alpha_factory._registry_bridge import build_random_gen_registry
+109:from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
+399:    # 未指定=OFF で registry 32本のまま (bit-exact)。指定時のみ register_experimental()。
+2213:    ensure_registered()
+2214:    if getattr(args, "enable_mtf_primitive", False):
+2218:            register_experimental,
+2221:        register_experimental()
+2223:    rg_registry = build_random_gen_registry()
+
+codex
+該当箇所の位置は一致していました。次に行番号つきで実装本体を精読し、`searchsorted/unique/reduceat` の境界条件と `run_ga` の登録順序を確認します。
+exec
+/bin/zsh -lc "nl -ba scripts/alpha_factory/run_ga.py | sed -n '2180,2260p'" in /Users/ishitoya/repository/zenigame-fx
+exec
+/bin/zsh -lc "nl -ba src/alpha_factory/primitives/directional_generic.py | sed -n '620,780p'" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+  2180	            note=(
+  2181	                "Phase 2: Stage A fitness_pen (sharpe - alpha*size_norm) を "
+  2182	                "唯一の内部選択指標として使用。CLI/config の fitness_metric "
+  2183	                "値は summary への記録のみで効かない"
+  2184	            ),
+  2185	        )
+  2186	
+  2187	    now = datetime.now(tz=UTC)
+  2188	    run_id = args.run_id or f"run_{now.strftime('%Y%m%d_%H%M%S')}"
+  2189	    run_number = get_latest_run_number() + 1
+  2190	    run_dir = RUN_REPORTS_DIR / f"run-{run_number}"
+  2191	
+  2192	    # T058 PR 5: RunContext 生成 (詳細設計 行 1334-1341)
+  2193	    # 1 Run スコープで固定される runtime context。 archive / report 全
+  2194	    # artifact が同じ source から dataset_epoch_id 等を読む SSOT。
+  2195	    run_context = RunContext(
+  2196	        run_id=run_id,
+  2197	        run_number=run_number,
+  2198	        dataset_epoch_id=dataset_epoch_id,
+  2199	        base_config_hash=compute_base_config_hash(cfg),
+  2200	        instrument=cfg.dataset.instrument,
+  2201	    )
+  2202	
+  2203	    logger.info(
+  2204	        "ga.run.start",
+  2205	        run_id=run_id,
+  2206	        run_number=run_number,
+  2207	        instrument=cfg.dataset.instrument,
+  2208	        population_size=cfg.ga.population_size,
+  2209	        generations=cfg.ga.generations,
+  2210	        dataset_epoch_id=dataset_epoch_id,
+  2211	    )
+  2212	
+  2213	    ensure_registered()
+  2214	    if getattr(args, "enable_mtf_primitive", False):
+  2215	        # cycle24: opt-in で experimental primitive F15 を registry に追加してから
+  2216	        # pool を構築。default(未指定) では呼ばれず registry 32本 = bit-exact。
+  2217	        from src.alpha_factory.primitives.directional_generic import (
+  2218	            register_experimental,
+  2219	        )
+  2220	
+  2221	        register_experimental()
+  2222	        logger.info("run_ga.experimental_primitive.enabled kind=mtf_trend_pullback id=F15")
+  2223	    rg_registry = build_random_gen_registry()
+  2224	
+  2225	    bundle = _load_lane_bars(
+  2226	        cfg.dataset.instrument, cfg.dataset, cfg.stage_windows
+  2227	    )
+  2228	
+  2229	    # T087: Stage Partition Integrity Guard (fail-closed)。
+  2230	    # aux_preflight より前に呼ぶ理由: bars 区間が壊れていれば aux 評価は意味がない。
+  2231	    # 違反時は StagePartitionInputError / StagePartitionLeakError で起動停止。
+  2232	    # T091 cycle_phase1 段階 3 (2026-05-09): B-2 holdout 長検証 + 二重 opt-in escape hatch。
+  2233	    # holdout_short_override = (CLI --allow-holdout-short) AND (env ZENIGAME_FX_SMOKE_TEST=1)
+  2234	    # 両方 set でない場合 holdout 長違反は fail-closed (production 誤発動防止)。
+  2235	    smoke_test_mode = os.environ.get("ZENIGAME_FX_SMOKE_TEST") == "1"
+  2236	    cli_allow_short = bool(getattr(args, "allow_holdout_short", False))
+  2237	    if cli_allow_short and not smoke_test_mode:
+  2238	        raise SystemExit(
+  2239	            "--allow-holdout-short requires ZENIGAME_FX_SMOKE_TEST=1 env var. "
+  2240	            "This double-opt-in prevents accidental production override."
+  2241	        )
+  2242	    holdout_short_override = cli_allow_short and smoke_test_mode
+  2243	    if holdout_short_override:
+  2244	        logger.warning(
+  2245	            "run_ga.holdout_short_override_enabled",
+  2246	            note="smoke test mode: holdout 長違反は WARN のみで継続する",
+  2247	        )
+  2248	    validate_stage_partition(
+  2249	        bundle.bars_stage_a,
+  2250	        bundle.bars_stage_b,
+  2251	        bundle.bars_holdout,
+  2252	        expected_holdout_days=cfg.stage_gate.stage_c_holdout_days,
+  2253	        allow_holdout_short=holdout_short_override,
+  2254	    )
+  2255	    logger.info(
+  2256	        "run_ga.stage_partition_guard.passed",
+  2257	        instrument=cfg.dataset.instrument,
+  2258	        stage_gate_version=STAGE_GATE_VERSION,
+  2259	        expected_holdout_days=cfg.stage_gate.stage_c_holdout_days,
+  2260	        holdout_short_override=holdout_short_override,
+
+ succeeded in 0ms:
+   620	F14_SPEC = PrimitiveSpec(
+   621	    id="F14",
+   622	    name="TrendStrengthRatio",
+   623	    category="NEUTRAL",
+   624	    domain="generic",
+   625	    param_schema=(
+   626	        ParamSpec(name="fast_n", low=5, high=30, is_int=True, default=12),
+   627	        ParamSpec(name="slow_n", low=20, high=100, is_int=True, default=26),
+   628	        ParamSpec(name="rv_n", low=10, high=60, is_int=True, default=20),
+   629	        ParamSpec(name="scale", low=0.5, high=5.0, is_int=False, default=1.0),
+   630	        ParamSpec(name="k_scale", low=1.0, high=5.0, is_int=False, default=2.0),
+   631	    ),
+   632	    required_data=("ohlc",),
+   633	    compute=_make_compute_single(_f14_compute_all),
+   634	    compute_all_bars=_f14_compute_all,
+   635	)
+   636	
+   637	
+   638	# ---------------------------------------------------------------------------
+   639	# F15 MTFTrendPullback (TREND_FOLLOW, experimental opt-in / cycle24)
+   640	# ---------------------------------------------------------------------------
+   641	# 上位足 (HTF) トレンド方向 × 下位足 (LTF=M1) プルバックの合成。現 32-primitive は
+   642	# 実質 single-TF (vol/session ゲートはあるが HTF構造×LTFエントリの合成なし)。
+   643	# ★ look-ahead bias 防止 (設計の最重要点):
+   644	#   - HTF バーは timestamp を htf_min 分境界で bucket 化して集約。M1 bar i (bucket B
+   645	#     に属する) は **直近で完全に閉じた bucket (B-1) の HTF 指標のみ** を参照する。
+   646	#     bucket B の集約値は M1 bar i 時点で未確定 (B 内の未来 M1 bar を含む) ため不参照。
+   647	#   - 最初の bucket (B-1 が存在しない) の M1 bar は NaN (= neutral)。
+   648	#   - LTF (ema/atr on M1) は recurrence で過去のみ参照 → 安全。
+   649	#   - 後続 bar 改変で過去 index 不変 (property test で検証)。
+   650	
+   651	
+   652	def _f15_compute_all(ctx: EvaluationContext) -> np.ndarray:
+   653	    o, h, low, c = _bars_to_mid_ohlc(ctx.bars)
+   654	    htf_min = _get_int_param(ctx.params, "htf_min")
+   655	    trend_fast_n = _get_int_param(ctx.params, "trend_fast_n")
+   656	    trend_slow_n = _get_int_param(ctx.params, "trend_slow_n")
+   657	    entry_n = _get_int_param(ctx.params, "entry_n")
+   658	    k_entry = _get_float_param(ctx.params, "k_entry")
+   659	
+   660	    n_bars = len(ctx.bars)
+   661	    out = np.full(n_bars, np.nan, dtype=np.float64)
+   662	    if n_bars == 0:
+   663	        return out
+   664	    if htf_min < 1:
+   665	        htf_min = 1
+   666	
+   667	    # M1 bar を htf_min 分境界で bucket 化 (epoch 分 // htf_min)。bars は時系列昇順
+   668	    # ゆえ bkt は非減少。週末ギャップは bucket id 不連続として自然に扱われる。
+   669	    epoch_min = np.fromiter(
+   670	        (int(b.bar_time.timestamp()) // 60 for b in ctx.bars),
+   671	        dtype=np.int64,
+   672	        count=n_bars,
+   673	    )
+   674	    bkt = epoch_min // int(htf_min)
+   675	
+   676	    # bucket 境界 (各 bucket の最初の M1 index)。uniq は昇順、start_idx は増加列。
+   677	    uniq, start_idx = np.unique(bkt, return_index=True)
+   678	    n_buckets = len(uniq)
+   679	    if n_buckets < 2:
+   680	        # 完全に閉じた HTF bucket が無い → 全 bar neutral(NaN)
+   681	        return out
+   682	
+   683	    # 各 bucket の HTF OHLC を集約 (open=最初, high=max, low=min, close=最後)。
+   684	    end_excl = np.append(start_idx[1:], n_bars)  # 各 bucket の終端 (exclusive)
+   685	    htf_open = o[start_idx]
+   686	    htf_high = np.maximum.reduceat(h, start_idx)
+   687	    htf_low = np.minimum.reduceat(low, start_idx)
+   688	    htf_close = c[end_excl - 1]
+   689	
+   690	    # HTF 指標 (length = n_buckets)。atr の HTF 窓は trend_slow_n を流用 (最小実装)。
+   691	    hf = ema(htf_close, trend_fast_n)
+   692	    hs = ema(htf_close, trend_slow_n)
+   693	    ha = atr(htf_high, htf_low, htf_close, trend_slow_n)
+   694	    htf_trend_raw = (hf - hs) / (ha + _EPS)
+   695	    htf_valid = ~(np.isnan(hf) | np.isnan(hs) | np.isnan(ha))
+   696	
+   697	    # 各 M1 bar の bucket 位置 → 直近確定 bucket (pos-1) の HTF 値を参照 (look-ahead 防止)
+   698	    pos = np.searchsorted(uniq, bkt)  # bkt は uniq の要素ゆえ pos は bucket index
+   699	    completed = pos - 1
+   700	    use = completed >= 0  # 最初の bucket の bar は確定 HTF 無し → NaN
+   701	
+   702	    trend = np.full(n_bars, np.nan, dtype=np.float64)
+   703	    ci = completed[use]
+   704	    cv = htf_valid[ci]
+   705	    rows = np.nonzero(use)[0][cv]
+   706	    trend[rows] = np.tanh(htf_trend_raw[ci[cv]])
+   707	
+   708	    # LTF (M1) プルバック: ema/atr は recurrence で過去のみ参照
+   709	    ema_ltf = ema(c, entry_n)
+   710	    atr_ltf = atr(h, low, c, entry_n)
+   711	    pullback = np.tanh((ema_ltf - c) / (k_entry * atr_ltf + _EPS))
+   712	
+   713	    align = np.maximum(0.0, trend * pullback)
+   714	    res = trend * align
+   715	    mask = np.isnan(trend) | np.isnan(ema_ltf) | np.isnan(atr_ltf)
+   716	    out = np.where(mask, np.nan, res)
+   717	    return out
+   718	
+   719	
+   720	F15_SPEC = PrimitiveSpec(
+   721	    id="F15",
+   722	    name="MTFTrendPullback",
+   723	    category="TREND_FOLLOW",
+   724	    domain="generic",
+   725	    param_schema=(
+   726	        ParamSpec(name="htf_min", low=5, high=30, is_int=True, default=15),
+   727	        ParamSpec(name="trend_fast_n", low=2, high=12, is_int=True, default=5),
+   728	        ParamSpec(name="trend_slow_n", low=8, high=36, is_int=True, default=20),
+   729	        ParamSpec(name="entry_n", low=5, high=40, is_int=True, default=14),
+   730	        ParamSpec(name="k_entry", low=0.5, high=3.0, is_int=False, default=1.5),
+   731	    ),
+   732	    required_data=("ohlc",),
+   733	    compute=_make_compute_single(_f15_compute_all),
+   734	    compute_all_bars=_f15_compute_all,
+   735	)
+   736	
+   737	# F15 は experimental (opt-in)。_ALL_SPECS には含めず、flag ON 時のみ
+   738	# register_experimental() で registry に追加 → default OFF で bit-exact (32本)。
+   739	EXPERIMENTAL_SPECS: tuple[PrimitiveSpec, ...] = (F15_SPEC,)
+   740	
+   741	
+   742	def register_experimental() -> None:
+   743	    """experimental primitive (F15 等) を registry に登録する (opt-in、冪等)。
+   744	
+   745	    GA entry が ``ga.experimental.mtf_trend_pullback_enabled`` 等の flag ON 時のみ
+   746	    呼ぶ。default path (ensure_registered のみ) では呼ばれず、registry は 32 本の
+   747	    まま = random_gen pool 不変 = bit-exact。
+   748	    """
+   749	    from src.alpha_factory.primitives._registry import register_if_absent
+   750	
+   751	    for spec in EXPERIMENTAL_SPECS:
+   752	        register_if_absent(spec)
+   753	
+   754	
+   755	# ---------------------------------------------------------------------------
+   756	# 登録
+   757	# ---------------------------------------------------------------------------
+   758	
+   759	
+   760	_ALL_SPECS: tuple[PrimitiveSpec, ...] = (
+   761	    F1_SPEC,
+   762	    F2_SPEC,
+   763	    F3_SPEC,
+   764	    F4_SPEC,
+   765	    F5_SPEC,
+   766	    F6_SPEC,
+   767	    F7_SPEC,
+   768	    F8_SPEC,
+   769	    F9_SPEC,
+   770	    F10_SPEC,
+   771	    F11_SPEC,
+   772	    F12_SPEC,
+   773	    F13_SPEC,
+   774	    F14_SPEC,
+   775	)
+   776	
+   777	
+   778	def ensure_registered() -> None:
+   779	    """14 primitive を registry に登録する。冪等（既登録はスキップ）。
+   780	
+
+exec
+/bin/zsh -lc "nl -ba src/alpha_factory/_registry_bridge.py | sed -n '1,220p'" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+     1	"""``src.ga.random_gen`` 用 primitive registry bridge (T018).
+     2	
+     3	``src.alpha_factory.primitives._registry`` (完全 PrimitiveSpec + ComputeFn) を
+     4	``src.ga.random_gen.PrimitiveRegistry`` (``{id -> random_gen.PrimitiveSpec}``)
+     5	に変換する。Category は :func:`slot_from_category` (SSOT) を経由して
+     6	directional / modulator に射影する (R2: 将来 category 追加時のドリフト防止)。
+     7	"""
+     8	
+     9	from __future__ import annotations
+    10	
+    11	from typing import Literal
+    12	
+    13	from src.alpha_factory.primitives._base import (
+    14	    ParamSpec,
+    15	    slot_from_category,
+    16	)
+    17	from src.alpha_factory.primitives._base import (
+    18	    PrimitiveCategory as _FullCategory,
+    19	)
+    20	from src.alpha_factory.primitives._registry import (
+    21	    ensure_registered,
+    22	    list_all,
+    23	)
+    24	from src.ga.random_gen import ParamRange
+    25	from src.ga.random_gen import PrimitiveSpec as RandomGenSpec
+    26	
+    27	__all__ = ["build_random_gen_registry"]
+    28	
+    29	
+    30	def _category_to_random_gen(
+    31	    cat: _FullCategory,
+    32	) -> Literal["directional", "modulator"]:
+    33	    """primitives ``PrimitiveCategory`` を ``random_gen`` の 2 値 category に
+    34	    射影する。SSOT の ``slot_from_category`` を経由する。"""
+    35	    slot = slot_from_category(cat)  # "directional" | "local_gate"
+    36	    return "modulator" if slot == "local_gate" else "directional"
+    37	
+    38	
+    39	def _param_spec_to_range(p: ParamSpec) -> ParamRange:
+    40	    if p.is_int:
+    41	        return (int(p.low), int(p.high))
+    42	    return (float(p.low), float(p.high))
+    43	
+    44	
+    45	def build_random_gen_registry() -> dict[str, RandomGenSpec]:
+    46	    """``ensure_registered()`` 後の full registry を ``random_gen`` 用に変換する。
+    47	
+    48	    Returns:
+    49	        ``{primitive_id -> RandomGenSpec}`` (random_gen が期待する
+    50	        ``PrimitiveRegistry`` と互換)。
+    51	    """
+    52	    ensure_registered()
+    53	    out: dict[str, RandomGenSpec] = {}
+    54	    for spec in list_all():
+    55	        out[spec.id] = RandomGenSpec(
+    56	            id=spec.id,
+    57	            category=_category_to_random_gen(spec.category),
+    58	            domain=spec.domain,
+    59	            param_schema={
+    60	                p.name: _param_spec_to_range(p) for p in spec.param_schema
+    61	            },
+    62	        )
+    63	    return out
+
+exec
+/bin/zsh -lc "nl -ba src/alpha_factory/primitives/_registry.py | sed -n '1,260p'" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+     1	"""primitives-registry の登録・取得 API（T010 骨格）。
+     2	
+     3	registry は module-level dict。本 TODO では空のまま。
+     4	後続 primitive 実装 TODO で register されて埋まる。
+     5	
+     6	並行性方針:
+     7	    本 registry は bootstrap 段階（プロセス起動直後の ensure_registered()）で
+     8	    書込が完了し、以降は read-only となる想定。ただし import 順序や
+     9	    テスト並列実行（pytest-xdist 等）で register/clear が多重呼び出しされる
+    10	    可能性を吸収するため、write 操作 (register / clear) は threading.Lock で
+    11	    保護する。read 操作 (get_primitive / list_*) はロックしない
+    12	    （CPython の dict は原子操作が多く、bootstrap 後は変更されない前提）。
+    13	
+    14	Bootstrap 方針:
+    15	    production path (GA entry) から ensure_registered() を明示的に呼ぶ。
+    16	    副作用 import 単独には依存しない（登録漏れ検出のため）。
+    17	"""
+    18	
+    19	from __future__ import annotations
+    20	
+    21	import threading
+    22	
+    23	from src.alpha_factory.primitives._base import (
+    24	    PrimitiveCategory,
+    25	    PrimitiveDomain,
+    26	    PrimitiveSpec,
+    27	    validate_primitive_spec,
+    28	)
+    29	
+    30	_PRIMITIVES: dict[str, PrimitiveSpec] = {}
+    31	_LOCK = threading.Lock()
+    32	
+    33	
+    34	def register(spec: PrimitiveSpec) -> None:
+    35	    """PrimitiveSpec を registry に登録する。
+    36	
+    37	    登録前に validate_primitive_spec で不変条件を検証する
+    38	    （required_data の canonical naming、param_schema 重複名、low/high/default
+    39	    整合など）。
+    40	
+    41	    Raises:
+    42	        ValueError: 同じ id が既に登録されている、あるいは spec が不変条件違反。
+    43	                    silent override は許さない。
+    44	    """
+    45	    validate_primitive_spec(spec)
+    46	    with _LOCK:
+    47	        if spec.id in _PRIMITIVES:
+    48	            raise ValueError(f"primitive {spec.id!r} already registered")
+    49	        _PRIMITIVES[spec.id] = spec
+    50	
+    51	
+    52	def register_if_absent(spec: PrimitiveSpec) -> bool:
+    53	    """原子的に登録する。既登録なら False、新規登録なら True を返す。
+    54	
+    55	    T011 の ensure_registered で冪等かつ並行安全な登録パスを提供するため追加。
+    56	    `try get_primitive / except KeyError: register` は非原子的で、並行時に
+    57	    `register` 側 `ValueError` を引き起こすため、本関数で lock 内に存在確認＋
+    58	    登録を atomic に閉じ込める。
+    59	
+    60	    Notes:
+    61	        validate_primitive_spec は既存チェック前に呼ぶ。新規 spec の健全性は
+    62	        常に検証する（既存 id でも spec 側が壊れていれば silent skip せず fail する）。
+    63	
+    64	    Raises:
+    65	        ValueError: spec が不変条件違反。
+    66	    """
+    67	    validate_primitive_spec(spec)
+    68	    with _LOCK:
+    69	        if spec.id in _PRIMITIVES:
+    70	            return False
+    71	        _PRIMITIVES[spec.id] = spec
+    72	        return True
+    73	
+    74	
+    75	def get_primitive(primitive_id: str) -> PrimitiveSpec:
+    76	    """id で PrimitiveSpec を取得する。
+    77	
+    78	    Raises:
+    79	        KeyError: id が未登録の場合。
+    80	    """
+    81	    if primitive_id not in _PRIMITIVES:
+    82	        raise KeyError(f"primitive {primitive_id!r} not in registry")
+    83	    return _PRIMITIVES[primitive_id]
+    84	
+    85	
+    86	def list_all() -> tuple[PrimitiveSpec, ...]:
+    87	    """全 PrimitiveSpec を登録順（dict 挿入順）で返す。"""
+    88	    return tuple(_PRIMITIVES.values())
+    89	
+    90	
+    91	def list_by_category(
+    92	    category: PrimitiveCategory,
+    93	) -> tuple[PrimitiveSpec, ...]:
+    94	    """指定 category の PrimitiveSpec を登録順で返す。"""
+    95	    return tuple(
+    96	        spec for spec in _PRIMITIVES.values() if spec.category == category
+    97	    )
+    98	
+    99	
+   100	def list_by_domain(
+   101	    domain: PrimitiveDomain,
+   102	) -> tuple[PrimitiveSpec, ...]:
+   103	    """指定 domain の PrimitiveSpec を登録順で返す。"""
+   104	    return tuple(
+   105	        spec for spec in _PRIMITIVES.values() if spec.domain == domain
+   106	    )
+   107	
+   108	
+   109	def clear() -> None:
+   110	    """registry を空にする（テスト用）。
+   111	
+   112	    本番 path では呼ばない。tests 内の fixture などで isolation のために使う。
+   113	    """
+   114	    with _LOCK:
+   115	        _PRIMITIVES.clear()
+   116	
+   117	
+   118	def ensure_registered() -> None:
+   119	    """primitive モジュールの明示的 bootstrap 関数。
+   120	
+   121	    T011 で `directional_generic` の 14 primitive、T012 で `modulator_generic`
+   122	    の 6 primitive (M1-M6)、T013 で `pair_specific` の 12 primitive (P1-P12) を
+   123	    登録する（合計 32）。
+   124	    冪等（複数回呼んでも 2 回目以降は既登録 spec は register_if_absent で skip）。
+   125	    並行呼び出しに対しては register_if_absent 内部 Lock で安全。
+   126	
+   127	    production path (GA entry) から明示的に 1 回呼ぶ規約。
+   128	    """
+   129	    # 遅延 import（循環回避）。_base.py は触らずに実装モジュールだけ呼ぶ。
+   130	    from src.alpha_factory.primitives.directional_generic import (
+   131	        ensure_registered as _reg_directional_generic,
+   132	    )
+   133	    from src.alpha_factory.primitives.modulator_generic import (
+   134	        ensure_registered as _reg_modulator_generic,
+   135	    )
+   136	    from src.alpha_factory.primitives.pair_specific import (
+   137	        ensure_registered as _reg_pair_specific,
+   138	    )
+   139	
+   140	    _reg_directional_generic()
+   141	    _reg_modulator_generic()
+   142	    _reg_pair_specific()
+
+exec
+/bin/zsh -lc "nl -ba src/alpha_factory/primitives/directional_generic.py | sed -n '778,860p'" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+   778	def ensure_registered() -> None:
+   779	    """14 primitive を registry に登録する。冪等（既登録はスキップ）。
+   780	
+   781	    並行安全性: `_registry.register_if_absent` を使い、lock 内で存在確認＋登録を
+   782	    atomic に行う。
+   783	    """
+   784	    from src.alpha_factory.primitives._registry import register_if_absent
+   785	
+   786	    for spec in _ALL_SPECS:
+   787	        register_if_absent(spec)
+   788	
+   789	
+   790	def all_specs() -> tuple[PrimitiveSpec, ...]:
+   791	    """14 primitive の PrimitiveSpec タプルを返す（テスト/インスペクション用）。"""
+   792	    return _ALL_SPECS
+   793	
+   794	
+   795	# ---------------------------------------------------------------------------
+   796	# Public re-export（category 別）
+   797	# ---------------------------------------------------------------------------
+   798	
+   799	TREND_FOLLOW_SPECS: tuple[PrimitiveSpec, ...] = (
+   800	    F1_SPEC,
+   801	    F2_SPEC,
+   802	    F3_SPEC,
+   803	    F4_SPEC,
+   804	    F5_SPEC,
+   805	    F6_SPEC,
+   806	)
+   807	MEAN_REVERT_SPECS: tuple[PrimitiveSpec, ...] = (
+   808	    F7_SPEC,
+   809	    F8_SPEC,
+   810	    F9_SPEC,
+   811	    F10_SPEC,
+   812	    F11_SPEC,
+   813	)
+   814	NEUTRAL_SPECS: tuple[PrimitiveSpec, ...] = (F12_SPEC, F13_SPEC, F14_SPEC)
+   815	
+   816	
+   817	def category_counts() -> dict[PrimitiveCategory, int]:
+   818	    """**directional_generic モジュール固有の内訳カウント** (F1-F14 のみ)。
+   819	
+   820	    本関数は registry 全体の集計ではなく、本モジュール (T011) で定義された
+   821	    14 primitive の category 内訳を返す。"MODULATOR": 0 は「本モジュール内に
+   822	    MODULATOR は無い」の意であり、registry 全体に MODULATOR が無い意味ではない。
+   823	
+   824	    Registry 全体の category 別 count を取りたい場合は
+   825	    `_registry.list_by_category(category)` を使うこと（T012 modulator_generic
+   826	    で M1-M6 が登録される）。
+   827	    """
+   828	    return {
+   829	        "TREND_FOLLOW": len(TREND_FOLLOW_SPECS),
+   830	        "MEAN_REVERT": len(MEAN_REVERT_SPECS),
+   831	        "NEUTRAL": len(NEUTRAL_SPECS),
+   832	        "MODULATOR": 0,
+   833	    }
+
+codex
+コード本体は確認できました。次に、F15向けテスト（look-ahead不変・registry32/33・bounded）を読み、主張どおりのカバレッジかを検証します。
+exec
+/bin/zsh -lc "find tests -type f | grep -E 'f15|mtf|directional_generic|registry|experimental'" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+tests/alpha_factory/__pycache__/test_primitives_registry.cpython-311-pytest-9.0.3.pyc
+tests/alpha_factory/primitives/test_registry_evaluator_with_aux.py
+tests/alpha_factory/primitives/__pycache__/test_directional_generic.cpython-311-pytest-9.0.3.pyc
+tests/alpha_factory/primitives/__pycache__/test_registry_evaluator_with_aux.cpython-311-pytest-9.0.3.pyc
+tests/alpha_factory/primitives/test_directional_generic.py
+tests/alpha_factory/test_primitives_registry.py
+tests/strategy/test_registry.py
+tests/strategy/__pycache__/test_registry.cpython-311-pytest-9.0.3.pyc
+
+exec
+/bin/zsh -lc "nl -ba tests/alpha_factory/primitives/test_directional_generic.py | sed -n '1,280p'" in /Users/ishitoya/repository/zenigame-fx
+exec
+/bin/zsh -lc "grep -n \"F15\\|register_experimental\\|enable_mtf_primitive\\|look-ahead\\|look_ahead\\|bounded\\|33\\|32\" tests/alpha_factory/primitives/test_directional_generic.py" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+5:- 出力 bounded 確認
+6:- look-ahead bias property（後続バー改変で過去 index 不変）
+212:    def test_output_bounded(self, spec):
+442:# F15 MTFTrendPullback (experimental opt-in, cycle24)
+446:class TestF15MTFTrendPullback:
+457:        """default(ensure_registered のみ)で F15 は registry に無い=既存32本(bit-exact)."""
+460:            register_experimental,
+466:        assert "F15" not in ids
+467:        assert len(ids) == 32
+468:        register_experimental()
+470:        assert "F15" in ids2
+471:        assert len(ids2) == 33
+476:    def test_output_bounded(self):
+477:        from src.alpha_factory.primitives.directional_generic import F15_SPEC
+483:        arr = F15_SPEC.compute_all_bars(ctx)
+489:    def test_no_look_ahead(self):
+490:        """後続 bar 追加で過去 index の値が不変 (look-ahead bias なし)."""
+491:        from src.alpha_factory.primitives.directional_generic import F15_SPEC
+495:        arr1 = F15_SPEC.compute_all_bars(
+501:        arr2 = F15_SPEC.compute_all_bars(
+508:        from src.alpha_factory.primitives.directional_generic import F15_SPEC
+512:        arr = F15_SPEC.compute_all_bars(
+515:        single = F15_SPEC.compute(
+
+ succeeded in 0ms:
+     1	"""T011 directional primitive 14 個の単体テスト。
+     2	
+     3	- 各 primitive の registry 登録確認
+     4	- compute と compute_all_bars の一致
+     5	- 出力 bounded 確認
+     6	- look-ahead bias property（後続バー改変で過去 index 不変）
+     7	- 既知入力での期待値一致
+     8	"""
+     9	
+    10	from __future__ import annotations
+    11	
+    12	from datetime import UTC, datetime, timedelta
+    13	from decimal import Decimal
+    14	
+    15	import numpy as np
+    16	import pytest
+    17	
+    18	from src.alpha_factory.primitives import (
+    19	    EvaluationContext,
+    20	    PrimitiveSpec,
+    21	    clear,
+    22	    ensure_registered,
+    23	    get_primitive,
+    24	    list_all,
+    25	    list_by_category,
+    26	    list_by_domain,
+    27	)
+    28	from src.alpha_factory.primitives._indicators import (
+    29	    adx,
+    30	    atr,
+    31	    ema,
+    32	    zscore,
+    33	)
+    34	from src.alpha_factory.primitives.directional_generic import (
+    35	    F1_SPEC,
+    36	    F2_SPEC,
+    37	    F3_SPEC,
+    38	    F4_SPEC,
+    39	    F5_SPEC,
+    40	    F6_SPEC,
+    41	    F7_SPEC,
+    42	    F8_SPEC,
+    43	    F9_SPEC,
+    44	    F10_SPEC,
+    45	    F11_SPEC,
+    46	    F12_SPEC,
+    47	    F13_SPEC,
+    48	    F14_SPEC,
+    49	    MEAN_REVERT_SPECS,
+    50	    NEUTRAL_SPECS,
+    51	    TREND_FOLLOW_SPECS,
+    52	    all_specs,
+    53	)
+    54	from src.domain.price import Ohlc, PriceBar
+    55	
+    56	# ---------------------------------------------------------------------------
+    57	# Fixtures / helpers
+    58	# ---------------------------------------------------------------------------
+    59	
+    60	
+    61	@pytest.fixture(autouse=True)
+    62	def _registry_isolation():
+    63	    clear()
+    64	    ensure_registered()
+    65	    yield
+    66	    clear()
+    67	
+    68	
+    69	def _build_bars(
+    70	    n: int,
+    71	    *,
+    72	    seed: int = 42,
+    73	    start_price: float = 100.0,
+    74	    volatility: float = 0.5,
+    75	    base_time: datetime | None = None,
+    76	    step: timedelta = timedelta(hours=1),
+    77	) -> list[PriceBar]:
+    78	    """ランダムウォーク bars を生成（bid = ask、スプレッド 0）。"""
+    79	    rng = np.random.default_rng(seed)
+    80	    if base_time is None:
+    81	        base_time = datetime(2026, 1, 1, 0, tzinfo=UTC)
+    82	    prices = [start_price]
+    83	    for _ in range(n):
+    84	        prices.append(prices[-1] + rng.normal(0, volatility))
+    85	    bars: list[PriceBar] = []
+    86	    for i in range(n):
+    87	        o = prices[i]
+    88	        c = prices[i + 1]
+    89	        hi = max(o, c) + abs(rng.normal(0, 0.1))
+    90	        lo = min(o, c) - abs(rng.normal(0, 0.1))
+    91	        ohlc = Ohlc(
+    92	            open=Decimal(str(o)),
+    93	            high=Decimal(str(hi)),
+    94	            low=Decimal(str(lo)),
+    95	            close=Decimal(str(c)),
+    96	        )
+    97	        bars.append(
+    98	            PriceBar(
+    99	                pair_name="EUR_USD",
+   100	                bar_time=base_time + step * i,
+   101	                bid=ohlc,
+   102	                ask=ohlc,
+   103	                volume=1000,
+   104	                complete=True,
+   105	            )
+   106	        )
+   107	    return bars
+   108	
+   109	
+   110	def _default_params(spec: PrimitiveSpec) -> dict:
+   111	    params: dict = {}
+   112	    for p in spec.param_schema:
+   113	        if p.default is not None:
+   114	            params[p.name] = int(p.default) if p.is_int else float(p.default)
+   115	        else:
+   116	            params[p.name] = int(p.low) if p.is_int else float(p.low)
+   117	    return params
+   118	
+   119	
+   120	def _ctx(bars, idx: int, spec: PrimitiveSpec) -> EvaluationContext:
+   121	    return EvaluationContext(
+   122	        bars=bars,
+   123	        idx=idx,
+   124	        pair="EUR_USD",
+   125	        params=_default_params(spec),
+   126	    )
+   127	
+   128	
+   129	ALL_SPECS = (
+   130	    F1_SPEC, F2_SPEC, F3_SPEC, F4_SPEC, F5_SPEC, F6_SPEC,
+   131	    F7_SPEC, F8_SPEC, F9_SPEC, F10_SPEC, F11_SPEC,
+   132	    F12_SPEC, F13_SPEC, F14_SPEC,
+   133	)
+   134	
+   135	
+   136	# ---------------------------------------------------------------------------
+   137	# Registry 集計
+   138	# ---------------------------------------------------------------------------
+   139	
+   140	
+   141	class TestRegistryIntegration:
+   142	    def test_all_14_directional_registered(self):
+   143	        # T012 で modulator (M1-M6) も同時登録される (合計 20)。
+   144	        # 本テストでは directional 14 が含まれることのみ verify。
+   145	        specs = list_all()
+   146	        ids = {s.id for s in specs}
+   147	        directional_ids = {f"F{i}" for i in range(1, 15)}
+   148	        assert directional_ids.issubset(ids)
+   149	
+   150	    def test_category_counts(self):
+   151	        # T013 で pair_specific も追加: TREND_FOLLOW (6+P1+P4+P7+P8+P9+P12=12),
+   152	        # MEAN_REVERT (5+P2+P3+P5=8), NEUTRAL (3), MODULATOR (6+P6+P10+P11=9)
+   153	        # 既存 generic 内訳を IDs 集合で verify (count を hard-code しない)
+   154	        f_trend = {"F1", "F2", "F3", "F4", "F5", "F6"}
+   155	        trend_ids = {s.id for s in list_by_category("TREND_FOLLOW")}
+   156	        assert f_trend.issubset(trend_ids)
+   157	        f_revert = {"F7", "F8", "F9", "F10", "F11"}
+   158	        revert_ids = {s.id for s in list_by_category("MEAN_REVERT")}
+   159	        assert f_revert.issubset(revert_ids)
+   160	        f_neutral = {"F12", "F13", "F14"}
+   161	        neutral_ids = {s.id for s in list_by_category("NEUTRAL")}
+   162	        assert f_neutral == neutral_ids  # NEUTRAL は F のみ
+   163	        m_mod = {f"M{i}" for i in range(1, 7)}
+   164	        mod_ids = {s.id for s in list_by_category("MODULATOR")}
+   165	        assert m_mod.issubset(mod_ids)
+   166	
+   167	    def test_all_generic_domain(self):
+   168	        # T012 で modulator 6 を generic に追加 → 合計 20
+   169	        # T013 で pair_specific 12 を追加 (generic はそのまま)
+   170	        generic_ids = {s.id for s in list_by_domain("generic")}
+   171	        expected_generic = {f"F{i}" for i in range(1, 15)} | {
+   172	            f"M{i}" for i in range(1, 7)
+   173	        }
+   174	        assert generic_ids == expected_generic
+   175	        # pair_specific 件数は本テストでは緩く確認 (T013 後 12 個)
+   176	        pair_specific_ids = {s.id for s in list_by_domain("pair_specific")}
+   177	        # T013 後 P1-P12 が含まれる (本テストファイルは pair_specific 詳細を持たない)
+   178	        for pid in (f"P{i}" for i in range(1, 13)):
+   179	            assert pid in pair_specific_ids
+   180	
+   181	    def test_each_id_retrievable(self):
+   182	        for i in range(1, 15):
+   183	            spec = get_primitive(f"F{i}")
+   184	            assert spec.id == f"F{i}"
+   185	
+   186	    def test_module_level_spec_tuples_consistent(self):
+   187	        assert all_specs() == ALL_SPECS
+   188	        assert ALL_SPECS[0:6] == TREND_FOLLOW_SPECS
+   189	        assert ALL_SPECS[6:11] == MEAN_REVERT_SPECS
+   190	        assert ALL_SPECS[11:14] == NEUTRAL_SPECS
+   191	
+   192	
+   193	# ---------------------------------------------------------------------------
+   194	# 14 個共通テスト（parametrize）
+   195	# ---------------------------------------------------------------------------
+   196	
+   197	
+   198	@pytest.mark.parametrize("spec", ALL_SPECS, ids=[s.id for s in ALL_SPECS])
+   199	class TestEachPrimitiveCommon:
+   200	    def test_compute_matches_compute_all_bars(self, spec):
+   201	        bars = _build_bars(120, seed=1)
+   202	        arr = spec.compute_all_bars(_ctx(bars, 100, spec))
+   203	        for idx in (50, 80, 119):
+   204	            val_single = spec.compute(_ctx(bars, idx, spec))
+   205	            val_all = arr[idx]
+   206	            if np.isnan(val_all):
+   207	                # compute は nan を 0.0 に吸収
+   208	                assert val_single == 0.0
+   209	            else:
+   210	                assert val_single == pytest.approx(float(val_all), abs=1e-12)
+   211	
+   212	    def test_output_bounded(self, spec):
+   213	        bars = _build_bars(150, seed=2)
+   214	        arr = spec.compute_all_bars(_ctx(bars, 149, spec))
+   215	        valid = arr[~np.isnan(arr)]
+   216	        assert np.all(valid >= -1.0 - 1e-9)
+   217	        assert np.all(valid <= 1.0 + 1e-9)
+   218	
+   219	    def test_no_lookahead_property(self, spec):
+   220	        """bars[k+1:] を改変しても compute_all_bars(bars')[:k+1] は不変。"""
+   221	        bars_orig = _build_bars(120, seed=3)
+   222	        k = 60
+   223	        ctx_orig = _ctx(bars_orig, 119, spec)
+   224	        result_orig = spec.compute_all_bars(ctx_orig)
+   225	
+   226	        # 後続バーを別 seed で置換
+   227	        bars_replacement = _build_bars(120 - (k + 1), seed=999)
+   228	        bars_mod = list(bars_orig[: k + 1]) + list(bars_replacement)
+   229	        # bar_time は連続性を保つため、元の時刻を再利用
+   230	        bars_mod_fixed: list[PriceBar] = []
+   231	        for i, b in enumerate(bars_mod):
+   232	            bars_mod_fixed.append(
+   233	                PriceBar(
+   234	                    pair_name=b.pair_name,
+   235	                    bar_time=bars_orig[i].bar_time,
+   236	                    bid=b.bid,
+   237	                    ask=b.ask,
+   238	                    volume=b.volume,
+   239	                    complete=b.complete,
+   240	                )
+   241	            )
+   242	        ctx_mod = _ctx(bars_mod_fixed, 119, spec)
+   243	        result_mod = spec.compute_all_bars(ctx_mod)
+   244	
+   245	        # 先頭 k+1 バーの値は不変（NaN は NaN のままで一致）
+   246	        np.testing.assert_allclose(
+   247	            result_orig[: k + 1],
+   248	            result_mod[: k + 1],
+   249	            equal_nan=True,
+   250	            atol=1e-10,
+   251	        )
+   252	
+   253	    def test_warmup_returns_nan_in_array(self, spec):
+   254	        bars = _build_bars(40, seed=4)
+   255	        arr = spec.compute_all_bars(_ctx(bars, 39, spec))
+   256	        # 先頭 1 index は必ず NaN（warmup）
+   257	        assert np.isnan(arr[0]) or np.isfinite(arr[0])  # F6 は session 外で 0 になりうる
+   258	        # 少なくとも 1 index は NaN のはず（どの primitive も warmup > 0）
+   259	        # F6 は 0 を返すので除外（session 外は 0）
+   260	        if spec.id != "F6":
+   261	            assert np.any(np.isnan(arr))
+   262	
+   263	
+   264	# ---------------------------------------------------------------------------
+   265	# primitive 個別: 期待値一致
+   266	# ---------------------------------------------------------------------------
+   267	
+   268	
+   269	def _mid_close_arr(bars) -> np.ndarray:
+   270	    return np.array(
+   271	        [(float(b.bid.close) + float(b.ask.close)) * 0.5 for b in bars]
+   272	    )
+   273	
+   274	
+   275	def _mid_hl_arrays(bars) -> tuple[np.ndarray, np.ndarray]:
+   276	    h = np.array(
+   277	        [(float(b.bid.high) + float(b.ask.high)) * 0.5 for b in bars]
+   278	    )
+   279	    low = np.array(
+   280	        [(float(b.bid.low) + float(b.ask.low)) * 0.5 for b in bars]
+
+exec
+/bin/zsh -lc "grep -n \"experimental\\|F15\\|32\\|33\\|enable_mtf_primitive\" tests/alpha_factory/test_primitives_registry.py tests/strategy/test_registry.py tests/alpha_factory/primitives/test_registry_evaluator_with_aux.py" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+tests/alpha_factory/test_primitives_registry.py:237:        # (M1-M6)、T013 で pair_specific 12 (P1-P12)。合計 32 が登録される。
+tests/alpha_factory/test_primitives_registry.py:247:        assert len(specs) == 32
+
+exec
+/bin/zsh -lc "nl -ba tests/alpha_factory/primitives/test_directional_generic.py | sed -n '430,560p'" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+   430	        from src.dsl.genome import SignalConfig
+   431	
+   432	        bars = _build_bars(100, seed=22)
+   433	        ev = RegistryEvaluator(pair="EUR_USD")
+   434	        for spec in ALL_SPECS:
+   435	            sig = SignalConfig(name=spec.id, weight=1.0, params=_default_params(spec))
+   436	            val = ev.evaluate(bars, 90, sig)
+   437	            assert isinstance(val, float)
+   438	            assert -1.0 - 1e-9 <= val <= 1.0 + 1e-9
+   439	
+   440	
+   441	# ---------------------------------------------------------------------------
+   442	# F15 MTFTrendPullback (experimental opt-in, cycle24)
+   443	# ---------------------------------------------------------------------------
+   444	
+   445	
+   446	class TestF15MTFTrendPullback:
+   447	    def _f15_params(self) -> dict:
+   448	        return {
+   449	            "htf_min": 15,
+   450	            "trend_fast_n": 5,
+   451	            "trend_slow_n": 20,
+   452	            "entry_n": 14,
+   453	            "k_entry": 1.5,
+   454	        }
+   455	
+   456	    def test_not_in_default_registry_bit_exact(self):
+   457	        """default(ensure_registered のみ)で F15 は registry に無い=既存32本(bit-exact)."""
+   458	        from src.alpha_factory.primitives import _registry as R
+   459	        from src.alpha_factory.primitives.directional_generic import (
+   460	            register_experimental,
+   461	        )
+   462	
+   463	        R.clear()
+   464	        R.ensure_registered()
+   465	        ids = {s.id for s in R.list_all()}
+   466	        assert "F15" not in ids
+   467	        assert len(ids) == 32
+   468	        register_experimental()
+   469	        ids2 = {s.id for s in R.list_all()}
+   470	        assert "F15" in ids2
+   471	        assert len(ids2) == 33
+   472	        # cleanup: 後続テストへ漏らさない
+   473	        R.clear()
+   474	        R.ensure_registered()
+   475	
+   476	    def test_output_bounded(self):
+   477	        from src.alpha_factory.primitives.directional_generic import F15_SPEC
+   478	
+   479	        bars = _build_bars(600, seed=7, step=timedelta(minutes=1))
+   480	        ctx = EvaluationContext(
+   481	            bars=bars, idx=599, pair="EUR_USD", params=self._f15_params()
+   482	        )
+   483	        arr = F15_SPEC.compute_all_bars(ctx)
+   484	        valid = arr[np.isfinite(arr)]
+   485	        assert len(valid) > 0
+   486	        assert np.all(valid >= -1.0 - 1e-9)
+   487	        assert np.all(valid <= 1.0 + 1e-9)
+   488	
+   489	    def test_no_look_ahead(self):
+   490	        """後続 bar 追加で過去 index の値が不変 (look-ahead bias なし)."""
+   491	        from src.alpha_factory.primitives.directional_generic import F15_SPEC
+   492	
+   493	        bars = _build_bars(600, seed=8, step=timedelta(minutes=1))
+   494	        p = self._f15_params()
+   495	        arr1 = F15_SPEC.compute_all_bars(
+   496	            EvaluationContext(bars=bars, idx=599, pair="EUR_USD", params=p)
+   497	        )
+   498	        # 極端な未来 bar を 5 本追加
+   499	        extra = _build_bars(5, seed=999, step=timedelta(minutes=1),
+   500	                            base_time=bars[-1].bar_time + timedelta(minutes=1))
+   501	        arr2 = F15_SPEC.compute_all_bars(
+   502	            EvaluationContext(bars=bars + extra, idx=604, pair="EUR_USD", params=p)
+   503	        )
+   504	        m = np.isfinite(arr1)
+   505	        assert np.allclose(arr1[m], arr2[: len(arr1)][m], atol=1e-12)
+   506	
+   507	    def test_compute_matches_compute_all_bars(self):
+   508	        from src.alpha_factory.primitives.directional_generic import F15_SPEC
+   509	
+   510	        bars = _build_bars(400, seed=9, step=timedelta(minutes=1))
+   511	        p = self._f15_params()
+   512	        arr = F15_SPEC.compute_all_bars(
+   513	            EvaluationContext(bars=bars, idx=399, pair="EUR_USD", params=p)
+   514	        )
+   515	        single = F15_SPEC.compute(
+   516	            EvaluationContext(bars=bars, idx=399, pair="EUR_USD", params=p)
+   517	        )
+   518	        expected = 0.0 if not np.isfinite(arr[399]) else float(arr[399])
+   519	        assert abs(single - expected) < 1e-12
+
+exec
+/bin/zsh -lc "nl -ba scripts/alpha_factory/run_ga.py | sed -n '340,450p'" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+   340	    """fitness float → Decimal 互換文字列 (非有限値は '0' 固定).
+   341	
+   342	    ``Decimal(str(val)).normalize()`` で trailing zero を落とす
+   343	    (e.g. "0.0" → "0", "1.50" → "1.5")。
+   344	    """
+   345	    val, finite = _safe_finite(x)
+   346	    if not finite:
+   347	        return "0"
+   348	    # -0.0 は 0.0 に正規化 (符号 flip で文字列の一貫性を保つ)
+   349	    if val == 0.0:
+   350	        val = 0.0
+   351	    d = Decimal(str(val)).normalize()
+   352	    # 指数表記 (E+N) を避けて固定小数点形式にする
+   353	    s = f"{d:f}" if "E" in f"{d}" else str(d)
+   354	    # trailing zero の残りを除去
+   355	    if "." in s:
+   356	        s = s.rstrip("0").rstrip(".")
+   357	    # "-0" を "0" に
+   358	    if s in ("", "-0", "-"):
+   359	        return "0"
+   360	    return s
+   361	
+   362	
+   363	# ---------------------------------------------------------------------------
+   364	# CLI / config
+   365	# ---------------------------------------------------------------------------
+   366	
+   367	
+   368	def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+   369	    p = argparse.ArgumentParser(
+   370	        description="Alpha Factory GA run (Phase 2 integration)"
+   371	    )
+   372	    p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+   373	    p.add_argument("--run-id", default=None)
+   374	    p.add_argument("--instrument", default=None)
+   375	    p.add_argument("--start", default=None)
+   376	    p.add_argument("--end", default=None)
+   377	    p.add_argument("--population-size", type=int, default=None)
+   378	    p.add_argument("--generations", type=int, default=None)
+   379	    p.add_argument("--mutation-rate", type=float, default=None)
+   380	    p.add_argument("--crossover-rate", type=float, default=None)
+   381	    p.add_argument("--tournament-size", type=int, default=None)
+   382	    p.add_argument("--elite-count", type=int, default=None)
+   383	    p.add_argument("--max-depth", type=int, default=None)
+   384	    p.add_argument(
+   385	        "--fitness-metric",
+   386	        choices=["total_pnl", "sharpe", "calmar"],
+   387	        default=None,
+   388	    )
+   389	    p.add_argument("--seed", type=int, default=None)
+   390	    # T101: warmstart pool (既知 mission/Stage-C 個体を初期集団注入、再現性確保)
+   391	    p.add_argument("--warmstart-ratio", type=float, default=None)
+   392	    p.add_argument("--warmstart-motif-archive", type=str, default=None)
+   393	    # T112: NSGA-II only selection (Stage B pooled fold-CV Pareto 3軸)。
+   394	    # 未指定=None で yaml default(False)尊重、 指定で True override。
+   395	    p.add_argument(
+   396	        "--nsga2-selection", action="store_const", const=True, default=None
+   397	    )
+   398	    # cycle24: experimental primitive F15 MTFTrendPullback (マルチTF) を母集団へ投入。
+   399	    # 未指定=OFF で registry 32本のまま (bit-exact)。指定時のみ register_experimental()。
+   400	    p.add_argument(
+   401	        "--enable-mtf-primitive", action="store_true", default=False
+   402	    )
+   403	    # T114: cross-pair (ii-lite) shadow 有効化。未指定=None で yaml default(False)尊重。
+   404	    p.add_argument(
+   405	        "--cross-pair-enable", action="store_const", const=True, default=None
+   406	    )
+   407	    # T115: cross-pair in-loop selection pressure。未指定=None で yaml default(False)。
+   408	    p.add_argument(
+   409	        "--cross-pair-selection-pressure",
+   410	        action="store_const", const=True, default=None,
+   411	    )
+   412	    # T117: multi-pair training (Stage A fitness を複数ペアで min 集約)。
+   413	    # 未指定=None で yaml default(False)。
+   414	    p.add_argument(
+   415	        "--multi-pair-training", action="store_const", const=True, default=None
+   416	    )
+   417	    p.add_argument(
+   418	        "--multi-pair-pairs", type=str, default=None,
+   419	        help="multi-pair training の対象ペア (comma 区切り、target + anchor)。",
+   420	    )
+   421	    # T118: multi-pair fitness 集約方式。未指定=None で yaml default(min)。
+   422	    # cycle 9: min は min-collapse (target 選抜圧消失) → mean で target 信号保持。
+   423	    p.add_argument(
+   424	        "--multi-pair-aggregate", type=str, default=None,
+   425	        choices=["min", "mean"],
+   426	        help="multi-pair training の fitness 集約方式 (min|mean)。",
+   427	    )
+   428	    p.add_argument(
+   429	        "--no-report",
+   430	        action="store_true",
+   431	        help=(
+   432	            "reports/run-reports/run-{N}/ への成果物書き出しを skip する。"
+   433	            "プロファイル RUN 等で report を汚したくない場合に指定。"
+   434	            "archive Parquet と RUN_CACHE_DIR state (.cache/) は常に書く。"
+   435	        ),
+   436	    )
+   437	    # T052: GA 評価並列ワーカー数 (canonical: --max-workers, alias: --workers)
+   438	    p.add_argument(
+   439	        "--max-workers",
+   440	        type=int,
+   441	        default=None,
+   442	        help=(
+   443	            "GA 評価並列ワーカー数 (1 = sequential, 2 以上で multiprocessing.Pool)。"
+   444	            "未指定時は YAML config の値を使用 (default 1)。"
+   445	        ),
+   446	    )
+   447	    p.add_argument(
+   448	        "--workers",
+   449	        type=int,
+   450	        default=None,
+
+exec
+/bin/zsh -lc "nl -ba src/alpha_factory/primitives/directional_generic.py | sed -n '1,140p'" in /Users/ishitoya/repository/zenigame-fx
+exec
+/bin/zsh -lc "nl -ba src/alpha_factory/primitives/_indicators.py | sed -n '1,260p'" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+     1	"""全 FX ペア共通の directional primitive 14 個（T011）。
+     2	
+     3	TREND_FOLLOW (6): F1 TrendEMA, F2 MACDSignal, F3 DonchianBreak, F4 ADXTrend,
+     4	                  F5 VolatilityBreak, F6 SessionMomentum
+     5	MEAN_REVERT (5):  F7 RSIRevert, F8 BollingerRevert, F9 StochRevert,
+     6	                  F10 ZScoreRevert, F11 MeanReversionRange
+     7	NEUTRAL (3):      F12 RealizedVolZScore, F13 ReturnAutocorrLag, F14 TrendStrengthRatio
+     8	
+     9	すべて:
+    10	- domain = "generic"
+    11	- required_data = ("ohlc",)
+    12	- 出力は [-1, +1] bounded（F14 は [0, +1]）
+    13	- compute と compute_all_bars の両 API を提供
+    14	
+    15	ensure_registered() を production path から 1 回呼ぶことで 14 個を registry に登録する。
+    16	
+    17	look-ahead bias:
+    18	- rolling_* は過去方向 prefix-sum/deque
+    19	- ema/atr/adx/rsi は recurrence で過去のみ参照
+    20	- F6 は session_key (UTC 日付, session_id) の変化で開始検知（週末ギャップ耐性）
+    21	- 後続バー改変で過去 index が不変であることを property test で検証
+    22	
+    23	学術引用: _indicators.py 冒頭を参照。
+    24	"""
+    25	
+    26	from __future__ import annotations
+    27	
+    28	import warnings
+    29	from collections.abc import Callable
+    30	from datetime import UTC
+    31	
+    32	import numpy as np
+    33	
+    34	from src.alpha_factory.primitives._bars_cache import (
+    35	    bars_to_mid_ohlc as _bars_to_mid_ohlc,
+    36	)
+    37	from src.alpha_factory.primitives._base import (
+    38	    EvaluationContext,
+    39	    ParamSpec,
+    40	    PrimitiveCategory,
+    41	    PrimitiveSpec,
+    42	)
+    43	from src.alpha_factory.primitives._indicators import (
+    44	    _EPS,
+    45	    _SESSION_RANGES_UTC,
+    46	    adx,
+    47	    atr,
+    48	    bollinger,
+    49	    donchian,
+    50	    ema,
+    51	    log_returns_from_close,
+    52	    macd,
+    53	    realized_vol,
+    54	    rolling_corr,
+    55	    rolling_max,
+    56	    rolling_min,
+    57	    rolling_std,
+    58	    rsi,
+    59	    stochastic,
+    60	    zscore,
+    61	)
+    62	from src.domain.price import PriceBar
+    63	
+    64	# ---------------------------------------------------------------------------
+    65	# 共通 helper
+    66	# ---------------------------------------------------------------------------
+    67	
+    68	
+    69	def _nan_to_zero(x: float) -> float:
+    70	    return 0.0 if not np.isfinite(x) else float(x)
+    71	
+    72	
+    73	# compute_all_bars 関数の型（EvaluationContext → ndarray）
+    74	_ComputeAllFn = Callable[[EvaluationContext], np.ndarray]
+    75	
+    76	
+    77	def _make_compute_single(compute_all: _ComputeAllFn) -> Callable[[EvaluationContext], float]:
+    78	    """compute_all_bars から compute(single-point) を作る。
+    79	
+    80	    warmup 内 (NaN) / range 外 は 0.0 を返す（primitive の neutral 値）。
+    81	    """
+    82	
+    83	    def _compute(ctx: EvaluationContext) -> float:
+    84	        arr = compute_all(ctx)
+    85	        idx = ctx.idx
+    86	        if idx < 0 or idx >= len(arr):
+    87	            return 0.0
+    88	        val = arr[idx]
+    89	        return _nan_to_zero(float(val))
+    90	
+    91	    return _compute
+    92	
+    93	
+    94	def _get_int_param(params, key: str) -> int:
+    95	    return int(params[key])
+    96	
+    97	
+    98	def _get_float_param(params, key: str) -> float:
+    99	    return float(params[key])
+   100	
+   101	
+   102	# ---------------------------------------------------------------------------
+   103	# F1 TrendEMA (TREND_FOLLOW)
+   104	# ---------------------------------------------------------------------------
+   105	
+   106	
+   107	def _f1_compute_all(ctx: EvaluationContext) -> np.ndarray:
+   108	    _, h, low, c = _bars_to_mid_ohlc(ctx.bars)
+   109	    fast_n = _get_int_param(ctx.params, "fast_n")
+   110	    slow_n = _get_int_param(ctx.params, "slow_n")
+   111	    atr_n = _get_int_param(ctx.params, "atr_n")
+   112	    ef = ema(c, fast_n)
+   113	    es = ema(c, slow_n)
+   114	    a = atr(h, low, c, atr_n)
+   115	    raw = (ef - es) / (a + _EPS)
+   116	    out = np.tanh(raw)
+   117	    # warmup を明示的に NaN にする: ef/es/a のいずれかが NaN の index
+   118	    mask = np.isnan(ef) | np.isnan(es) | np.isnan(a)
+   119	    out = np.where(mask, np.nan, out)
+   120	    return out
+   121	
+   122	
+   123	F1_SPEC = PrimitiveSpec(
+   124	    id="F1",
+   125	    name="TrendEMA",
+   126	    category="TREND_FOLLOW",
+   127	    domain="generic",
+   128	    param_schema=(
+   129	        ParamSpec(name="fast_n", low=5, high=30, is_int=True, default=12),
+   130	        ParamSpec(name="slow_n", low=20, high=100, is_int=True, default=26),
+   131	        ParamSpec(name="atr_n", low=7, high=28, is_int=True, default=14),
+   132	    ),
+   133	    required_data=("ohlc",),
+   134	    compute=_make_compute_single(_f1_compute_all),
+   135	    compute_all_bars=_f1_compute_all,
+   136	)
+   137	
+   138	
+   139	# ---------------------------------------------------------------------------
+   140	# F2 MACDSignal (TREND_FOLLOW)
+
+ succeeded in 0ms:
+     1	"""技術指標ヘルパー（T011）。
+     2	
+     3	全関数 pure numpy、float64、入力と同じ長さの配列を返す（warmup 部は np.nan）。
+     4	primitive 実装から利用され、registry には登録しない。
+     5	
+     6	look-ahead bias 回避:
+     7	- rolling_* は prefix-sum/monotonic-deque で過去方向のみ参照
+     8	- Wilder smoothing (EMA/ATR/RSI/ADX) は recurrence で過去のみ
+     9	- reverse / future-shift は使用しない
+    10	
+    11	学術参照:
+    12	- Wilder, J. W. (1978). New Concepts in Technical Trading Systems. — RSI/ADX/ATR 原典
+    13	- Donchian, R. (1960). Donchian Channels.
+    14	- Bollinger, J. (2001). Bollinger on Bollinger Bands.
+    15	- Appel, G. (2005). Technical Analysis: Power Tools for Active Investors. — MACD
+    16	- Lane, G. (1984). Stochastic Oscillator.
+    17	- Andersen, T. G., & Bollerslev, T. (1997). — realized volatility
+    18	"""
+    19	
+    20	from __future__ import annotations
+    21	
+    22	import numba
+    23	import numpy as np
+    24	
+    25	_EPS = 1e-10
+    26	
+    27	
+    28	# ---------------------------------------------------------------------------
+    29	# 共通スカラー helper (T012 追加)
+    30	# ---------------------------------------------------------------------------
+    31	
+    32	
+    33	def sigmoid(x: np.ndarray | float) -> np.ndarray | float:
+    34	    """数値安定な logistic sigmoid: 1 / (1 + exp(-x))。
+    35	
+    36	    overflow を防ぐため `np.clip(x, -500, 500)` で抑える。
+    37	    入力が float の場合は float、ndarray の場合は ndarray を返す
+    38	    （numpy の dtype 規則に従う）。
+    39	    """
+    40	    x_clipped = np.clip(x, -500.0, 500.0)
+    41	    return 1.0 / (1.0 + np.exp(-x_clipped))
+    42	
+    43	
+    44	# ---------------------------------------------------------------------------
+    45	# セッション境界（UTC, DST 無視, T012 で集約）
+    46	# ---------------------------------------------------------------------------
+    47	
+    48	# F6 SessionMomentum (T011) と M2 SessionGate (T012) で共有する正規定義。
+    49	# 0=Tokyo / 1=London / 2=NY (open_hour, close_hour)。
+    50	_SESSION_RANGES_UTC: dict[int, tuple[int, int]] = {
+    51	    0: (0, 9),    # Tokyo
+    52	    1: (7, 16),   # London
+    53	    2: (12, 21),  # NY
+    54	}
+    55	
+    56	
+    57	# ---------------------------------------------------------------------------
+    58	# rolling 系 O(N) ヘルパー
+    59	# ---------------------------------------------------------------------------
+    60	
+    61	
+    62	def rolling_sum(values: np.ndarray, n: int) -> np.ndarray:
+    63	    """長さ n の過去方向 rolling sum を返す。warmup 部 (i < n-1) は NaN。
+    64	
+    65	    O(N) 実装: `cumsum[i] - cumsum[i-n]`。
+    66	    入力に NaN を含まない前提（呼び出し側で事前処理）。
+    67	    """
+    68	    if n <= 0:
+    69	        raise ValueError(f"n must be >= 1, got {n}")
+    70	    values = np.asarray(values, dtype=np.float64)
+    71	    length = len(values)
+    72	    out = np.full(length, np.nan, dtype=np.float64)
+    73	    if length < n:
+    74	        return out
+    75	    cs = np.cumsum(values)
+    76	    out[n - 1] = cs[n - 1]
+    77	    if length > n:
+    78	        out[n:] = cs[n:] - cs[:-n]
+    79	    return out
+    80	
+    81	
+    82	def rolling_mean(values: np.ndarray, n: int) -> np.ndarray:
+    83	    s = rolling_sum(values, n)
+    84	    return s / float(n)
+    85	
+    86	
+    87	def sma(values: np.ndarray, n: int) -> np.ndarray:
+    88	    """Simple Moving Average (= rolling_mean) のエイリアス。"""
+    89	    return rolling_mean(values, n)
+    90	
+    91	
+    92	def rolling_std(values: np.ndarray, n: int, ddof: int = 0) -> np.ndarray:
+    93	    """長さ n の過去方向 rolling 標準偏差 (population; ddof=0 default)。
+    94	
+    95	    O(N) 実装: `var = E[X²] - (E[X])²` を prefix-sum 2 本で算出。
+    96	    numerical round-off で var が負になりうるため max(var, 0) でクランプ。
+    97	    """
+    98	    if n <= 1 and ddof >= n:
+    99	        raise ValueError(f"n ({n}) must exceed ddof ({ddof})")
+   100	    values = np.asarray(values, dtype=np.float64)
+   101	    s = rolling_sum(values, n)
+   102	    s2 = rolling_sum(values * values, n)
+   103	    # var = E[X²] - (E[X])² (ddof=0) or (Σx² - (Σx)²/n) / (n - ddof) (ddof>0)
+   104	    var = (
+   105	        s2 / n - (s / n) ** 2
+   106	        if ddof == 0
+   107	        else (s2 - (s * s) / n) / (n - ddof)
+   108	    )
+   109	    var = np.maximum(var, 0.0)
+   110	    out = np.sqrt(var)
+   111	    # warmup NaN は s 経由で既に NaN
+   112	    return out
+   113	
+   114	
+   115	def rolling_max(values: np.ndarray, n: int) -> np.ndarray:
+   116	    """Monotonic deque による O(N) rolling max。warmup (i<n-1) は NaN。
+   117	
+   118	    Numba JIT 化 (T088 cycle 1 profile-optimize): collections.deque を fixed-size
+   119	    int64 circular buffer (head/tail インデックス) に置換。 現行 comparator
+   120	    (`<=` で右から drop) をそのまま再現、 数値出力は現行と numerically identical。
+   121	    """
+   122	    if n <= 0:
+   123	        raise ValueError(f"n must be >= 1, got {n}")
+   124	    values = np.asarray(values, dtype=np.float64)
+   125	    return _rolling_max_jit(values, n)
+   126	
+   127	
+   128	@numba.njit(cache=True, fastmath=False)
+   129	def _rolling_max_jit(values: np.ndarray, n: int) -> np.ndarray:
+   130	    length = values.shape[0]
+   131	    out = np.full(length, np.nan, dtype=np.float64)
+   132	    # circular buffer: 最大 n 個保持 (window 外を drop するので n より長くならない)
+   133	    dq = np.empty(n, dtype=np.int64)
+   134	    head = 0  # buffer の先頭 index (front)
+   135	    tail = 0  # buffer の末尾 index (back exclusive)
+   136	    size = 0
+   137	    for i in range(length):
+   138	        # window 外を front から drop
+   139	        while size > 0 and dq[head] <= i - n:
+   140	            head = (head + 1) % n
+   141	            size -= 1
+   142	        # 小さい値を back から drop (strict: <= で drop = 等値も drop = 現行と一致)
+   143	        while size > 0:
+   144	            back_idx = (tail - 1 + n) % n
+   145	            if values[dq[back_idx]] <= values[i]:
+   146	                tail = back_idx
+   147	                size -= 1
+   148	            else:
+   149	                break
+   150	        # back に追加
+   151	        dq[tail] = i
+   152	        tail = (tail + 1) % n
+   153	        size += 1
+   154	        if i >= n - 1:
+   155	            out[i] = values[dq[head]]
+   156	    return out
+   157	
+   158	
+   159	def rolling_min(values: np.ndarray, n: int) -> np.ndarray:
+   160	    """Monotonic deque による O(N) rolling min。warmup (i<n-1) は NaN。
+   161	
+   162	    Numba JIT 化 (T088 cycle 1 profile-optimize): rolling_max と完全対称、
+   163	    comparator が `>=` で右から drop の違いのみ。
+   164	    """
+   165	    if n <= 0:
+   166	        raise ValueError(f"n must be >= 1, got {n}")
+   167	    values = np.asarray(values, dtype=np.float64)
+   168	    return _rolling_min_jit(values, n)
+   169	
+   170	
+   171	@numba.njit(cache=True, fastmath=False)
+   172	def _rolling_min_jit(values: np.ndarray, n: int) -> np.ndarray:
+   173	    length = values.shape[0]
+   174	    out = np.full(length, np.nan, dtype=np.float64)
+   175	    dq = np.empty(n, dtype=np.int64)
+   176	    head = 0
+   177	    tail = 0
+   178	    size = 0
+   179	    for i in range(length):
+   180	        while size > 0 and dq[head] <= i - n:
+   181	            head = (head + 1) % n
+   182	            size -= 1
+   183	        while size > 0:
+   184	            back_idx = (tail - 1 + n) % n
+   185	            if values[dq[back_idx]] >= values[i]:  # rolling_max と違い >=
+   186	                tail = back_idx
+   187	                size -= 1
+   188	            else:
+   189	                break
+   190	        dq[tail] = i
+   191	        tail = (tail + 1) % n
+   192	        size += 1
+   193	        if i >= n - 1:
+   194	            out[i] = values[dq[head]]
+   195	    return out
+   196	
+   197	
+   198	def rolling_corr(x: np.ndarray, y: np.ndarray, n: int) -> np.ndarray:
+   199	    """長さ n の過去方向 rolling Pearson 相関。warmup (i<n-1) は NaN。
+   200	
+   201	    O(N) 実装: Σx, Σy, Σxy, Σx², Σy² の 5 本 prefix-sum を差分更新し、
+   202	    各 i で r = (n*Σxy - Σx*Σy) / sqrt((n*Σx² - (Σx)²)(n*Σy² - (Σy)²))。
+   203	    denom == 0 は NaN。
+   204	    """
+   205	    x = np.asarray(x, dtype=np.float64)
+   206	    y = np.asarray(y, dtype=np.float64)
+   207	    if len(x) != len(y):
+   208	        raise ValueError("x and y must have the same length")
+   209	    sx = rolling_sum(x, n)
+   210	    sy = rolling_sum(y, n)
+   211	    sxx = rolling_sum(x * x, n)
+   212	    syy = rolling_sum(y * y, n)
+   213	    sxy = rolling_sum(x * y, n)
+   214	    num = n * sxy - sx * sy
+   215	    denx = np.maximum(n * sxx - sx * sx, 0.0)
+   216	    deny = np.maximum(n * syy - sy * sy, 0.0)
+   217	    denom = np.sqrt(denx * deny)
+   218	    with np.errstate(divide="ignore", invalid="ignore"):
+   219	        out = np.where(denom > 0, num / denom, np.nan)
+   220	    # np.where は broadcasting 済み ndarray を返すため、入力が float の場合も ndarray
+   221	    # 出力を clip して numerical noise で [-1, +1] を僅かに超えるケースを抑える
+   222	    out = np.clip(out, -1.0, 1.0)
+   223	    # NaN は clip で保持されない場合があるため mask 戻し
+   224	    out = np.where(np.isnan(denom), np.nan, out)
+   225	    return out
+   226	
+   227	
+   228	# ---------------------------------------------------------------------------
+   229	# EMA 系
+   230	# ---------------------------------------------------------------------------
+   231	
+   232	
+   233	def ema(values: np.ndarray, n: int) -> np.ndarray:
+   234	    """指数移動平均。seed は最初の n 個の SMA、α = 2/(n+1)。
+   235	
+   236	    warmup: out[i<n-1] = NaN。
+   237	    """
+   238	    if n <= 0:
+   239	        raise ValueError(f"n must be >= 1, got {n}")
+   240	    values = np.asarray(values, dtype=np.float64)
+   241	    length = len(values)
+   242	    out = np.full(length, np.nan, dtype=np.float64)
+   243	    if length < n:
+   244	        return out
+   245	    alpha = 2.0 / (n + 1.0)
+   246	    seed = float(values[:n].mean())
+   247	    out[n - 1] = seed
+   248	    prev = seed
+   249	    for i in range(n, length):
+   250	        cur = alpha * values[i] + (1.0 - alpha) * prev
+   251	        out[i] = cur
+   252	        prev = cur
+   253	    return out
+   254	
+   255	
+   256	def _wilder_smooth(values: np.ndarray, n: int) -> np.ndarray:
+   257	    """Wilder smoothing: seed = mean(values[:n]), α = 1/n.
+   258	
+   259	    values の先頭 n 個の平均を seed とし、以降 recurrence。
+   260	    入力 NaN は 0 扱いしない（呼び出し側で除外する契約）。
+
+exec
+/bin/zsh -lc "grep -R \"run_ga\\.main\\|from scripts.alpha_factory.run_ga import main\\|enable_mtf_primitive\" -n tests src scripts | head -n 120" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 410ms:
+Binary file tests/scripts/__pycache__/test_alpha_factory_run_ga.cpython-311-pytest-9.0.3.pyc matches
+tests/scripts/test_alpha_factory_run_ga.py:320:    """T052 Codex impl-review §1 Critical 反映: run_ga.main() が
+scripts/alpha_factory/run_ga.py:2214:    if getattr(args, "enable_mtf_primitive", False):
+Binary file scripts/alpha_factory/__pycache__/run_ga.cpython-311.pyc matches
+
+codex
+`OFFで32本固定` の保証がプロセス内連続実行でも成立するか確認するため、`test_alpha_factory_run_ga.py` の呼び出し形を見ます。
+exec
+/bin/zsh -lc "nl -ba tests/scripts/test_alpha_factory_run_ga.py | sed -n '260,420p'" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+   260	    # cycle17-18: dd厳格化 0.20→0.05(R99ビット同一=安全)→0.03(R100 in-loop検証中、初のbinding)。
+   261	    assert float(cfg.live_criteria["sharpe_min"]) == 1.5
+   262	    assert int(cfg.live_criteria["trade_count_min"]) == 50
+   263	    assert float(cfg.live_criteria["total_pnl_min"]) == 70000
+   264	    assert float(cfg.live_criteria["max_drawdown_max"]) == 0.02
+   265	
+   266	
+   267	def test_parse_args_max_workers_canonical_flag() -> None:
+   268	    """T052: --max-workers が args.max_workers に反映される。"""
+   269	    from scripts.alpha_factory.run_ga import _parse_args
+   270	
+   271	    args = _parse_args(["--max-workers", "4"])
+   272	    assert args.max_workers == 4
+   273	
+   274	
+   275	def test_parse_args_workers_alias_flag() -> None:
+   276	    """T052: --workers エイリアスが args.max_workers に統合される。"""
+   277	    from scripts.alpha_factory.run_ga import _parse_args
+   278	
+   279	    args = _parse_args(["--workers", "6"])
+   280	    assert args.max_workers == 6
+   281	
+   282	
+   283	def test_parse_args_workers_default_none() -> None:
+   284	    """T052: 未指定時は None (YAML config の値が使われる)。"""
+   285	    from scripts.alpha_factory.run_ga import _parse_args
+   286	
+   287	    args = _parse_args([])
+   288	    assert args.max_workers is None
+   289	
+   290	
+   291	def test_parse_args_conflict_between_max_workers_and_workers_raises() -> None:
+   292	    """T052: --max-workers と --workers が異なる値だと SystemExit (argparse error)."""
+   293	    from scripts.alpha_factory.run_ga import _parse_args
+   294	
+   295	    with pytest.raises(SystemExit):
+   296	        _parse_args(["--max-workers", "4", "--workers", "8"])
+   297	
+   298	
+   299	def test_parse_args_strict_memory_guard_flag() -> None:
+   300	    """T052: --strict-memory-guard で args.strict_memory_guard=True。"""
+   301	    from scripts.alpha_factory.run_ga import _parse_args
+   302	
+   303	    args = _parse_args(["--strict-memory-guard"])
+   304	    assert args.strict_memory_guard is True
+   305	
+   306	
+   307	def test_args_to_overrides_propagates_max_workers() -> None:
+   308	    """T052: --max-workers が ga.max_workers override に伝搬。"""
+   309	    from scripts.alpha_factory.run_ga import _args_to_overrides, _parse_args
+   310	
+   311	    args = _parse_args(["--max-workers", "4"])
+   312	    overrides = _args_to_overrides(args)
+   313	    assert overrides["ga"]["max_workers"] == 4
+   314	
+   315	
+   316	def test_main_constructs_lane_eval_context_with_preflight_payload(
+   317	    tmp_path: Path,
+   318	    monkeypatch: pytest.MonkeyPatch,
+   319	) -> None:
+   320	    """T052 Codex impl-review §1 Critical 反映: run_ga.main() が
+   321	    LaneEvalContext を構築する際に preflight 値を埋め込み、worker 側短絡が
+   322	    本番経路で発火することを保証する (LaneEvalContext.preflight_underfilled
+   323	    を後から外部から確認するため、GenomeEvaluator を spy する).
+   324	
+   325	    Codex impl-review-round-2 Warning 反映: 固定 /tmp パス回避、tmp_path 使用。
+   326	    """
+   327	    from src.alpha_factory.parallel_eval import GenomeEvaluator as _OrigEvaluator
+   328	
+   329	    captured: dict[str, Any] = {}
+   330	
+   331	    class _SpyEvaluator(_OrigEvaluator):
+   332	        def __init__(
+   333	            self, max_workers, stage_gate_cfg, cross_pair_cfg,
+   334	            prim_evaluator, lane_contexts, **kwargs,
+   335	        ):
+   336	            captured["lane_contexts"] = dict(lane_contexts)
+   337	            # max_tasks_per_child 等の keyword-only 引数を透過
+   338	            super().__init__(
+   339	                max_workers, stage_gate_cfg, cross_pair_cfg,
+   340	                prim_evaluator, lane_contexts, **kwargs,
+   341	            )
+   342	
+   343	    monkeypatch.setattr(run_ga_module, "GenomeEvaluator", _SpyEvaluator)
+   344	    pair, stage_b_rows, holdout_rows = _prepare_smoke_inputs(fallback_holdout=False)
+   345	    _install_mock_session(
+   346	        monkeypatch, pair, stage_b_rows, holdout_rows,
+   347	        datetime(2026, 1, 8, tzinfo=UTC),
+   348	    )
+   349	    monkeypatch.setattr(run_ga_module, "RUN_REPORTS_DIR", tmp_path / "reports")
+   350	    monkeypatch.setattr(run_ga_module, "RUN_CACHE_DIR", tmp_path / "cache")
+   351	    monkeypatch.setattr(run_ga_module, "get_latest_run_number", lambda: 0)
+   352	    from src.alpha_factory.archive import GenomeArchive as _Archive
+   353	
+   354	    monkeypatch.setattr(_Archive, "DEFAULT_OUTPUT_DIR", tmp_path / "archive")
+   355	    rc = run_ga_module.main(
+   356	        [
+   357	            "--config", str(CONFIG_PATH),
+   358	            "--run-id", "preflight_test",
+   359	            "--population-size", "2",
+   360	            "--generations", "0",
+   361	            "--seed", "42",
+   362	            "--no-report",
+   363	        ]
+   364	    )
+   365	    assert rc == 0
+   366	    # captured lane_contexts に LaneEvalContext が入っており、preflight_payload が
+   367	    # non-None であることを確認 (preflight_underfilled は値次第だが payload は必ず生成)
+   368	    assert "lane_contexts" in captured
+   369	    lane_ctx = next(iter(captured["lane_contexts"].values()))
+   370	    assert lane_ctx.preflight_payload is not None, (
+   371	        "LaneEvalContext.preflight_payload must be set in main() "
+   372	        "(Codex impl-review §1 Critical)"
+   373	    )
+   374	    # T087: bars_stage_b は Stage A 期間 (末尾 stage_a_window_days=1 = 24 bars) を
+   375	    # 除外したもの。 7d × 24h = 168 bars 全体から末尾 24 bars を引いた 144 bars。
+   376	    assert lane_ctx.preflight_payload.n_bars == len(stage_b_rows) - 24
+   377	
+   378	
+   379	def test_load_config_with_cli_overrides() -> None:
+   380	    overrides = {
+   381	        "dataset": {"instrument": "USD_JPY"},
+   382	        "ga": {"population_size": 3, "seed": 999, "generations": None},
+   383	    }
+   384	    cfg = load_config(CONFIG_PATH, overrides=overrides)
+   385	    assert cfg.dataset.instrument == "USD_JPY"
+   386	    assert cfg.ga.population_size == 3
+   387	    assert cfg.ga.seed == 999
+   388	    # None override → skip (元の値保持)
+   389	    assert cfg.ga.generations == 1
+   390	
+   391	
+   392	def test_dataset_config_rejects_reversed_range() -> None:
+   393	    overrides = {
+   394	        "dataset": {
+   395	            "end": "2025-01-01T00:00:00Z"  # start より前
+   396	        }
+   397	    }
+   398	    with pytest.raises(ValueError, match=r"dataset\.end"):
+   399	        load_config(CONFIG_PATH, overrides=overrides)
+   400	
+   401	
+   402	def test_ga_config_rejects_invalid() -> None:
+   403	    with pytest.raises(ValueError, match="elite_count"):
+   404	        GAConfig(
+   405	            population_size=4,
+   406	            generations=1,
+   407	            crossover_rate=0.7,
+   408	            mutation_rate=0.3,
+   409	            tournament_size=3,
+   410	            elite_count=10,  # > population_size
+   411	            max_depth=2,
+   412	        )
+   413	    with pytest.raises(ValueError, match="elite_count"):
+   414	        GAConfig(
+   415	            population_size=4,
+   416	            generations=1,
+   417	            crossover_rate=0.7,
+   418	            mutation_rate=0.3,
+   419	            tournament_size=3,
+   420	            elite_count=-1,
+
+exec
+/bin/zsh -lc "grep -n \"enable_mtf_primitive\\|enable-mtf-primitive\\|experimental_primitive\\|F15\\|register_experimental\" tests/scripts/test_alpha_factory_run_ga.py" in /Users/ishitoya/repository/zenigame-fx
+ exited 1 in 0ms:
+exec
+/bin/zsh -lc "uv run python - <<'PY'
+from src.alpha_factory.primitives import _registry as R
+from src.alpha_factory.primitives.directional_generic import register_experimental
+R.clear(); R.ensure_registered(); print('after ensure', len(R.list_all()))
+register_experimental(); print('after experimental', len(R.list_all()))
+R.ensure_registered(); print('after ensure again', len(R.list_all()))
+PY" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 418ms:
+after ensure 32
+after experimental 33
+after ensure again 33
+
+codex
+**Critical**
+1. `OFFで32本固定` が「同一プロセス内の連続実行」で破れます。`register_experimental()` はグローバル registry に F15 を永続追加し、OFF実行時に除去されません。  
+[directional_generic.py](/Users/ishitoya/repository/zenigame-fx/src/alpha_factory/primitives/directional_generic.py):742  
+[run_ga.py](/Users/ishitoya/repository/zenigame-fx/scripts/alpha_factory/run_ga.py):2213  
+[_registry_bridge.py](/Users/ishitoya/repository/zenigame-fx/src/alpha_factory/_registry_bridge.py):52  
+[_registry.py](/Users/ishitoya/repository/zenigame-fx/src/alpha_factory/primitives/_registry.py):86  
+事実確認: `ensure_registered()`→32、`register_experimental()`→33、再度`ensure_registered()`でも33のまま。  
+修正案: `run_ga.main()` 冒頭で registry を `clear()` して毎回 `ensure_registered()` し、flag ON 時のみ `register_experimental()`（毎runで状態を再構築）にしてください。
+
+**Warning**
+1. look-aheadテストが NaN 遷移を検知できません。`np.isfinite(arr1)` マスク比較のみで、`NaN -> finite` のリークを見逃します。  
+[test_directional_generic.py](/Users/ishitoya/repository/zenigame-fx/tests/alpha_factory/primitives/test_directional_generic.py):504  
+修正案: `np.testing.assert_allclose(..., equal_nan=True)` で全要素比較し、週末ギャップ（bucket不連続）ケースと単一bucketケースも追加。
+
+**Nit**
+1. `htf_open` が未使用です（可読性ノイズ）。  
+[directional_generic.py](/Users/ishitoya/repository/zenigame-fx/src/alpha_factory/primitives/directional_generic.py):685
+
+**確認結果（問題なし）**
+- look-ahead本体ロジック（`completed = pos - 1` で B-1のみ参照）は設計どおりで、`reduceat`集約自体も現在bucketを参照しない限りリークしません。  
+[directional_generic.py](/Users/ishitoya/repository/zenigame-fx/src/alpha_factory/primitives/directional_generic.py):697
+- 空配列/単一bucketは `n_buckets < 2` で全NaN返却、`[-1,+1]` bounded・`_EPS` によるゼロ除算回避・純粋numpyでの決定性も妥当です。  
+[directional_generic.py](/Users/ishitoya/repository/zenigame-fx/src/alpha_factory/primitives/directional_generic.py):679
+
+総合判定: **要修正(Critical 1件)**
+tokens used
+102,597

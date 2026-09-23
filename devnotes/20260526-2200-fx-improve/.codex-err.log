@@ -1,0 +1,3763 @@
+OpenAI Codex v0.133.0-alpha.1
+--------
+workdir: /Users/ishitoya/repository/zenigame-fx
+model: gpt-5.3-codex
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019e6451-cb93-7333-bdc0-f2c274cf5e4e
+--------
+user
+あなたは zenigame-fx Alpha Factory の GA 改善を支援する Codex です。次フェーズ「構造的手段」の具体策を high reasoning で合議します。
+
+# 前提 (前サイクルであなたが (D)総括を推奨し実行済)
+閾値引き上げ+探索効率キャンペーン(R94-R104、11 full run)完結。確定 frontier: sharpe1.5/pnl70k/dd2%/trade50/pfr0.4 (tournament)、R101 で 723個体達成 (holdout ann med5.582/pnl med82k/dd全<2%、pnl max92k)。AGENTS.md 文書化済。
+既存レバー(閾値/selection)限界。あなたは構造的手段を「次フェーズ研究テーマ」として分離推奨。本サイクルでその具体策を決める。
+
+# 現 32-primitive 戦略空間
+- TREND_FOLLOW(12): EMA/MACD/Donchian/ADX/VolatilityBreak/SessionMomentum + pair_specific 6。
+- MEAN_REVERT(8): RSI/Bollinger/Stoch/ZScore/Range + pair_specific 3。
+- NEUTRAL(3): RealizedVolZScore/ReturnAutocorrLag/TrendStrengthRatio。
+- MODULATOR(9): M1-M6 ゲート/スケール + pair_specific 3。
+- データ: EUR_JPY M1 OHLC(bid/ask)、出力[-1,+1] bounded、recurrence(過去のみ)、max_clause=2、イントラデイ(overnight保有禁止)。
+
+# 上限の兆候
+- R104 nsga2 の Pareto tail で pnl max 108810 (R101 92360超) = 空間は高pnl個体を表現可能だが median 探索が届きにくい。
+- 達成 ann med5.582/pnl med82k で頭打ち。
+
+# ギャップ候補 (新primitive)
+- (a) マルチタイムフレーム合成 (上位足トレンド×下位足エントリ)。
+- (b) 日中シーズナリティ/時間帯 (セッション別方向バイアス、F6 SessionMomentum のみ)。
+- (c) ボラティリティ regime 明示切替 (高vol/低vol で別ロジック)。
+- (d) 非線形トレンド (keltner/supertrend/parabolic SAR 系)。
+
+# 選択肢
+- (B) 新primitive 追加: 表現力拡張で達成上限を上げる。default bit-exact維持(opt-in)。成功確度中。
+- (C) cross-pair 汎化別framework: cycle12まで7連敗+本キャンペーン全run ii_lite=0、74k副作用でも holdout逆相関。成功確度極低。
+
+# 質問 (high reasoning)
+1. (B) vs (C): どちらが EV・成功確度・実装コスト・mission整合で優れるか。1つに収束。
+2. (B)を選ぶ場合、(a)-(d) のどの信号ファミリーが「達成分布の上限(pnl/sharpe median)を上げる」期待値が最も高いか、具体 primitive を1つ特定 (現空間との直交性・イントラデイ整合・M1 OHLCで計算可能・recurrence過去参照・bit-exact実装可能性で評価)。
+3. その primitive の最小実装方針 (既存 _indicators.py 関数の再利用可否、ParamSpec、出力 [-1,+1] bounded化、TREND/MEAN_REVERT/NEUTRAL/MODULATOR のどのカテゴリ)。
+4. 反証可能な R105 成功基準 (frontier維持 + 上限向上)。
+
+回答は簡潔に。最後に「全体判定: ...」で次の一手(具体primitive 1つ or (C))を明示。
+
+codex
+依頼内容を確認しました。まず現行の primitive 実装と `_indicators.py` を読み、重複を避けたうえで (B)/(C) の収束判断と、R105 で検証可能な単一 primitive 案に絞ります。
+exec
+/bin/zsh -lc "rg -n \"TREND_FOLLOW|MEAN_REVERT|MODULATOR|SessionMomentum|registry|primitive|_indicators\" src/alpha_factory src -g '*.py'" in /Users/ishitoya/repository/zenigame-fx
+ exited 127 in 0ms:
+zsh:1: command not found: rg
+
+exec
+/bin/zsh -lc "rg --files src | rg 'alpha_factory|backtest|indicator|primitive'" in /Users/ishitoya/repository/zenigame-fx
+ exited 127 in 0ms:
+zsh:1: command not found: rg
+zsh:1: command not found: rg
+
+codex
+`rg` が使えない環境なので、`find` と `grep` に切り替えて同じ探索を続けます。まず primitive 定義・レジストリ・indicator 実装位置を特定します。
+exec
+/bin/zsh -lc "find src -type f | grep -E 'alpha_factory|indicator|primitive|backtest' | head -n 200" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+src/backtest/equity_curve.py
+src/backtest/session_block.py
+src/backtest/metrics.py
+src/backtest/columnar.py
+src/backtest/__init__.py
+src/backtest/__pycache__/_sim_kernel.simulate-65.py311.1.nbc
+src/backtest/__pycache__/_sim_kernel._add_overflows-57.py311.nbi
+src/backtest/__pycache__/_sim_kernel.simulate-65.py311.2.nbc
+src/backtest/__pycache__/columnar.cpython-311.pyc
+src/backtest/__pycache__/ensemble.cpython-311.pyc
+src/backtest/__pycache__/_sim_kernel._fill_adj-65.py311.nbi
+src/backtest/__pycache__/_sim_kernel._add_overflows-57.py311.1.nbc
+src/backtest/__pycache__/_sim_kernel._add_overflows-57.py311.2.nbc
+src/backtest/__pycache__/report.cpython-311.pyc
+src/backtest/__pycache__/grid_search.cpython-311.pyc
+src/backtest/__pycache__/session_block.cpython-311.pyc
+src/backtest/__pycache__/ensemble_report.cpython-311.pyc
+src/backtest/__pycache__/calendar.cpython-311.pyc
+src/backtest/__pycache__/walk_forward_report.cpython-311.pyc
+src/backtest/__pycache__/_sim_kernel.simulate-80.py311.1.nbc
+src/backtest/__pycache__/_sim_kernel.simulate-80.py311.2.nbc
+src/backtest/__pycache__/metrics.cpython-311.pyc
+src/backtest/__pycache__/_sim_kernel.simulate-65.py311.nbi
+src/backtest/__pycache__/engine.cpython-311.pyc
+src/backtest/__pycache__/walk_forward.cpython-311.pyc
+src/backtest/__pycache__/_sim_kernel.cpython-311.pyc
+src/backtest/__pycache__/_sim_kernel.simulate-80.py311.nbi
+src/backtest/__pycache__/_sim_kernel._fill_adj-65.py311.2.nbc
+src/backtest/__pycache__/equity_curve.cpython-311.pyc
+src/backtest/__pycache__/_sim_kernel._fill_adj-65.py311.1.nbc
+src/backtest/__pycache__/__init__.cpython-311.pyc
+src/backtest/__pycache__/comparison.cpython-311.pyc
+src/backtest/_sim_kernel.py
+src/backtest/comparison.py
+src/backtest/calendar.py
+src/backtest/engine.py
+src/backtest/grid_search.py
+src/backtest/ensemble.py
+src/backtest/walk_forward.py
+src/backtest/walk_forward_report.py
+src/backtest/report.py
+src/backtest/ensemble_report.py
+src/alpha_factory/stage_partition_guard.py
+src/alpha_factory/stage_gate.py
+src/alpha_factory/warmstart.py
+src/alpha_factory/loop_closure.py
+src/alpha_factory/mission_inf_gap.py
+src/alpha_factory/diagnostics_collector.py
+src/alpha_factory/partition.py
+src/alpha_factory/config.py
+src/alpha_factory/audit.py
+src/alpha_factory/diagnostics_stage_a_top_fold.py
+src/alpha_factory/cpps_archive.py
+src/alpha_factory/canonical_metrics.py
+src/alpha_factory/diagnostics_sidecar.py
+src/alpha_factory/nsga2_selection.py
+src/alpha_factory/pareto_features.py
+src/alpha_factory/stage_bc_evaluator.py
+src/alpha_factory/cross_pair.py
+src/alpha_factory/canonical_adapter.py
+src/alpha_factory/__init__.py
+src/alpha_factory/bars_digest.py
+src/alpha_factory/__pycache__/cpps_archive.cpython-311.pyc
+src/alpha_factory/__pycache__/warmstart.cpython-311.pyc
+src/alpha_factory/__pycache__/calibrate_gate_history.cpython-311.pyc
+src/alpha_factory/__pycache__/failure_handling.cpython-311.pyc
+src/alpha_factory/__pycache__/epoch_manager.cpython-311.pyc
+src/alpha_factory/__pycache__/stage_partition_guard.cpython-311.pyc
+src/alpha_factory/__pycache__/diagnostics_stage_a_top_fold.cpython-311.pyc
+src/alpha_factory/__pycache__/loop_closure.cpython-311.pyc
+src/alpha_factory/__pycache__/config.cpython-311.pyc
+src/alpha_factory/__pycache__/canonical_adapter.cpython-311.pyc
+src/alpha_factory/__pycache__/audit.cpython-311.pyc
+src/alpha_factory/__pycache__/_registry_bridge.cpython-311.pyc
+src/alpha_factory/__pycache__/fsp_updater.cpython-311.pyc
+src/alpha_factory/__pycache__/smoke.cpython-311.pyc
+src/alpha_factory/__pycache__/cross_pair.cpython-311.pyc
+src/alpha_factory/__pycache__/diagnostics_sidecar.cpython-311.pyc
+src/alpha_factory/__pycache__/aux_loader.cpython-311.pyc
+src/alpha_factory/__pycache__/canonical_metrics.cpython-311.pyc
+src/alpha_factory/__pycache__/pareto_features.cpython-311.pyc
+src/alpha_factory/__pycache__/nsga2_selection.cpython-311.pyc
+src/alpha_factory/__pycache__/calibrate_state.cpython-311.pyc
+src/alpha_factory/__pycache__/archive.cpython-311.pyc
+src/alpha_factory/__pycache__/mission_inf_gap.cpython-311.pyc
+src/alpha_factory/__pycache__/stage_a_evaluator.cpython-311.pyc
+src/alpha_factory/__pycache__/calibrate_freeze.cpython-311.pyc
+src/alpha_factory/__pycache__/diagnostics_collector.cpython-311.pyc
+src/alpha_factory/__pycache__/statistics.cpython-311.pyc
+src/alpha_factory/__pycache__/graduation.cpython-311.pyc
+src/alpha_factory/__pycache__/aux_preflight.cpython-311.pyc
+src/alpha_factory/__pycache__/swim_lane.cpython-311.pyc
+src/alpha_factory/__pycache__/stage_gate.cpython-311.pyc
+src/alpha_factory/__pycache__/stage_bc_evaluator.cpython-311.pyc
+src/alpha_factory/__pycache__/partition.cpython-311.pyc
+src/alpha_factory/__pycache__/walk_forward.cpython-311.pyc
+src/alpha_factory/__pycache__/bars_digest.cpython-311.pyc
+src/alpha_factory/__pycache__/schema_contract.cpython-311.pyc
+src/alpha_factory/__pycache__/parallel_eval.cpython-311.pyc
+src/alpha_factory/__pycache__/calibrate_gate.cpython-311.pyc
+src/alpha_factory/__pycache__/stage_b_inconclusive.cpython-311.pyc
+src/alpha_factory/__pycache__/run_context.cpython-311.pyc
+src/alpha_factory/__pycache__/__init__.cpython-311.pyc
+src/alpha_factory/observability/run_metrics.py
+src/alpha_factory/observability/__init__.py
+src/alpha_factory/observability/__pycache__/run_metrics.cpython-311.pyc
+src/alpha_factory/observability/__pycache__/__init__.cpython-311.pyc
+src/alpha_factory/fsp_updater.py
+src/alpha_factory/primitives/_indicators.py
+src/alpha_factory/primitives/_base.py
+src/alpha_factory/primitives/modulator_generic.py
+src/alpha_factory/primitives/_bars_cache.py
+src/alpha_factory/primitives/__init__.py
+src/alpha_factory/primitives/__pycache__/_base.cpython-311.pyc
+src/alpha_factory/primitives/__pycache__/_bars_cache.cpython-311.pyc
+src/alpha_factory/primitives/__pycache__/evaluator.cpython-311.pyc
+src/alpha_factory/primitives/__pycache__/_indicators._wilder_smooth_recurrence_jit-291.py311.2.nbc
+src/alpha_factory/primitives/__pycache__/_indicators._wilder_smooth_recurrence_jit-291.py311.1.nbc
+src/alpha_factory/primitives/__pycache__/_indicators._rolling_max_jit-128.py311.nbi
+src/alpha_factory/primitives/__pycache__/_indicators._rolling_min_jit-171.py311.nbi
+src/alpha_factory/primitives/__pycache__/pair_specific.cpython-311.pyc
+src/alpha_factory/primitives/__pycache__/_indicators.cpython-311.pyc
+src/alpha_factory/primitives/__pycache__/_indicators._rolling_max_jit-128.py311.1.nbc
+src/alpha_factory/primitives/__pycache__/_indicators._rolling_max_jit-128.py311.2.nbc
+src/alpha_factory/primitives/__pycache__/directional_generic.cpython-311.pyc
+src/alpha_factory/primitives/__pycache__/_registry.cpython-311.pyc
+src/alpha_factory/primitives/__pycache__/_indicators._rolling_min_jit-171.py311.2.nbc
+src/alpha_factory/primitives/__pycache__/_indicators._rolling_min_jit-171.py311.1.nbc
+src/alpha_factory/primitives/__pycache__/__init__.cpython-311.pyc
+src/alpha_factory/primitives/__pycache__/modulator_generic.cpython-311.pyc
+src/alpha_factory/primitives/__pycache__/_indicators._wilder_smooth_recurrence_jit-291.py311.nbi
+src/alpha_factory/primitives/_registry.py
+src/alpha_factory/primitives/pair_specific.py
+src/alpha_factory/primitives/directional_generic.py
+src/alpha_factory/primitives/evaluator.py
+src/alpha_factory/epoch_manager.py
+src/alpha_factory/aux_preflight.py
+src/alpha_factory/calibrate_gate.py
+src/alpha_factory/run_context.py
+src/alpha_factory/graduation.py
+src/alpha_factory/calibrate_freeze.py
+src/alpha_factory/calibrate_gate_history.py
+src/alpha_factory/stage_b_inconclusive.py
+src/alpha_factory/parallel_eval.py
+src/alpha_factory/archive.py
+src/alpha_factory/aux_loader.py
+src/alpha_factory/statistics.py
+src/alpha_factory/failure_handling.py
+src/alpha_factory/walk_forward.py
+src/alpha_factory/stage_a_evaluator.py
+src/alpha_factory/_registry_bridge.py
+src/alpha_factory/calibrate_state.py
+src/alpha_factory/swim_lane.py
+src/alpha_factory/schema_contract.py
+src/alpha_factory/smoke.py
+
+exec
+/bin/zsh -lc "grep -RIn \"TREND_FOLLOW\\|MEAN_REVERT\\|MODULATOR\\|SessionMomentum\\|registry\\|primitive\\|_indicators\" src/alpha_factory src 2>/dev/null | head -n 300" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+src/alpha_factory/stage_gate.py:968:    primitive_evaluator: PrimitiveEvaluator,
+src/alpha_factory/stage_gate.py:985:        primitive_evaluator: PrimitiveEvaluator 実装。
+src/alpha_factory/stage_gate.py:1015:        strategy = DslStrategy(genome, primitive_evaluator)
+src/alpha_factory/stage_gate.py:1259:    primitive_evaluator: PrimitiveEvaluator,
+src/alpha_factory/stage_gate.py:1322:        strategy = DslStrategy(genome, primitive_evaluator)
+src/alpha_factory/stage_gate.py:1386:        primitive_evaluator, "with_aux"
+src/alpha_factory/stage_gate.py:1403:                evaluator_for_fold = primitive_evaluator.with_aux(  # type: ignore[attr-defined]
+src/alpha_factory/stage_gate.py:1407:                evaluator_for_fold = primitive_evaluator
+src/alpha_factory/stage_gate.py:1869:    primitive_evaluator: PrimitiveEvaluator,
+src/alpha_factory/stage_gate.py:1908:        strategy = DslStrategy(genome, primitive_evaluator)
+src/alpha_factory/stage_gate.py:2035:            strategy = DslStrategy(genome, primitive_evaluator)
+src/alpha_factory/cross_pair.py:151:    primitive_evaluator: PrimitiveEvaluator,
+src/alpha_factory/cross_pair.py:181:        strategy = DslStrategy(genome, primitive_evaluator)
+src/alpha_factory/cross_pair.py:269:    primitive_evaluator: PrimitiveEvaluator,
+src/alpha_factory/cross_pair.py:285:        primitive_evaluator: 全 pair 共通の PrimitiveEvaluator。
+src/alpha_factory/cross_pair.py:331:            primitive_evaluator=primitive_evaluator,
+src/alpha_factory/cross_pair.py:436:        primitive_evaluator: PrimitiveEvaluator,
+src/alpha_factory/cross_pair.py:442:        self._primitive_evaluator = primitive_evaluator
+src/alpha_factory/cross_pair.py:473:            primitive_evaluator=self._primitive_evaluator,
+src/alpha_factory/primitives/_indicators.py:4:primitive 実装から利用され、registry には登録しない。
+src/alpha_factory/primitives/_indicators.py:48:# F6 SessionMomentum (T011) と M2 SessionGate (T012) で共有する正規定義。
+src/alpha_factory/primitives/_base.py:1:"""primitives-registry の基本型定義（T010 骨格）。
+src/alpha_factory/primitives/_base.py:6:後続 primitive 実装 (F1-F14, M1-M6, P1-P12) はこのモジュールのみ import して
+src/alpha_factory/primitives/_base.py:7:register する（_registry.py への循環 import を避けるため）。
+src/alpha_factory/primitives/_base.py:30:    "TREND_FOLLOW", "MEAN_REVERT", "NEUTRAL", "MODULATOR"
+src/alpha_factory/primitives/_base.py:49:    # T013 追加: pair-specific primitive (P8/P9/P11/P12) で使用
+src/alpha_factory/primitives/_base.py:102:    """primitive parameter の範囲と型。
+src/alpha_factory/primitives/_base.py:123:    look-ahead bias 回避のため、primitive (M4/P10) は本 snapshot を介して
+src/alpha_factory/primitives/_base.py:126:    「bar_time 時点で未知」として primitive 側で除外される。
+src/alpha_factory/primitives/_base.py:129:    True の場合、primitive 側で **bar_time ごと** に
+src/alpha_factory/primitives/_base.py:219:    """primitive compute に渡される評価文脈（T010 骨格で導入、T012/T013 で拡張）。
+src/alpha_factory/primitives/_base.py:224:        pair: 通貨ペア名（例: "EUR_USD"）。pair_specific primitive が参照。
+src/alpha_factory/primitives/_base.py:225:        params: SignalConfig.params をそのまま転写（primitive 固有）。
+src/alpha_factory/primitives/_base.py:228:                    長さは bars と同じか、primitive 側で吸収する契約。
+src/alpha_factory/primitives/_base.py:233:        strict_snapshot_required: True なら snapshot/aux 欠損時に primitive
+src/alpha_factory/primitives/_base.py:239:        aux_pair_mid_close: cross-pair primitive (P5 等) が参照する別ペアの
+src/alpha_factory/primitives/_base.py:243:                       timestamp matching の唯一の権威 (SSOT) で、primitive 側は
+src/alpha_factory/primitives/_base.py:273:    """primitive の正式仕様（T010 骨格、T013 で optional_data_groups 拡張）。
+src/alpha_factory/primitives/_base.py:276:        id: 一意な primitive ID（例: "F1", "M1", "P5"）。SignalConfig.name と一致。
+src/alpha_factory/primitives/_base.py:277:        name: primitive の表示名（例: "TrendEMA"）。
+src/alpha_factory/primitives/_base.py:278:        category: PrimitiveCategory（TREND_FOLLOW / MEAN_REVERT / NEUTRAL / MODULATOR）。
+src/alpha_factory/primitives/_base.py:291:                              default は空 tuple で後方互換（既存 primitive は影響なし）。
+src/alpha_factory/primitives/_base.py:306:def validate_primitive_spec(spec: PrimitiveSpec) -> None:
+src/alpha_factory/primitives/_base.py:387:        MODULATOR → "local_gate"
+src/alpha_factory/primitives/_base.py:388:        TREND_FOLLOW / MEAN_REVERT / NEUTRAL → "directional"
+src/alpha_factory/primitives/_base.py:391:    primitives-registry 側 4 値カテゴリをこの関数で橋渡しする。
+src/alpha_factory/primitives/_base.py:399:    if category == "MODULATOR":
+src/alpha_factory/primitives/_base.py:401:    if category in ("TREND_FOLLOW", "MEAN_REVERT", "NEUTRAL"):
+src/alpha_factory/primitives/modulator_generic.py:1:"""全 FX ペア共通の MODULATOR primitive 6 個（T012）。
+src/alpha_factory/primitives/modulator_generic.py:3:MODULATOR (6): M1 ATRRegimeGate, M2 SessionGate, M3 SpreadConditionGate,
+src/alpha_factory/primitives/modulator_generic.py:8:- category = "MODULATOR"
+src/alpha_factory/primitives/modulator_generic.py:11:- GA slot は "local_gate"（slot_from_category("MODULATOR") = "local_gate"）
+src/alpha_factory/primitives/modulator_generic.py:13:ensure_registered() を production path から 1 回呼ぶことで 6 個を registry に
+src/alpha_factory/primitives/modulator_generic.py:28:学術引用: _indicators.py 冒頭を参照。
+src/alpha_factory/primitives/modulator_generic.py:40:from src.alpha_factory.primitives._bars_cache import (
+src/alpha_factory/primitives/modulator_generic.py:43:from src.alpha_factory.primitives._base import (
+src/alpha_factory/primitives/modulator_generic.py:48:from src.alpha_factory.primitives._indicators import (
+src/alpha_factory/primitives/modulator_generic.py:74:    warmup 内 (NaN) / range 外 は MODULATOR の neutral 値 (default 0.5) を返す。
+src/alpha_factory/primitives/modulator_generic.py:75:    directional_generic では neutral=0.0 だが、MODULATOR の出力域 [0,1] では
+src/alpha_factory/primitives/modulator_generic.py:99:# M1 ATRRegimeGate (MODULATOR)
+src/alpha_factory/primitives/modulator_generic.py:126:    category="MODULATOR",
+src/alpha_factory/primitives/modulator_generic.py:150:# M2 SessionGate (MODULATOR)
+src/alpha_factory/primitives/modulator_generic.py:191:    category="MODULATOR",
+src/alpha_factory/primitives/modulator_generic.py:208:# M3 SpreadConditionGate (MODULATOR)
+src/alpha_factory/primitives/modulator_generic.py:219:    execute next bar open のため、本 primitive は bar close 時点のスプレッドを
+src/alpha_factory/primitives/modulator_generic.py:244:    category="MODULATOR",
+src/alpha_factory/primitives/modulator_generic.py:260:# M4 EconomicEventGate (MODULATOR)
+src/alpha_factory/primitives/modulator_generic.py:360:    category="MODULATOR",
+src/alpha_factory/primitives/modulator_generic.py:382:# M5 VIXRegimeGate (MODULATOR)
+src/alpha_factory/primitives/modulator_generic.py:437:    category="MODULATOR",
+src/alpha_factory/primitives/modulator_generic.py:453:# M6 TrendStrengthGate (MODULATOR)
+src/alpha_factory/primitives/modulator_generic.py:473:    category="MODULATOR",
+src/alpha_factory/primitives/modulator_generic.py:504:    """6 modulator primitive を registry に登録する。冪等。
+src/alpha_factory/primitives/modulator_generic.py:506:    並行安全性: `_registry.register_if_absent` を使い、lock 内で存在確認＋
+src/alpha_factory/primitives/modulator_generic.py:509:    from src.alpha_factory.primitives._registry import register_if_absent
+src/alpha_factory/primitives/modulator_generic.py:524:MODULATOR_SPECS: tuple[PrimitiveSpec, ...] = _ALL_SPECS
+src/alpha_factory/primitives/_bars_cache.py:15:      (concept-design §制約参照、primitive/engine は read-only 利用)
+src/alpha_factory/primitives/_bars_cache.py:19:    primitives.__init__ / _registry / 各 primitive module は import 禁止。
+src/alpha_factory/primitives/__init__.py:1:"""primitives-registry 公開 API（T010 骨格）。
+src/alpha_factory/primitives/__init__.py:3:後続 primitive 実装 TODO は `_base` のみ import して register する規約。
+src/alpha_factory/primitives/__init__.py:7:from src.alpha_factory.primitives._base import (
+src/alpha_factory/primitives/__init__.py:21:    validate_primitive_spec,
+src/alpha_factory/primitives/__init__.py:23:from src.alpha_factory.primitives._registry import (
+src/alpha_factory/primitives/__init__.py:26:    get_primitive,
+src/alpha_factory/primitives/__init__.py:33:from src.alpha_factory.primitives.evaluator import RegistryEvaluator
+src/alpha_factory/primitives/__init__.py:50:    "get_primitive",
+src/alpha_factory/primitives/__init__.py:58:    "validate_primitive_spec",
+src/alpha_factory/primitives/_registry.py:1:"""primitives-registry の登録・取得 API（T010 骨格）。
+src/alpha_factory/primitives/_registry.py:3:registry は module-level dict。本 TODO では空のまま。
+src/alpha_factory/primitives/_registry.py:4:後続 primitive 実装 TODO で register されて埋まる。
+src/alpha_factory/primitives/_registry.py:7:    本 registry は bootstrap 段階（プロセス起動直後の ensure_registered()）で
+src/alpha_factory/primitives/_registry.py:11:    保護する。read 操作 (get_primitive / list_*) はロックしない
+src/alpha_factory/primitives/_registry.py:23:from src.alpha_factory.primitives._base import (
+src/alpha_factory/primitives/_registry.py:27:    validate_primitive_spec,
+src/alpha_factory/primitives/_registry.py:35:    """PrimitiveSpec を registry に登録する。
+src/alpha_factory/primitives/_registry.py:37:    登録前に validate_primitive_spec で不変条件を検証する
+src/alpha_factory/primitives/_registry.py:45:    validate_primitive_spec(spec)
+src/alpha_factory/primitives/_registry.py:48:            raise ValueError(f"primitive {spec.id!r} already registered")
+src/alpha_factory/primitives/_registry.py:56:    `try get_primitive / except KeyError: register` は非原子的で、並行時に
+src/alpha_factory/primitives/_registry.py:61:        validate_primitive_spec は既存チェック前に呼ぶ。新規 spec の健全性は
+src/alpha_factory/primitives/_registry.py:67:    validate_primitive_spec(spec)
+src/alpha_factory/primitives/_registry.py:75:def get_primitive(primitive_id: str) -> PrimitiveSpec:
+src/alpha_factory/primitives/_registry.py:81:    if primitive_id not in _PRIMITIVES:
+src/alpha_factory/primitives/_registry.py:82:        raise KeyError(f"primitive {primitive_id!r} not in registry")
+src/alpha_factory/primitives/_registry.py:83:    return _PRIMITIVES[primitive_id]
+src/alpha_factory/primitives/_registry.py:110:    """registry を空にする（テスト用）。
+src/alpha_factory/primitives/_registry.py:119:    """primitive モジュールの明示的 bootstrap 関数。
+src/alpha_factory/primitives/_registry.py:121:    T011 で `directional_generic` の 14 primitive、T012 で `modulator_generic`
+src/alpha_factory/primitives/_registry.py:122:    の 6 primitive (M1-M6)、T013 で `pair_specific` の 12 primitive (P1-P12) を
+src/alpha_factory/primitives/_registry.py:130:    from src.alpha_factory.primitives.directional_generic import (
+src/alpha_factory/primitives/_registry.py:133:    from src.alpha_factory.primitives.modulator_generic import (
+src/alpha_factory/primitives/_registry.py:136:    from src.alpha_factory.primitives.pair_specific import (
+src/alpha_factory/primitives/pair_specific.py:1:"""通貨ペア特化 directional/MODULATOR primitive 12 個（T013, P1-P12）。
+src/alpha_factory/primitives/pair_specific.py:13:- 全 primitive は bar_time UTC 固定の時刻枠 + 過去 bar / 過去 publication のみ参照
+src/alpha_factory/primitives/pair_specific.py:20:- それ以外 → RuntimeWarning + safe default (directional=0.0, MODULATOR は P10=1.0,
+src/alpha_factory/primitives/pair_specific.py:39:from src.alpha_factory.primitives._bars_cache import (
+src/alpha_factory/primitives/pair_specific.py:42:from src.alpha_factory.primitives._base import (
+src/alpha_factory/primitives/pair_specific.py:47:from src.alpha_factory.primitives._indicators import (
+src/alpha_factory/primitives/pair_specific.py:84:    directional は 0.0、MODULATOR は P10=1.0 / P6/P11=0.5。
+src/alpha_factory/primitives/pair_specific.py:106:def _warn_missing(primitive_id: str, what: str) -> None:
+src/alpha_factory/primitives/pair_specific.py:108:        f"{primitive_id}: {what} missing; returning safe default. "
+src/alpha_factory/primitives/pair_specific.py:116:    primitive_id: str,
+src/alpha_factory/primitives/pair_specific.py:133:            f"{primitive_id}: aux_series[{series_key!r}] length "
+src/alpha_factory/primitives/pair_specific.py:160:# P1 LondonNYOverlapMomentum (TREND_FOLLOW, EUR_USD)
+src/alpha_factory/primitives/pair_specific.py:191:    category="TREND_FOLLOW",
+src/alpha_factory/primitives/pair_specific.py:204:# P2 IntradayRangeFade (MEAN_REVERT, EUR_USD)
+src/alpha_factory/primitives/pair_specific.py:262:    category="MEAN_REVERT",
+src/alpha_factory/primitives/pair_specific.py:274:# P3 TokyoOpenReversal (MEAN_REVERT, USD_JPY)
+src/alpha_factory/primitives/pair_specific.py:305:    category="MEAN_REVERT",
+src/alpha_factory/primitives/pair_specific.py:318:# P4 YenFixingBias (TREND_FOLLOW, USD_JPY)
+src/alpha_factory/primitives/pair_specific.py:348:    category="TREND_FOLLOW",
+src/alpha_factory/primitives/pair_specific.py:361:# P5 CrossPairTriangulation (MEAN_REVERT, EUR_JPY)
+src/alpha_factory/primitives/pair_specific.py:403:    category="MEAN_REVERT",
+src/alpha_factory/primitives/pair_specific.py:416:# P6 EuroHourVolRegime (MODULATOR, EUR_JPY)
+src/alpha_factory/primitives/pair_specific.py:448:    category="MODULATOR",
+src/alpha_factory/primitives/pair_specific.py:468:# P7 RiskOnOffProxy (TREND_FOLLOW, AUD_JPY)
+src/alpha_factory/primitives/pair_specific.py:536:    category="TREND_FOLLOW",
+src/alpha_factory/primitives/pair_specific.py:561:# P8 CommodityFlowBias (TREND_FOLLOW, AUD_JPY)
+src/alpha_factory/primitives/pair_specific.py:605:    category="TREND_FOLLOW",
+src/alpha_factory/primitives/pair_specific.py:620:# P9 OilPriceInverseFlow (TREND_FOLLOW, USD_CAD)
+src/alpha_factory/primitives/pair_specific.py:659:    category="TREND_FOLLOW",
+src/alpha_factory/primitives/pair_specific.py:673:# P10 NADataProximityGate (MODULATOR, USD_CAD)
+src/alpha_factory/primitives/pair_specific.py:742:    category="MODULATOR",
+src/alpha_factory/primitives/pair_specific.py:762:# P11 EmergingMarketStressGate (MODULATOR, USD_ZAR)
+src/alpha_factory/primitives/pair_specific.py:826:    category="MODULATOR",
+src/alpha_factory/primitives/pair_specific.py:854:# P12 GoldCorrelationBias (TREND_FOLLOW, USD_ZAR)
+src/alpha_factory/primitives/pair_specific.py:891:    category="TREND_FOLLOW",
+src/alpha_factory/primitives/pair_specific.py:916:    """12 pair-specific primitive を registry に登録する。冪等。
+src/alpha_factory/primitives/pair_specific.py:918:    `_registry.register_if_absent` を使い、lock 内で存在確認＋登録を atomic に行う
+src/alpha_factory/primitives/pair_specific.py:921:    from src.alpha_factory.primitives._registry import register_if_absent
+src/alpha_factory/primitives/directional_generic.py:1:"""全 FX ペア共通の directional primitive 14 個（T011）。
+src/alpha_factory/primitives/directional_generic.py:3:TREND_FOLLOW (6): F1 TrendEMA, F2 MACDSignal, F3 DonchianBreak, F4 ADXTrend,
+src/alpha_factory/primitives/directional_generic.py:4:                  F5 VolatilityBreak, F6 SessionMomentum
+src/alpha_factory/primitives/directional_generic.py:5:MEAN_REVERT (5):  F7 RSIRevert, F8 BollingerRevert, F9 StochRevert,
+src/alpha_factory/primitives/directional_generic.py:15:ensure_registered() を production path から 1 回呼ぶことで 14 個を registry に登録する。
+src/alpha_factory/primitives/directional_generic.py:23:学術引用: _indicators.py 冒頭を参照。
+src/alpha_factory/primitives/directional_generic.py:34:from src.alpha_factory.primitives._bars_cache import (
+src/alpha_factory/primitives/directional_generic.py:37:from src.alpha_factory.primitives._base import (
+src/alpha_factory/primitives/directional_generic.py:43:from src.alpha_factory.primitives._indicators import (
+src/alpha_factory/primitives/directional_generic.py:80:    warmup 内 (NaN) / range 外 は 0.0 を返す（primitive の neutral 値）。
+src/alpha_factory/primitives/directional_generic.py:103:# F1 TrendEMA (TREND_FOLLOW)
+src/alpha_factory/primitives/directional_generic.py:126:    category="TREND_FOLLOW",
+src/alpha_factory/primitives/directional_generic.py:140:# F2 MACDSignal (TREND_FOLLOW)
+src/alpha_factory/primitives/directional_generic.py:166:    category="TREND_FOLLOW",
+src/alpha_factory/primitives/directional_generic.py:181:# F3 DonchianBreak (TREND_FOLLOW)
+src/alpha_factory/primitives/directional_generic.py:202:    category="TREND_FOLLOW",
+src/alpha_factory/primitives/directional_generic.py:216:# F4 ADXTrend (TREND_FOLLOW)
+src/alpha_factory/primitives/directional_generic.py:236:    category="TREND_FOLLOW",
+src/alpha_factory/primitives/directional_generic.py:249:# F5 VolatilityBreak (TREND_FOLLOW)
+src/alpha_factory/primitives/directional_generic.py:283:    category="TREND_FOLLOW",
+src/alpha_factory/primitives/directional_generic.py:297:# F6 SessionMomentum (TREND_FOLLOW)
+src/alpha_factory/primitives/directional_generic.py:301:# UTC 静的境界 (DST 無視) は `_indicators._SESSION_RANGES_UTC` に集約
+src/alpha_factory/primitives/directional_generic.py:348:    name="SessionMomentum",
+src/alpha_factory/primitives/directional_generic.py:349:    category="TREND_FOLLOW",
+src/alpha_factory/primitives/directional_generic.py:363:# F7 RSIRevert (MEAN_REVERT)
+src/alpha_factory/primitives/directional_generic.py:381:    category="MEAN_REVERT",
+src/alpha_factory/primitives/directional_generic.py:394:# F8 BollingerRevert (MEAN_REVERT)
+src/alpha_factory/primitives/directional_generic.py:413:    category="MEAN_REVERT",
+src/alpha_factory/primitives/directional_generic.py:426:# F9 StochRevert (MEAN_REVERT)
+src/alpha_factory/primitives/directional_generic.py:444:    category="MEAN_REVERT",
+src/alpha_factory/primitives/directional_generic.py:457:# F10 ZScoreRevert (MEAN_REVERT)
+src/alpha_factory/primitives/directional_generic.py:473:    category="MEAN_REVERT",
+src/alpha_factory/primitives/directional_generic.py:485:# F11 MeanReversionRange (MEAN_REVERT)
+src/alpha_factory/primitives/directional_generic.py:506:    category="MEAN_REVERT",
+src/alpha_factory/primitives/directional_generic.py:662:    """14 primitive を registry に登録する。冪等（既登録はスキップ）。
+src/alpha_factory/primitives/directional_generic.py:664:    並行安全性: `_registry.register_if_absent` を使い、lock 内で存在確認＋登録を
+src/alpha_factory/primitives/directional_generic.py:667:    from src.alpha_factory.primitives._registry import register_if_absent
+src/alpha_factory/primitives/directional_generic.py:674:    """14 primitive の PrimitiveSpec タプルを返す（テスト/インスペクション用）。"""
+src/alpha_factory/primitives/directional_generic.py:682:TREND_FOLLOW_SPECS: tuple[PrimitiveSpec, ...] = (
+src/alpha_factory/primitives/directional_generic.py:690:MEAN_REVERT_SPECS: tuple[PrimitiveSpec, ...] = (
+src/alpha_factory/primitives/directional_generic.py:703:    本関数は registry 全体の集計ではなく、本モジュール (T011) で定義された
+src/alpha_factory/primitives/directional_generic.py:704:    14 primitive の category 内訳を返す。"MODULATOR": 0 は「本モジュール内に
+src/alpha_factory/primitives/directional_generic.py:705:    MODULATOR は無い」の意であり、registry 全体に MODULATOR が無い意味ではない。
+src/alpha_factory/primitives/directional_generic.py:708:    `_registry.list_by_category(category)` を使うこと（T012 modulator_generic
+src/alpha_factory/primitives/directional_generic.py:712:        "TREND_FOLLOW": len(TREND_FOLLOW_SPECS),
+src/alpha_factory/primitives/directional_generic.py:713:        "MEAN_REVERT": len(MEAN_REVERT_SPECS),
+src/alpha_factory/primitives/directional_generic.py:715:        "MODULATOR": 0,
+src/alpha_factory/primitives/evaluator.py:1:"""RegistryEvaluator: PrimitiveEvaluator Protocol の registry ベース実装（T010 骨格）。
+src/alpha_factory/primitives/evaluator.py:3:signal.name → registry lookup → EvaluationContext 構築 → spec.compute(ctx) の
+src/alpha_factory/primitives/evaluator.py:11:- strict_aux_required + selected_primitive_ids で起動時 preflight verify
+src/alpha_factory/primitives/evaluator.py:12:- preflight verify は selected primitive の required_data + optional_data_groups を
+src/alpha_factory/primitives/evaluator.py:22:from src.alpha_factory.primitives._base import (
+src/alpha_factory/primitives/evaluator.py:27:from src.alpha_factory.primitives._registry import get_primitive
+src/alpha_factory/primitives/evaluator.py:50:    registry に登録された PrimitiveSpec を lookup し、EvaluationContext を
+src/alpha_factory/primitives/evaluator.py:54:        pair: 評価対象の通貨ペア名（pair_specific primitive が参照）。
+src/alpha_factory/primitives/evaluator.py:60:        strict_aux_required: True なら __init__ 時に selected primitive の
+src/alpha_factory/primitives/evaluator.py:63:        selected_primitive_ids: preflight verify 対象の primitive ID 群
+src/alpha_factory/primitives/evaluator.py:82:        selected_primitive_ids: Iterable[str] | None = None,
+src/alpha_factory/primitives/evaluator.py:100:            if selected_primitive_ids is None:
+src/alpha_factory/primitives/evaluator.py:102:                    "strict_aux_required=True requires selected_primitive_ids "
+src/alpha_factory/primitives/evaluator.py:105:            self._preflight_verify(tuple(selected_primitive_ids))
+src/alpha_factory/primitives/evaluator.py:131:        """selected primitive 群の required_data + optional_data_groups が現 evaluator
+src/alpha_factory/primitives/evaluator.py:137:            spec = get_primitive(pid)
+src/alpha_factory/primitives/evaluator.py:146:                f"required aux missing for selected primitives: {key} "
+src/alpha_factory/primitives/evaluator.py:154:                    f"required aux missing for selected primitives: "
+src/alpha_factory/primitives/evaluator.py:195:        multi-pair training で anchor ペアを評価する際、pair_specific primitive
+src/alpha_factory/primitives/evaluator.py:215:            KeyError: signal.name が registry に無い場合（get_primitive が raise）。
+src/alpha_factory/primitives/evaluator.py:217:        spec = get_primitive(signal.name)
+src/alpha_factory/primitives/evaluator.py:236:        primitive は look-ahead bias-free な前提: `compute_all_bars(bars)[idx]`
+src/alpha_factory/primitives/evaluator.py:242:            KeyError: signal.name が registry に無い場合。
+src/alpha_factory/primitives/evaluator.py:244:        spec = get_primitive(signal.name)
+src/alpha_factory/aux_preflight.py:6:    - **SOFT_REQUIRED**: 不足は WARN log のみ (該当 primitive は safe default 経路).
+src/alpha_factory/aux_preflight.py:33:# series_id → primitive 側 aux_series key の説明 (log 用)
+src/alpha_factory/parallel_eval.py:34:from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
+src/alpha_factory/parallel_eval.py:209:    # primitive_evaluator に注入する。Pool initargs 経由で worker に broadcast.
+src/alpha_factory/parallel_eval.py:344:    primitive_evaluator: RegistryEvaluator,
+src/alpha_factory/parallel_eval.py:365:        # (pair_specific primitive=M4 EconomicEventGate 等が ctx.pair を参照する
+src/alpha_factory/parallel_eval.py:367:        ev = _evaluator_for_stage(primitive_evaluator, ctx, bars).with_pair(pair)
+src/alpha_factory/parallel_eval.py:400:    primitive_evaluator: RegistryEvaluator,
+src/alpha_factory/parallel_eval.py:415:    ev_a = _evaluator_for_stage(primitive_evaluator, ctx, ctx.bars_a)
+src/alpha_factory/parallel_eval.py:432:            primitive_evaluator, a_result,
+src/alpha_factory/parallel_eval.py:452:    ev_b = _evaluator_for_stage(primitive_evaluator, ctx, ctx.bars_b)
+src/alpha_factory/parallel_eval.py:462:            # raw AuxBundle を渡す (None なら従来通り primitive_evaluator のまま使う)
+src/alpha_factory/parallel_eval.py:476:    ev_c = _evaluator_for_stage(primitive_evaluator, ctx, ctx.bars_holdout)
+src/alpha_factory/parallel_eval.py:481:            primitive_evaluator=ev_c,
+src/alpha_factory/parallel_eval.py:552:        - DSL/primitive 系: RuntimeError ("primitive" in msg)
+src/alpha_factory/parallel_eval.py:574:    if isinstance(exc, RuntimeError) and "primitive" in msg:
+src/alpha_factory/parallel_eval.py:576:            stage, "PRIMITIVE_LOOKUP_FAIL", "primitive registry lookup failed"
+src/alpha_factory/parallel_eval.py:638:    primitive registry を ``ensure_registered()`` で再構築 (spawn 経由で
+src/alpha_factory/aux_loader.py:41:from src.alpha_factory.primitives._base import (
+src/alpha_factory/aux_loader.py:123:# series_id → primitive 側の aux_series key (例: "VIXCLS" → "macro.vix")
+src/alpha_factory/aux_loader.py:141:    """series_id を primitive 側の aux_series key に変換する."""
+src/alpha_factory/aux_loader.py:312:        # 2. event_snapshot (as_of = 末尾 bar). per-bar lookup は primitive 側 (T039)
+src/alpha_factory/aux_loader.py:322:        # 3. vix_snapshot は raw のまま (bar 別 lookup ではなく primitive 側で
+src/alpha_factory/_registry_bridge.py:1:"""``src.ga.random_gen`` 用 primitive registry bridge (T018).
+src/alpha_factory/_registry_bridge.py:3:``src.alpha_factory.primitives._registry`` (完全 PrimitiveSpec + ComputeFn) を
+src/alpha_factory/_registry_bridge.py:13:from src.alpha_factory.primitives._base import (
+src/alpha_factory/_registry_bridge.py:17:from src.alpha_factory.primitives._base import (
+src/alpha_factory/_registry_bridge.py:20:from src.alpha_factory.primitives._registry import (
+src/alpha_factory/_registry_bridge.py:27:__all__ = ["build_random_gen_registry"]
+src/alpha_factory/_registry_bridge.py:33:    """primitives ``PrimitiveCategory`` を ``random_gen`` の 2 値 category に
+src/alpha_factory/_registry_bridge.py:45:def build_random_gen_registry() -> dict[str, RandomGenSpec]:
+src/alpha_factory/_registry_bridge.py:46:    """``ensure_registered()`` 後の full registry を ``random_gen`` 用に変換する。
+src/alpha_factory/_registry_bridge.py:49:        ``{primitive_id -> RandomGenSpec}`` (random_gen が期待する
+src/alpha_factory/swim_lane.py:223:        - ``primitive_evaluator``: state-less、全 lane 共通。
+src/alpha_factory/swim_lane.py:245:        primitive_evaluator: PrimitiveEvaluator,
+src/alpha_factory/swim_lane.py:311:        self._primitive_evaluator = primitive_evaluator
+src/alpha_factory/swim_lane.py:608:                self._primitive_evaluator,
+src/alpha_factory/swim_lane.py:657:                    self._primitive_evaluator,
+src/alpha_factory/swim_lane.py:694:                self._primitive_evaluator,
+src/alpha_factory/swim_lane.py:970:            primitive_evaluator=self._primitive_evaluator,
+src/ga/runner.py:144:    registry: PrimitiveRegistry,
+src/ga/runner.py:152:        registry: primitive registry（random / mutate で使用）。
+src/ga/runner.py:173:            registry=registry,
+src/ga/runner.py:207:                registry=registry,
+src/ga/runner.py:216:                registry=registry,
+src/ga/random_gen.py:6:primitive_registry から ID / 範囲を引き、SignalConfig を組み立てる。
+src/ga/random_gen.py:7:本 TODO では `_dummy_registry.DUMMY_REGISTRY` を tests から渡す前提で、
+src/ga/random_gen.py:8:src/ga/random_gen.py 自体は registry I/F のみ公開。T010 primitives-registry
+src/ga/random_gen.py:39:    """primitive の最小メタ情報。T010 で正式 Registry に置き換える前提の暫定型。"""
+src/ga/random_gen.py:62:    registry: PrimitiveRegistry, category: PrimitiveCategory
+src/ga/random_gen.py:64:    return [p for p in registry.values() if p.category == category]
+src/ga/random_gen.py:73:    registry 側の schema と reference を共有しない。
+src/ga/random_gen.py:87:    registry: PrimitiveRegistry,
+src/ga/random_gen.py:89:    """slot に応じた category の primitive をランダム選択し SignalConfig を組み立てる。
+src/ga/random_gen.py:95:        ValueError: 対応 category の primitive が registry に存在しない場合。
+src/ga/random_gen.py:100:    pool = _filter_by_category(registry, category)
+src/ga/random_gen.py:103:            f"random_signal_config: no primitives with category={category} in registry"
+src/ga/random_gen.py:118:    registry: PrimitiveRegistry,
+src/ga/random_gen.py:123:    軽微な再抽選で緩和する（完全保証はしない、registry が小さい場合は重複許容）。
+src/ga/random_gen.py:134:        sig = random_signal_config(rng, "directional", registry)
+src/ga/random_gen.py:140:        dirs.append(random_signal_config(rng, "directional", registry))
+src/ga/random_gen.py:144:        gates.append(random_signal_config(rng, "local_gate", registry))
+src/ga/random_gen.py:178:    registry: PrimitiveRegistry,
+src/ga/random_gen.py:188:        registry: primitive registry。
+src/ga/random_gen.py:206:                clauses.append(random_clause(rng, n_dir, n_gate, registry))
+src/ga/fitness.py:36:    primitive_evaluator: PrimitiveEvaluator,
+src/ga/fitness.py:53:        primitive_evaluator: primitive 評価関数。
+src/ga/fitness.py:61:            primitive_evaluator,
+src/ga/operators.py:287:    registry: PrimitiveRegistry,
+src/ga/operators.py:290:    return registry.get(sig.name)
+src/ga/operators.py:297:    registry: PrimitiveRegistry,
+src/ga/operators.py:309:        spec = _signal_spec(genome, ci, slot, si, registry)
+src/ga/operators.py:335:    genome: Genome, rng: random.Random, registry: PrimitiveRegistry
+src/ga/operators.py:361:    genome: Genome, rng: random.Random, registry: PrimitiveRegistry
+src/ga/operators.py:366:        spec = _signal_spec(genome, ci, slot, si, registry)
+src/ga/operators.py:375:    spec = registry[old.name]
+src/ga/operators.py:391:    registry: PrimitiveRegistry,
+src/ga/operators.py:407:    new_sig = random_signal_config(rng, slot, registry)
+src/ga/operators.py:418:    genome: Genome, rng: random.Random, registry: PrimitiveRegistry
+
+codex
+レジストリ位置を特定できました。次に `directional_generic.py` と `_indicators.py` の中身を見て、既存機能と直交する候補を1つに絞ります。
+exec
+/bin/zsh -lc "sed -n '1,260p' src/alpha_factory/primitives/directional_generic.py" in /Users/ishitoya/repository/zenigame-fx
+exec
+/bin/zsh -lc "sed -n '560,820p' src/alpha_factory/primitives/directional_generic.py" in /Users/ishitoya/repository/zenigame-fx
+exec
+/bin/zsh -lc "sed -n '260,560p' src/alpha_factory/primitives/directional_generic.py" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+"""全 FX ペア共通の directional primitive 14 個（T011）。
+
+TREND_FOLLOW (6): F1 TrendEMA, F2 MACDSignal, F3 DonchianBreak, F4 ADXTrend,
+                  F5 VolatilityBreak, F6 SessionMomentum
+MEAN_REVERT (5):  F7 RSIRevert, F8 BollingerRevert, F9 StochRevert,
+                  F10 ZScoreRevert, F11 MeanReversionRange
+NEUTRAL (3):      F12 RealizedVolZScore, F13 ReturnAutocorrLag, F14 TrendStrengthRatio
+
+すべて:
+- domain = "generic"
+- required_data = ("ohlc",)
+- 出力は [-1, +1] bounded（F14 は [0, +1]）
+- compute と compute_all_bars の両 API を提供
+
+ensure_registered() を production path から 1 回呼ぶことで 14 個を registry に登録する。
+
+look-ahead bias:
+- rolling_* は過去方向 prefix-sum/deque
+- ema/atr/adx/rsi は recurrence で過去のみ参照
+- F6 は session_key (UTC 日付, session_id) の変化で開始検知（週末ギャップ耐性）
+- 後続バー改変で過去 index が不変であることを property test で検証
+
+学術引用: _indicators.py 冒頭を参照。
+"""
+
+from __future__ import annotations
+
+import warnings
+from collections.abc import Callable
+from datetime import UTC
+
+import numpy as np
+
+from src.alpha_factory.primitives._bars_cache import (
+    bars_to_mid_ohlc as _bars_to_mid_ohlc,
+)
+from src.alpha_factory.primitives._base import (
+    EvaluationContext,
+    ParamSpec,
+    PrimitiveCategory,
+    PrimitiveSpec,
+)
+from src.alpha_factory.primitives._indicators import (
+    _EPS,
+    _SESSION_RANGES_UTC,
+    adx,
+    atr,
+    bollinger,
+    donchian,
+    ema,
+    log_returns_from_close,
+    macd,
+    realized_vol,
+    rolling_corr,
+    rolling_max,
+    rolling_min,
+    rolling_std,
+    rsi,
+    stochastic,
+    zscore,
+)
+from src.domain.price import PriceBar
+
+# ---------------------------------------------------------------------------
+# 共通 helper
+# ---------------------------------------------------------------------------
+
+
+def _nan_to_zero(x: float) -> float:
+    return 0.0 if not np.isfinite(x) else float(x)
+
+
+# compute_all_bars 関数の型（EvaluationContext → ndarray）
+_ComputeAllFn = Callable[[EvaluationContext], np.ndarray]
+
+
+def _make_compute_single(compute_all: _ComputeAllFn) -> Callable[[EvaluationContext], float]:
+    """compute_all_bars から compute(single-point) を作る。
+
+    warmup 内 (NaN) / range 外 は 0.0 を返す（primitive の neutral 値）。
+    """
+
+    def _compute(ctx: EvaluationContext) -> float:
+        arr = compute_all(ctx)
+        idx = ctx.idx
+        if idx < 0 or idx >= len(arr):
+            return 0.0
+        val = arr[idx]
+        return _nan_to_zero(float(val))
+
+    return _compute
+
+
+def _get_int_param(params, key: str) -> int:
+    return int(params[key])
+
+
+def _get_float_param(params, key: str) -> float:
+    return float(params[key])
+
+
+# ---------------------------------------------------------------------------
+# F1 TrendEMA (TREND_FOLLOW)
+# ---------------------------------------------------------------------------
+
+
+def _f1_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, h, low, c = _bars_to_mid_ohlc(ctx.bars)
+    fast_n = _get_int_param(ctx.params, "fast_n")
+    slow_n = _get_int_param(ctx.params, "slow_n")
+    atr_n = _get_int_param(ctx.params, "atr_n")
+    ef = ema(c, fast_n)
+    es = ema(c, slow_n)
+    a = atr(h, low, c, atr_n)
+    raw = (ef - es) / (a + _EPS)
+    out = np.tanh(raw)
+    # warmup を明示的に NaN にする: ef/es/a のいずれかが NaN の index
+    mask = np.isnan(ef) | np.isnan(es) | np.isnan(a)
+    out = np.where(mask, np.nan, out)
+    return out
+
+
+F1_SPEC = PrimitiveSpec(
+    id="F1",
+    name="TrendEMA",
+    category="TREND_FOLLOW",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="fast_n", low=5, high=30, is_int=True, default=12),
+        ParamSpec(name="slow_n", low=20, high=100, is_int=True, default=26),
+        ParamSpec(name="atr_n", low=7, high=28, is_int=True, default=14),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f1_compute_all),
+    compute_all_bars=_f1_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# F2 MACDSignal (TREND_FOLLOW)
+# ---------------------------------------------------------------------------
+
+
+def _f2_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, _, _, c = _bars_to_mid_ohlc(ctx.bars)
+    fast_n = _get_int_param(ctx.params, "fast_n")
+    slow_n = _get_int_param(ctx.params, "slow_n")
+    signal_n = _get_int_param(ctx.params, "signal_n")
+    scale_n = _get_int_param(ctx.params, "scale_n")
+    m, s, _ = macd(c, fast=fast_n, slow=slow_n, signal_n=signal_n)
+    diff = m - s
+    # rolling_std は NaN 入力で NaN を返す。diff の NaN を 0 で埋めた上で計算するのは
+    # bias 要因になるため、NaN mask で保護し、warmup は NaN を返す。
+    safe_diff = np.where(np.isnan(diff), 0.0, diff)
+    sigma = rolling_std(safe_diff, scale_n, ddof=0)
+    raw = diff / (sigma + _EPS)
+    out = np.tanh(raw)
+    mask = np.isnan(diff) | np.isnan(sigma)
+    out = np.where(mask, np.nan, out)
+    return out
+
+
+F2_SPEC = PrimitiveSpec(
+    id="F2",
+    name="MACDSignal",
+    category="TREND_FOLLOW",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="fast_n", low=6, high=20, is_int=True, default=12),
+        ParamSpec(name="slow_n", low=12, high=40, is_int=True, default=26),
+        ParamSpec(name="signal_n", low=5, high=15, is_int=True, default=9),
+        ParamSpec(name="scale_n", low=20, high=100, is_int=True, default=40),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f2_compute_all),
+    compute_all_bars=_f2_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# F3 DonchianBreak (TREND_FOLLOW)
+# ---------------------------------------------------------------------------
+
+
+def _f3_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, h, low, c = _bars_to_mid_ohlc(ctx.bars)
+    n = _get_int_param(ctx.params, "n")
+    k = _get_float_param(ctx.params, "k")
+    atr_n = _get_int_param(ctx.params, "atr_n")
+    _hi, _lo, mid = donchian(h, low, n)
+    a = atr(h, low, c, atr_n)
+    raw = (c - mid) / (k * a + _EPS)
+    out = np.tanh(raw)
+    mask = np.isnan(mid) | np.isnan(a)
+    out = np.where(mask, np.nan, out)
+    return out
+
+
+F3_SPEC = PrimitiveSpec(
+    id="F3",
+    name="DonchianBreak",
+    category="TREND_FOLLOW",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="n", low=10, high=60, is_int=True, default=20),
+        ParamSpec(name="k", low=0.5, high=3.0, is_int=False, default=1.5),
+        ParamSpec(name="atr_n", low=7, high=28, is_int=True, default=14),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f3_compute_all),
+    compute_all_bars=_f3_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# F4 ADXTrend (TREND_FOLLOW)
+# ---------------------------------------------------------------------------
+
+
+def _f4_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, h, low, c = _bars_to_mid_ohlc(ctx.bars)
+    n = _get_int_param(ctx.params, "n")
+    scale = _get_float_param(ctx.params, "scale")
+    adx_arr, plus_di, minus_di = adx(h, low, c, n)
+    strength = np.maximum(0.0, np.tanh((adx_arr - 25.0) / (scale + _EPS)))
+    direction = np.sign(plus_di - minus_di)
+    out = strength * direction
+    mask = np.isnan(adx_arr) | np.isnan(plus_di) | np.isnan(minus_di)
+    out = np.where(mask, np.nan, out)
+    return out
+
+
+F4_SPEC = PrimitiveSpec(
+    id="F4",
+    name="ADXTrend",
+    category="TREND_FOLLOW",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="n", low=7, high=28, is_int=True, default=14),
+        ParamSpec(name="scale", low=5.0, high=30.0, is_int=False, default=15.0),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f4_compute_all),
+    compute_all_bars=_f4_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# F5 VolatilityBreak (TREND_FOLLOW)
+# ---------------------------------------------------------------------------
+
+
+def _f5_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, h, low, c = _bars_to_mid_ohlc(ctx.bars)
+    short_n = _get_int_param(ctx.params, "short_n")
+    long_n = _get_int_param(ctx.params, "long_n")
+    k = _get_float_param(ctx.params, "k")
+    if short_n >= long_n:
+        warnings.warn(
+            f"F5 VolatilityBreak: short_n ({short_n}) >= long_n ({long_n});"
+
+ succeeded in 0ms:
+    w = _get_int_param(ctx.params, "w")
+    lag = _get_int_param(ctx.params, "lag")
+    r = log_returns_from_close(c)  # r[0] = NaN
+    length = len(r)
+    y = np.full(length, np.nan, dtype=np.float64)
+    if lag < length:
+        y[lag:] = r[:-lag] if lag > 0 else r
+    # lag=0 は定数 1 (自分自身) → degenerate。param_schema で lag >= 1 を担保。
+    r_safe = np.where(np.isfinite(r), r, 0.0)
+    y_safe = np.where(np.isfinite(y), y, 0.0)
+    corr = rolling_corr(r_safe, y_safe, w)
+    # warmup: 最初の lag+w index は相関の有効範囲ではない
+    # rolling_corr は [w-1..] で有効、ただし y は [lag..] で初めて値が入る
+    # → 有効開始 index = max(w-1, lag+w-1) = lag+w-1
+    invalid_upper = min(length, lag + w - 1)
+    corr[:invalid_upper] = np.nan
+    # rolling_corr は [-1, +1] が定義域。tanh 不要。
+    return corr
+
+
+F13_SPEC = PrimitiveSpec(
+    id="F13",
+    name="ReturnAutocorrLag",
+    category="NEUTRAL",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="w", low=20, high=200, is_int=True, default=60),
+        ParamSpec(name="lag", low=1, high=10, is_int=True, default=1),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f13_compute_all),
+    compute_all_bars=_f13_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# F14 TrendStrengthRatio (NEUTRAL)
+# ---------------------------------------------------------------------------
+
+
+def _f14_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, _, _, c = _bars_to_mid_ohlc(ctx.bars)
+    fast_n = _get_int_param(ctx.params, "fast_n")
+    slow_n = _get_int_param(ctx.params, "slow_n")
+    rv_n = _get_int_param(ctx.params, "rv_n")
+    scale = _get_float_param(ctx.params, "scale")
+    k_scale = _get_float_param(ctx.params, "k_scale")
+    ef = ema(c, fast_n)
+    es = ema(c, slow_n)
+    r = log_returns_from_close(c)
+    rv = realized_vol(r, rv_n)
+    # rv (無次元, log 単位) × c で価格スケールに整合させる
+    denom = rv * scale * (c + _EPS) + _EPS
+    ratio = np.abs(ef - es) / denom
+    out = np.tanh(ratio / (k_scale + _EPS))
+    mask = np.isnan(ef) | np.isnan(es) | np.isnan(rv)
+    out = np.where(mask, np.nan, out)
+    return out
+
+
+F14_SPEC = PrimitiveSpec(
+    id="F14",
+    name="TrendStrengthRatio",
+    category="NEUTRAL",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="fast_n", low=5, high=30, is_int=True, default=12),
+        ParamSpec(name="slow_n", low=20, high=100, is_int=True, default=26),
+        ParamSpec(name="rv_n", low=10, high=60, is_int=True, default=20),
+        ParamSpec(name="scale", low=0.5, high=5.0, is_int=False, default=1.0),
+        ParamSpec(name="k_scale", low=1.0, high=5.0, is_int=False, default=2.0),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f14_compute_all),
+    compute_all_bars=_f14_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# 登録
+# ---------------------------------------------------------------------------
+
+
+_ALL_SPECS: tuple[PrimitiveSpec, ...] = (
+    F1_SPEC,
+    F2_SPEC,
+    F3_SPEC,
+    F4_SPEC,
+    F5_SPEC,
+    F6_SPEC,
+    F7_SPEC,
+    F8_SPEC,
+    F9_SPEC,
+    F10_SPEC,
+    F11_SPEC,
+    F12_SPEC,
+    F13_SPEC,
+    F14_SPEC,
+)
+
+
+def ensure_registered() -> None:
+    """14 primitive を registry に登録する。冪等（既登録はスキップ）。
+
+    並行安全性: `_registry.register_if_absent` を使い、lock 内で存在確認＋登録を
+    atomic に行う。
+    """
+    from src.alpha_factory.primitives._registry import register_if_absent
+
+    for spec in _ALL_SPECS:
+        register_if_absent(spec)
+
+
+def all_specs() -> tuple[PrimitiveSpec, ...]:
+    """14 primitive の PrimitiveSpec タプルを返す（テスト/インスペクション用）。"""
+    return _ALL_SPECS
+
+
+# ---------------------------------------------------------------------------
+# Public re-export（category 別）
+# ---------------------------------------------------------------------------
+
+TREND_FOLLOW_SPECS: tuple[PrimitiveSpec, ...] = (
+    F1_SPEC,
+    F2_SPEC,
+    F3_SPEC,
+    F4_SPEC,
+    F5_SPEC,
+    F6_SPEC,
+)
+MEAN_REVERT_SPECS: tuple[PrimitiveSpec, ...] = (
+    F7_SPEC,
+    F8_SPEC,
+    F9_SPEC,
+    F10_SPEC,
+    F11_SPEC,
+)
+NEUTRAL_SPECS: tuple[PrimitiveSpec, ...] = (F12_SPEC, F13_SPEC, F14_SPEC)
+
+
+def category_counts() -> dict[PrimitiveCategory, int]:
+    """**directional_generic モジュール固有の内訳カウント** (F1-F14 のみ)。
+
+    本関数は registry 全体の集計ではなく、本モジュール (T011) で定義された
+    14 primitive の category 内訳を返す。"MODULATOR": 0 は「本モジュール内に
+    MODULATOR は無い」の意であり、registry 全体に MODULATOR が無い意味ではない。
+
+    Registry 全体の category 別 count を取りたい場合は
+    `_registry.list_by_category(category)` を使うこと（T012 modulator_generic
+    で M1-M6 が登録される）。
+    """
+    return {
+        "TREND_FOLLOW": len(TREND_FOLLOW_SPECS),
+        "MEAN_REVERT": len(MEAN_REVERT_SPECS),
+        "NEUTRAL": len(NEUTRAL_SPECS),
+        "MODULATOR": 0,
+    }
+
+ succeeded in 0ms:
+            f"F5 VolatilityBreak: short_n ({short_n}) >= long_n ({long_n});"
+            " computing as-is (genotype-phenotype mapping preserved).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    a_short = atr(h, low, c, short_n)
+    a_long = atr(h, low, c, long_n)
+    ratio = a_short / (a_long + _EPS) - 1.0
+    magnitude = np.maximum(0.0, np.tanh(k * ratio))
+    ef = ema(c, short_n)
+    es = ema(c, long_n)
+    direction = np.sign(ef - es)
+    out = magnitude * direction
+    mask = (
+        np.isnan(a_short) | np.isnan(a_long) | np.isnan(ef) | np.isnan(es)
+    )
+    out = np.where(mask, np.nan, out)
+    return out
+
+
+F5_SPEC = PrimitiveSpec(
+    id="F5",
+    name="VolatilityBreak",
+    category="TREND_FOLLOW",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="short_n", low=3, high=20, is_int=True, default=5),
+        ParamSpec(name="long_n", low=30, high=120, is_int=True, default=60),
+        ParamSpec(name="k", low=1.0, high=10.0, is_int=False, default=3.0),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f5_compute_all),
+    compute_all_bars=_f5_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# F6 SessionMomentum (TREND_FOLLOW)
+# ---------------------------------------------------------------------------
+
+
+# UTC 静的境界 (DST 無視) は `_indicators._SESSION_RANGES_UTC` に集約
+# （T012 で M2 SessionGate と共有するため移動。本モジュールでは re-export のみ）。
+
+
+def _f6_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, h, low, c = _bars_to_mid_ohlc(ctx.bars)
+    session = _get_int_param(ctx.params, "session")
+    if session not in _SESSION_RANGES_UTC:
+        # defensive: clamp to nearest defined session
+        session = max(0, min(2, session))
+    lo_h, hi_h = _SESSION_RANGES_UTC[session]
+    k = _get_float_param(ctx.params, "k")
+    atr_n = _get_int_param(ctx.params, "atr_n")
+    a = atr(h, low, c, atr_n)
+
+    length = len(ctx.bars)
+    out = np.zeros(length, dtype=np.float64)  # session 外は 0 を default
+    session_open_close = np.nan
+    prev_session_key: tuple[int, int] | None = None
+    for i in range(length):
+        b: PriceBar = ctx.bars[i]
+        t_utc = b.bar_time.astimezone(UTC)
+        hour = t_utc.hour
+        in_session = lo_h <= hour < hi_h
+        if in_session:
+            cur_key = (t_utc.toordinal(), session)
+            if cur_key != prev_session_key:
+                # セッション境界: 開始 bar
+                session_open_close = c[i]
+                prev_session_key = cur_key
+                out[i] = 0.0
+            else:
+                if np.isfinite(session_open_close) and np.isfinite(a[i]):
+                    raw = (c[i] - session_open_close) / (k * a[i] + _EPS)
+                    out[i] = np.tanh(raw)
+                else:
+                    # ATR warmup 不足 → NaN (session 内だが計算不能)
+                    out[i] = np.nan
+        else:
+            # session 外: key リセットして 0
+            prev_session_key = None
+            out[i] = 0.0
+    return out
+
+
+F6_SPEC = PrimitiveSpec(
+    id="F6",
+    name="SessionMomentum",
+    category="TREND_FOLLOW",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="session", low=0, high=2, is_int=True, default=0),
+        ParamSpec(name="k", low=0.5, high=3.0, is_int=False, default=1.0),
+        ParamSpec(name="atr_n", low=7, high=28, is_int=True, default=14),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f6_compute_all),
+    compute_all_bars=_f6_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# F7 RSIRevert (MEAN_REVERT)
+# ---------------------------------------------------------------------------
+
+
+def _f7_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, _, _, c = _bars_to_mid_ohlc(ctx.bars)
+    n = _get_int_param(ctx.params, "n")
+    scale = _get_float_param(ctx.params, "scale")
+    r = rsi(c, n)
+    raw = (50.0 - r) / (scale + _EPS)
+    out = np.tanh(raw)
+    out = np.where(np.isnan(r), np.nan, out)
+    return out
+
+
+F7_SPEC = PrimitiveSpec(
+    id="F7",
+    name="RSIRevert",
+    category="MEAN_REVERT",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="n", low=7, high=28, is_int=True, default=14),
+        ParamSpec(name="scale", low=5.0, high=30.0, is_int=False, default=15.0),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f7_compute_all),
+    compute_all_bars=_f7_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# F8 BollingerRevert (MEAN_REVERT)
+# ---------------------------------------------------------------------------
+
+
+def _f8_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, _, _, c = _bars_to_mid_ohlc(ctx.bars)
+    n = _get_int_param(ctx.params, "n")
+    k = _get_float_param(ctx.params, "k")
+    mid, std, _, _ = bollinger(c, n, k)
+    raw = (mid - c) / (k * std + _EPS)
+    out = np.tanh(raw)
+    mask = np.isnan(mid) | np.isnan(std)
+    out = np.where(mask, np.nan, out)
+    return out
+
+
+F8_SPEC = PrimitiveSpec(
+    id="F8",
+    name="BollingerRevert",
+    category="MEAN_REVERT",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="n", low=10, high=60, is_int=True, default=20),
+        ParamSpec(name="k", low=1.0, high=3.0, is_int=False, default=2.0),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f8_compute_all),
+    compute_all_bars=_f8_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# F9 StochRevert (MEAN_REVERT)
+# ---------------------------------------------------------------------------
+
+
+def _f9_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, h, low, c = _bars_to_mid_ohlc(ctx.bars)
+    n = _get_int_param(ctx.params, "n")
+    scale = _get_float_param(ctx.params, "scale")
+    k_arr, _ = stochastic(h, low, c, n)
+    raw = (50.0 - k_arr) / (scale + _EPS)
+    out = np.tanh(raw)
+    out = np.where(np.isnan(k_arr), np.nan, out)
+    return out
+
+
+F9_SPEC = PrimitiveSpec(
+    id="F9",
+    name="StochRevert",
+    category="MEAN_REVERT",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="n", low=7, high=28, is_int=True, default=14),
+        ParamSpec(name="scale", low=10.0, high=40.0, is_int=False, default=20.0),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f9_compute_all),
+    compute_all_bars=_f9_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# F10 ZScoreRevert (MEAN_REVERT)
+# ---------------------------------------------------------------------------
+
+
+def _f10_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, _, _, c = _bars_to_mid_ohlc(ctx.bars)
+    n = _get_int_param(ctx.params, "n")
+    z = zscore(c, n)
+    out = np.tanh(-z)
+    out = np.where(np.isnan(z), np.nan, out)
+    return out
+
+
+F10_SPEC = PrimitiveSpec(
+    id="F10",
+    name="ZScoreRevert",
+    category="MEAN_REVERT",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="n", low=10, high=60, is_int=True, default=20),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f10_compute_all),
+    compute_all_bars=_f10_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# F11 MeanReversionRange (MEAN_REVERT)
+# ---------------------------------------------------------------------------
+
+
+def _f11_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, h, low, c = _bars_to_mid_ohlc(ctx.bars)
+    n = _get_int_param(ctx.params, "n")
+    hi = rolling_max(h, n)
+    lo = rolling_min(low, n)
+    mid = (hi + lo) / 2.0
+    width = (hi - lo) / 2.0 + _EPS
+    raw = -(c - mid) / width
+    out = np.tanh(raw)
+    mask = np.isnan(hi) | np.isnan(lo)
+    out = np.where(mask, np.nan, out)
+    return out
+
+
+F11_SPEC = PrimitiveSpec(
+    id="F11",
+    name="MeanReversionRange",
+    category="MEAN_REVERT",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="n", low=10, high=60, is_int=True, default=20),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f11_compute_all),
+    compute_all_bars=_f11_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# F12 RealizedVolZScore (NEUTRAL)
+# ---------------------------------------------------------------------------
+
+
+def _f12_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, _, _, c = _bars_to_mid_ohlc(ctx.bars)
+    n = _get_int_param(ctx.params, "n")
+    window = _get_int_param(ctx.params, "window")
+    k_scale = _get_float_param(ctx.params, "k_scale")
+    # defensive: ensure window > n+1 で zscore が計算可能
+    effective_window = max(window, n + 1)
+    r = log_returns_from_close(c)
+    rv = realized_vol(r, n)
+    z = zscore(rv, effective_window)
+    out = np.tanh(z / (k_scale + _EPS))
+    out = np.where(np.isnan(z), np.nan, out)
+    return out
+
+
+F12_SPEC = PrimitiveSpec(
+    id="F12",
+    name="RealizedVolZScore",
+    category="NEUTRAL",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="n", low=10, high=60, is_int=True, default=20),
+        ParamSpec(name="window", low=60, high=500, is_int=True, default=200),
+        ParamSpec(name="k_scale", low=1.5, high=4.0, is_int=False, default=2.5),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_f12_compute_all),
+    compute_all_bars=_f12_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# F13 ReturnAutocorrLag (NEUTRAL)
+# ---------------------------------------------------------------------------
+
+
+def _f13_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    _, _, _, c = _bars_to_mid_ohlc(ctx.bars)
+    w = _get_int_param(ctx.params, "w")
+
+exec
+/bin/zsh -lc "sed -n '1,340p' src/alpha_factory/primitives/_indicators.py" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+"""技術指標ヘルパー（T011）。
+
+全関数 pure numpy、float64、入力と同じ長さの配列を返す（warmup 部は np.nan）。
+primitive 実装から利用され、registry には登録しない。
+
+look-ahead bias 回避:
+- rolling_* は prefix-sum/monotonic-deque で過去方向のみ参照
+- Wilder smoothing (EMA/ATR/RSI/ADX) は recurrence で過去のみ
+- reverse / future-shift は使用しない
+
+学術参照:
+- Wilder, J. W. (1978). New Concepts in Technical Trading Systems. — RSI/ADX/ATR 原典
+- Donchian, R. (1960). Donchian Channels.
+- Bollinger, J. (2001). Bollinger on Bollinger Bands.
+- Appel, G. (2005). Technical Analysis: Power Tools for Active Investors. — MACD
+- Lane, G. (1984). Stochastic Oscillator.
+- Andersen, T. G., & Bollerslev, T. (1997). — realized volatility
+"""
+
+from __future__ import annotations
+
+import numba
+import numpy as np
+
+_EPS = 1e-10
+
+
+# ---------------------------------------------------------------------------
+# 共通スカラー helper (T012 追加)
+# ---------------------------------------------------------------------------
+
+
+def sigmoid(x: np.ndarray | float) -> np.ndarray | float:
+    """数値安定な logistic sigmoid: 1 / (1 + exp(-x))。
+
+    overflow を防ぐため `np.clip(x, -500, 500)` で抑える。
+    入力が float の場合は float、ndarray の場合は ndarray を返す
+    （numpy の dtype 規則に従う）。
+    """
+    x_clipped = np.clip(x, -500.0, 500.0)
+    return 1.0 / (1.0 + np.exp(-x_clipped))
+
+
+# ---------------------------------------------------------------------------
+# セッション境界（UTC, DST 無視, T012 で集約）
+# ---------------------------------------------------------------------------
+
+# F6 SessionMomentum (T011) と M2 SessionGate (T012) で共有する正規定義。
+# 0=Tokyo / 1=London / 2=NY (open_hour, close_hour)。
+_SESSION_RANGES_UTC: dict[int, tuple[int, int]] = {
+    0: (0, 9),    # Tokyo
+    1: (7, 16),   # London
+    2: (12, 21),  # NY
+}
+
+
+# ---------------------------------------------------------------------------
+# rolling 系 O(N) ヘルパー
+# ---------------------------------------------------------------------------
+
+
+def rolling_sum(values: np.ndarray, n: int) -> np.ndarray:
+    """長さ n の過去方向 rolling sum を返す。warmup 部 (i < n-1) は NaN。
+
+    O(N) 実装: `cumsum[i] - cumsum[i-n]`。
+    入力に NaN を含まない前提（呼び出し側で事前処理）。
+    """
+    if n <= 0:
+        raise ValueError(f"n must be >= 1, got {n}")
+    values = np.asarray(values, dtype=np.float64)
+    length = len(values)
+    out = np.full(length, np.nan, dtype=np.float64)
+    if length < n:
+        return out
+    cs = np.cumsum(values)
+    out[n - 1] = cs[n - 1]
+    if length > n:
+        out[n:] = cs[n:] - cs[:-n]
+    return out
+
+
+def rolling_mean(values: np.ndarray, n: int) -> np.ndarray:
+    s = rolling_sum(values, n)
+    return s / float(n)
+
+
+def sma(values: np.ndarray, n: int) -> np.ndarray:
+    """Simple Moving Average (= rolling_mean) のエイリアス。"""
+    return rolling_mean(values, n)
+
+
+def rolling_std(values: np.ndarray, n: int, ddof: int = 0) -> np.ndarray:
+    """長さ n の過去方向 rolling 標準偏差 (population; ddof=0 default)。
+
+    O(N) 実装: `var = E[X²] - (E[X])²` を prefix-sum 2 本で算出。
+    numerical round-off で var が負になりうるため max(var, 0) でクランプ。
+    """
+    if n <= 1 and ddof >= n:
+        raise ValueError(f"n ({n}) must exceed ddof ({ddof})")
+    values = np.asarray(values, dtype=np.float64)
+    s = rolling_sum(values, n)
+    s2 = rolling_sum(values * values, n)
+    # var = E[X²] - (E[X])² (ddof=0) or (Σx² - (Σx)²/n) / (n - ddof) (ddof>0)
+    var = (
+        s2 / n - (s / n) ** 2
+        if ddof == 0
+        else (s2 - (s * s) / n) / (n - ddof)
+    )
+    var = np.maximum(var, 0.0)
+    out = np.sqrt(var)
+    # warmup NaN は s 経由で既に NaN
+    return out
+
+
+def rolling_max(values: np.ndarray, n: int) -> np.ndarray:
+    """Monotonic deque による O(N) rolling max。warmup (i<n-1) は NaN。
+
+    Numba JIT 化 (T088 cycle 1 profile-optimize): collections.deque を fixed-size
+    int64 circular buffer (head/tail インデックス) に置換。 現行 comparator
+    (`<=` で右から drop) をそのまま再現、 数値出力は現行と numerically identical。
+    """
+    if n <= 0:
+        raise ValueError(f"n must be >= 1, got {n}")
+    values = np.asarray(values, dtype=np.float64)
+    return _rolling_max_jit(values, n)
+
+
+@numba.njit(cache=True, fastmath=False)
+def _rolling_max_jit(values: np.ndarray, n: int) -> np.ndarray:
+    length = values.shape[0]
+    out = np.full(length, np.nan, dtype=np.float64)
+    # circular buffer: 最大 n 個保持 (window 外を drop するので n より長くならない)
+    dq = np.empty(n, dtype=np.int64)
+    head = 0  # buffer の先頭 index (front)
+    tail = 0  # buffer の末尾 index (back exclusive)
+    size = 0
+    for i in range(length):
+        # window 外を front から drop
+        while size > 0 and dq[head] <= i - n:
+            head = (head + 1) % n
+            size -= 1
+        # 小さい値を back から drop (strict: <= で drop = 等値も drop = 現行と一致)
+        while size > 0:
+            back_idx = (tail - 1 + n) % n
+            if values[dq[back_idx]] <= values[i]:
+                tail = back_idx
+                size -= 1
+            else:
+                break
+        # back に追加
+        dq[tail] = i
+        tail = (tail + 1) % n
+        size += 1
+        if i >= n - 1:
+            out[i] = values[dq[head]]
+    return out
+
+
+def rolling_min(values: np.ndarray, n: int) -> np.ndarray:
+    """Monotonic deque による O(N) rolling min。warmup (i<n-1) は NaN。
+
+    Numba JIT 化 (T088 cycle 1 profile-optimize): rolling_max と完全対称、
+    comparator が `>=` で右から drop の違いのみ。
+    """
+    if n <= 0:
+        raise ValueError(f"n must be >= 1, got {n}")
+    values = np.asarray(values, dtype=np.float64)
+    return _rolling_min_jit(values, n)
+
+
+@numba.njit(cache=True, fastmath=False)
+def _rolling_min_jit(values: np.ndarray, n: int) -> np.ndarray:
+    length = values.shape[0]
+    out = np.full(length, np.nan, dtype=np.float64)
+    dq = np.empty(n, dtype=np.int64)
+    head = 0
+    tail = 0
+    size = 0
+    for i in range(length):
+        while size > 0 and dq[head] <= i - n:
+            head = (head + 1) % n
+            size -= 1
+        while size > 0:
+            back_idx = (tail - 1 + n) % n
+            if values[dq[back_idx]] >= values[i]:  # rolling_max と違い >=
+                tail = back_idx
+                size -= 1
+            else:
+                break
+        dq[tail] = i
+        tail = (tail + 1) % n
+        size += 1
+        if i >= n - 1:
+            out[i] = values[dq[head]]
+    return out
+
+
+def rolling_corr(x: np.ndarray, y: np.ndarray, n: int) -> np.ndarray:
+    """長さ n の過去方向 rolling Pearson 相関。warmup (i<n-1) は NaN。
+
+    O(N) 実装: Σx, Σy, Σxy, Σx², Σy² の 5 本 prefix-sum を差分更新し、
+    各 i で r = (n*Σxy - Σx*Σy) / sqrt((n*Σx² - (Σx)²)(n*Σy² - (Σy)²))。
+    denom == 0 は NaN。
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if len(x) != len(y):
+        raise ValueError("x and y must have the same length")
+    sx = rolling_sum(x, n)
+    sy = rolling_sum(y, n)
+    sxx = rolling_sum(x * x, n)
+    syy = rolling_sum(y * y, n)
+    sxy = rolling_sum(x * y, n)
+    num = n * sxy - sx * sy
+    denx = np.maximum(n * sxx - sx * sx, 0.0)
+    deny = np.maximum(n * syy - sy * sy, 0.0)
+    denom = np.sqrt(denx * deny)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.where(denom > 0, num / denom, np.nan)
+    # np.where は broadcasting 済み ndarray を返すため、入力が float の場合も ndarray
+    # 出力を clip して numerical noise で [-1, +1] を僅かに超えるケースを抑える
+    out = np.clip(out, -1.0, 1.0)
+    # NaN は clip で保持されない場合があるため mask 戻し
+    out = np.where(np.isnan(denom), np.nan, out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# EMA 系
+# ---------------------------------------------------------------------------
+
+
+def ema(values: np.ndarray, n: int) -> np.ndarray:
+    """指数移動平均。seed は最初の n 個の SMA、α = 2/(n+1)。
+
+    warmup: out[i<n-1] = NaN。
+    """
+    if n <= 0:
+        raise ValueError(f"n must be >= 1, got {n}")
+    values = np.asarray(values, dtype=np.float64)
+    length = len(values)
+    out = np.full(length, np.nan, dtype=np.float64)
+    if length < n:
+        return out
+    alpha = 2.0 / (n + 1.0)
+    seed = float(values[:n].mean())
+    out[n - 1] = seed
+    prev = seed
+    for i in range(n, length):
+        cur = alpha * values[i] + (1.0 - alpha) * prev
+        out[i] = cur
+        prev = cur
+    return out
+
+
+def _wilder_smooth(values: np.ndarray, n: int) -> np.ndarray:
+    """Wilder smoothing: seed = mean(values[:n]), α = 1/n.
+
+    values の先頭 n 個の平均を seed とし、以降 recurrence。
+    入力 NaN は 0 扱いしない（呼び出し側で除外する契約）。
+    warmup: out[i<n-1] = NaN。途中 NaN は前値維持 (現行契約)。
+
+    T088 cycle 1 profile-optimize: recurrence loop のみ Numba JIT 化、 seed は
+    現行 np.nanmean/mean を維持して exact parity を保証 (Codex Round 1 指摘)。
+    """
+    if n <= 0:
+        raise ValueError(f"n must be >= 1, got {n}")
+    values = np.asarray(values, dtype=np.float64)
+    length = len(values)
+    out = np.full(length, np.nan, dtype=np.float64)
+    if length < n:
+        return out
+    # seed: 現行と完全に同一の演算順序で計算 (exact parity 保証)
+    # NaN を含む場合、先頭 n に NaN が混じっていたら seed が NaN に伝播する
+    seed = (
+        float(np.nanmean(values[:n]))
+        if np.any(np.isnan(values[:n]))
+        else float(values[:n].mean())
+    )
+    if np.isnan(seed):
+        # 全 NaN 等で seed = NaN → out は全区間 NaN のまま return (現行と整合)
+        # Note: ±inf の場合は早期 return せず、 現行と同様 recurrence に流す
+        # (`out[n-1]=inf` → 以降 inf 伝播 = 現行 Python loop と numerically identical)。
+        return out
+    out[n - 1] = seed
+    # recurrence loop のみ Numba JIT 化 (途中 NaN 前値維持の semantics 維持)
+    _wilder_smooth_recurrence_jit(values, out, n, seed)
+    return out
+
+
+@numba.njit(cache=True, fastmath=False)
+def _wilder_smooth_recurrence_jit(
+    values: np.ndarray,
+    out: np.ndarray,
+    n: int,
+    seed: float,
+) -> None:
+    """In-place: out[n:length] を recurrence で埋める。 out[n-1]=seed は呼び出し側で設定済。"""
+    length = values.shape[0]
+    prev = seed
+    n_minus_1 = float(n - 1)
+    n_float = float(n)
+    for i in range(n, length):
+        v = values[i]
+        # IEEE 754: NaN != NaN なので `v == v` は np.isnan(v) と等価 (float64 前提)。
+        # Numba 内では np.isnan より `v == v` が高速かつ JIT 互換性が高い。
+        if v == v:  # not NaN
+            cur = (prev * n_minus_1 + v) / n_float
+            out[i] = cur
+            prev = cur
+        else:
+            # 途中 NaN は前値維持 (現行契約、 adx() の NaN parity)
+            out[i] = prev
+
+
+# ---------------------------------------------------------------------------
+# TR / ATR
+# ---------------------------------------------------------------------------
+
+
+def true_range(
+    high: np.ndarray, low: np.ndarray, close: np.ndarray
+) -> np.ndarray:
+    """True Range。
+
+    TR[0] = high[0] - low[0]
+    TR[i] = max(high[i] - low[i], |high[i] - close[i-1]|, |low[i] - close[i-1]|) for i >= 1
+    """
+    high = np.asarray(high, dtype=np.float64)
+    low = np.asarray(low, dtype=np.float64)
+    close = np.asarray(close, dtype=np.float64)
+    length = len(high)
+    tr = np.empty(length, dtype=np.float64)
+    if length == 0:
+        return tr
+    tr[0] = high[0] - low[0]
+    if length > 1:
+        prev_close = close[:-1]
+        h = high[1:]
+        lo = low[1:]
+
+exec
+/bin/zsh -lc "sed -n '340,760p' src/alpha_factory/primitives/_indicators.py" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+        lo = low[1:]
+        tr[1:] = np.maximum.reduce(
+            [h - lo, np.abs(h - prev_close), np.abs(lo - prev_close)]
+        )
+    return tr
+
+
+def atr(
+    high: np.ndarray, low: np.ndarray, close: np.ndarray, n: int
+) -> np.ndarray:
+    """ATR (Wilder smoothing, α = 1/n)。warmup (i<n-1) は NaN。"""
+    tr = true_range(high, low, close)
+    return _wilder_smooth(tr, n)
+
+
+# ---------------------------------------------------------------------------
+# RSI
+# ---------------------------------------------------------------------------
+
+
+def rsi(values: np.ndarray, n: int) -> np.ndarray:
+    """Wilder RSI。
+
+    diff[i] = v[i] - v[i-1] (i>=1)
+    up = max(diff, 0), down = max(-diff, 0)
+    avg_up/avg_down = Wilder_EMA(..., n), seed = mean(up[1:n+1]) 等
+    rs = avg_up / avg_down; rsi = 100 - 100/(1+rs)
+    avg_down == 0 の区間は rsi = 100。
+    warmup: rsi[i<=n] = NaN（seed が i=n 時点）。
+    """
+    if n <= 0:
+        raise ValueError(f"n must be >= 1, got {n}")
+    values = np.asarray(values, dtype=np.float64)
+    length = len(values)
+    out = np.full(length, np.nan, dtype=np.float64)
+    if length < n + 1:
+        return out
+    diff = np.diff(values, prepend=values[0])  # diff[0] = 0
+    up = np.where(diff > 0, diff, 0.0)
+    down = np.where(diff < 0, -diff, 0.0)
+    # seed: mean over i in [1, n] (inclusive) == indices 1..n
+    avg_up = np.full(length, np.nan, dtype=np.float64)
+    avg_down = np.full(length, np.nan, dtype=np.float64)
+    # index n has seed
+    seed_up = float(up[1 : n + 1].mean())
+    seed_down = float(down[1 : n + 1].mean())
+    avg_up[n] = seed_up
+    avg_down[n] = seed_down
+    prev_up = seed_up
+    prev_down = seed_down
+    for i in range(n + 1, length):
+        prev_up = (prev_up * (n - 1) + up[i]) / n
+        prev_down = (prev_down * (n - 1) + down[i]) / n
+        avg_up[i] = prev_up
+        avg_down[i] = prev_down
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rs = np.where(avg_down > 0, avg_up / avg_down, np.inf)
+        out = 100.0 - 100.0 / (1.0 + rs)
+    out = np.where(np.isnan(avg_up), np.nan, out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Bollinger
+# ---------------------------------------------------------------------------
+
+
+def bollinger(
+    values: np.ndarray, n: int, k: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Bollinger Bands (mid=SMA, std=population std, upper/lower = mid ± k*std)。"""
+    mid = sma(values, n)
+    std = rolling_std(values, n, ddof=0)
+    upper = mid + k * std
+    lower = mid - k * std
+    return mid, std, upper, lower
+
+
+# ---------------------------------------------------------------------------
+# Stochastic
+# ---------------------------------------------------------------------------
+
+
+def stochastic(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    n: int,
+    d_period: int = 3,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Stochastic Oscillator (%K, %D)。
+
+    %K = 100 * (C - min_low(n)) / (max_high(n) - min_low(n) + eps)
+    %D = SMA(%K, d_period)
+    warmup %K: i < n-1 → NaN。
+    """
+    hi = rolling_max(high, n)
+    lo = rolling_min(low, n)
+    denom = hi - lo
+    with np.errstate(divide="ignore", invalid="ignore"):
+        k = np.where(denom > 0, 100.0 * (close - lo) / denom, 0.0)
+    # warmup は hi/lo が NaN → k に伝播させる
+    k = np.where(np.isnan(hi) | np.isnan(lo), np.nan, k)
+    k = np.clip(k, 0.0, 100.0)
+    k = np.where(np.isnan(hi) | np.isnan(lo), np.nan, k)  # clip で nan 消えたら戻す
+    d = sma(k, d_period)
+    return k, d
+
+
+# ---------------------------------------------------------------------------
+# MACD
+# ---------------------------------------------------------------------------
+
+
+def macd(
+    values: np.ndarray, fast: int, slow: int, signal_n: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """MACD = EMA(fast) - EMA(slow); Signal = EMA(MACD, signal_n); Hist = MACD - Signal."""
+    ef = ema(values, fast)
+    es = ema(values, slow)
+    m = ef - es
+    # signal 用に ema を計算するが、m に NaN があるので NaN を含んだ入力になる
+    # ema は NaN 伝播で warmup を拡張する: seed 計算で np.nan 入ると失敗
+    # ここでは slow 以降の値が有効なので、slow 分ずらして EMA を計算する実装
+    length = len(values)
+    s = np.full(length, np.nan, dtype=np.float64)
+    start = max(fast, slow) - 1  # m が有効になる先頭 index
+    if length - start >= signal_n:
+        # 有効範囲だけで EMA を計算し元の index に戻す
+        sub = m[start:]
+        sub_ema = ema(sub, signal_n)
+        s[start:] = sub_ema
+    hist = m - s
+    return m, s, hist
+
+
+# ---------------------------------------------------------------------------
+# Donchian
+# ---------------------------------------------------------------------------
+
+
+def donchian(
+    high: np.ndarray, low: np.ndarray, n: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Donchian channel (upper=rolling_max(high,n), lower=rolling_min(low,n), mid)."""
+    hi = rolling_max(high, n)
+    lo = rolling_min(low, n)
+    mid = (hi + lo) / 2.0
+    return hi, lo, mid
+
+
+# ---------------------------------------------------------------------------
+# ADX
+# ---------------------------------------------------------------------------
+
+
+def adx(
+    high: np.ndarray, low: np.ndarray, close: np.ndarray, n: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """ADX / +DI / -DI (Wilder smoothing)。
+
+    返り値: (adx, plus_di, minus_di)
+    warmup: i < 2n-1 程度で NaN。
+    """
+    high = np.asarray(high, dtype=np.float64)
+    low = np.asarray(low, dtype=np.float64)
+    close = np.asarray(close, dtype=np.float64)
+    length = len(high)
+    plus_di = np.full(length, np.nan, dtype=np.float64)
+    minus_di = np.full(length, np.nan, dtype=np.float64)
+    adx_out = np.full(length, np.nan, dtype=np.float64)
+    if length < 2:
+        return adx_out, plus_di, minus_di
+
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # index 0 は未定義
+    plus_dm_full = np.concatenate([[0.0], plus_dm])
+    minus_dm_full = np.concatenate([[0.0], minus_dm])
+
+    tr = true_range(high, low, close)
+
+    # Wilder smoothing on tr, plus_dm, minus_dm starting at index n.
+    # seed は mean (Wilder 原典は sum then smooth だが、mean seed で
+    # _wilder_smooth と一貫性を保つ)。
+
+    sm_tr = _wilder_smooth(tr, n)
+    sm_plus = _wilder_smooth(plus_dm_full, n)
+    sm_minus = _wilder_smooth(minus_dm_full, n)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        plus_di = np.where(sm_tr > 0, 100.0 * sm_plus / sm_tr, 0.0)
+        minus_di = np.where(sm_tr > 0, 100.0 * sm_minus / sm_tr, 0.0)
+    plus_di = np.where(np.isnan(sm_tr), np.nan, plus_di)
+    minus_di = np.where(np.isnan(sm_tr), np.nan, minus_di)
+
+    di_sum = plus_di + minus_di
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dx = np.where(di_sum > 0, 100.0 * np.abs(plus_di - minus_di) / di_sum, 0.0)
+    dx = np.where(np.isnan(plus_di) | np.isnan(minus_di), np.nan, dx)
+
+    adx_out = _wilder_smooth(dx, n)
+    return adx_out, plus_di, minus_di
+
+
+# ---------------------------------------------------------------------------
+# Realized vol / z-score
+# ---------------------------------------------------------------------------
+
+
+def log_returns_from_close(close: np.ndarray) -> np.ndarray:
+    """対数収益率 log(c[i]/c[i-1])。先頭 [0] = NaN。"""
+    close = np.asarray(close, dtype=np.float64)
+    length = len(close)
+    out = np.full(length, np.nan, dtype=np.float64)
+    if length < 2:
+        return out
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = close[1:] / close[:-1]
+        out[1:] = np.where(
+            (close[:-1] > 0) & (ratio > 0), np.log(ratio), np.nan
+        )
+    return out
+
+
+def realized_vol(log_ret: np.ndarray, n: int) -> np.ndarray:
+    """sqrt(rolling_sum(r², n) / n)。log_ret の NaN は 0 扱いせずに伝播。"""
+    log_ret = np.asarray(log_ret, dtype=np.float64)
+    # NaN を含む場合、rolling_sum が NaN になる → realized_vol も NaN。
+    # 先頭 [0] の NaN を避けるため NaN を 0 に置換してから rolling_sum。
+    # 先頭 [0:1] の 0 を使うと bias するため、先頭マスクを別途掛ける。
+    safe = np.where(np.isnan(log_ret), 0.0, log_ret)
+    s = rolling_sum(safe * safe, n)
+    out = np.sqrt(np.maximum(s / n, 0.0))
+    # 最初の n 個は rolling_sum で NaN、さらに log_ret[0] が NaN である以上 i>=n で有効
+    return out
+
+
+def zscore(values: np.ndarray, n: int) -> np.ndarray:
+    """(x - rolling_mean) / rolling_std (ddof=0)。std==0 は NaN。"""
+    m = rolling_mean(values, n)
+    s = rolling_std(values, n, ddof=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.where(s > 0, (values - m) / s, np.nan)
+    # m が NaN の warmup 区間は out も NaN にする
+    out = np.where(np.isnan(m), np.nan, out)
+    return out
+
+exec
+/bin/zsh -lc "sed -n '280,620p' src/alpha_factory/primitives/modulator_generic.py" in /Users/ishitoya/repository/zenigame-fx
+exec
+/bin/zsh -lc "sed -n '1,280p' src/alpha_factory/primitives/modulator_generic.py" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+"""全 FX ペア共通の MODULATOR primitive 6 個（T012）。
+
+MODULATOR (6): M1 ATRRegimeGate, M2 SessionGate, M3 SpreadConditionGate,
+               M4 EconomicEventGate, M5 VIXRegimeGate, M6 TrendStrengthGate
+
+すべて:
+- domain = "generic"
+- category = "MODULATOR"
+- 出力は [0, 1] bounded（warmup は np.nan）
+- compute と compute_all_bars の両 API を提供
+- GA slot は "local_gate"（slot_from_category("MODULATOR") = "local_gate"）
+
+ensure_registered() を production path から 1 回呼ぶことで 6 個を registry に
+登録する（T011 directional_generic と同じ規約）。
+
+look-ahead bias 回避:
+- M1 ATR / M6 ADX は Wilder smoothing で過去のみ参照
+- M2 SessionGate は bar_time の hour/minute だけで決まり deterministic
+- M3 SpreadConditionGate は close 時点の bid/ask スプレッドを参照
+  （signal at close → execute next bar open 規約と整合、MVP では proxy）
+- M4 EconomicEventGate は `event.event_time` のみ参照、`event.actual` は触れない
+  さらに `event_time > as_of` のイベントは「bar_time 時点で未知」として除外
+- M5 VIXRegimeGate は `publication_ts_utc < bar_time` (strict less than) で
+  bisect_left lookup（同時刻 publication は除外）
+- snapshot=None 時は `RuntimeWarning` + safe default、
+  `strict_snapshot_required=True` 時は `RuntimeError` で fail-fast
+
+学術引用: _indicators.py 冒頭を参照。
+"""
+
+from __future__ import annotations
+
+import bisect
+import warnings
+from collections.abc import Callable
+from datetime import UTC
+
+import numpy as np
+
+from src.alpha_factory.primitives._bars_cache import (
+    bars_to_mid_ohlc as _bars_to_mid_ohlc,
+)
+from src.alpha_factory.primitives._base import (
+    EvaluationContext,
+    ParamSpec,
+    PrimitiveSpec,
+)
+from src.alpha_factory.primitives._indicators import (
+    _EPS,
+    _SESSION_RANGES_UTC,
+    adx,
+    atr,
+    sigmoid,
+)
+
+# ---------------------------------------------------------------------------
+# 共通 helper（_bars_cache.py に統合済み: T030）
+# ---------------------------------------------------------------------------
+
+
+def _nan_to_neutral(x: float, neutral: float) -> float:
+    """NaN / inf を neutral 値に吸収（compute single-point 用）。"""
+    return neutral if not np.isfinite(x) else float(x)
+
+
+_ComputeAllFn = Callable[[EvaluationContext], np.ndarray]
+
+
+def _make_compute_single(
+    compute_all: _ComputeAllFn, *, neutral: float = 0.5
+) -> Callable[[EvaluationContext], float]:
+    """compute_all_bars から compute(single-point) を作る。
+
+    warmup 内 (NaN) / range 外 は MODULATOR の neutral 値 (default 0.5) を返す。
+    directional_generic では neutral=0.0 だが、MODULATOR の出力域 [0,1] では
+    0.5 が中立 gate (pass-through に近い扱い)。
+    """
+
+    def _compute(ctx: EvaluationContext) -> float:
+        arr = compute_all(ctx)
+        idx = ctx.idx
+        if idx < 0 or idx >= len(arr):
+            return neutral
+        val = arr[idx]
+        return _nan_to_neutral(float(val), neutral)
+
+    return _compute
+
+
+def _get_int_param(params, key: str) -> int:
+    return int(params[key])
+
+
+def _get_float_param(params, key: str) -> float:
+    return float(params[key])
+
+
+# ---------------------------------------------------------------------------
+# M1 ATRRegimeGate (MODULATOR)
+# ---------------------------------------------------------------------------
+
+
+def _m1_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    """ATR を close 相対比率 (atr/close) に正規化し sigmoid gate。
+
+    pair 非依存（EURUSD: atr~0.003, USDJPY: atr~0.45 を比率 0.003 で揃える）。
+    `prefer_high=1` のとき高 ATR で 1 / 低 ATR で 0、`prefer_high=0` のとき逆。
+    """
+    _, h, low, c = _bars_to_mid_ohlc(ctx.bars)
+    n = _get_int_param(ctx.params, "n")
+    threshold_rel = _get_float_param(ctx.params, "threshold_rel")
+    scale_rel = _get_float_param(ctx.params, "scale_rel")
+    prefer_high = _get_int_param(ctx.params, "prefer_high")  # 0 or 1
+    a = atr(h, low, c, n)
+    atr_rel = a / (c + _EPS)
+    direction = 1.0 if prefer_high == 1 else -1.0
+    raw = direction * (atr_rel - threshold_rel) / (scale_rel + _EPS)
+    out = sigmoid(raw)
+    out = np.where(np.isnan(a), np.nan, out)
+    return out
+
+
+M1_SPEC = PrimitiveSpec(
+    id="M1",
+    name="ATRRegimeGate",
+    category="MODULATOR",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="n", low=7, high=28, is_int=True, default=14),
+        # ATR を close 相対比率 (atr / close) に正規化して pair 非依存化
+        ParamSpec(
+            name="threshold_rel", low=0.0001, high=0.02,
+            is_int=False, default=0.003,
+        ),
+        ParamSpec(
+            name="scale_rel", low=0.00001, high=0.01,
+            is_int=False, default=0.0015,
+        ),
+        ParamSpec(
+            name="prefer_high", low=0, high=1, is_int=True, default=1,
+        ),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_m1_compute_all),
+    compute_all_bars=_m1_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# M2 SessionGate (MODULATOR)
+# ---------------------------------------------------------------------------
+
+
+def _m2_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    """指定 session (tokyo/london/ny) 内で 1、外で 0 (step)。
+
+    `soft_edge_min > 0` のとき境界 ±soft_edge_min 分を sigmoid blend
+    （open/close 両 gate の積で AND-like blend）。
+    warmup なし (deterministic)。
+    """
+    length = len(ctx.bars)
+    session = _get_int_param(ctx.params, "session")
+    soft_edge_min = _get_float_param(ctx.params, "soft_edge_min")
+    if session not in _SESSION_RANGES_UTC:
+        # defensive: clamp to nearest defined session
+        session = max(0, min(2, session))
+    lo_h, hi_h = _SESSION_RANGES_UTC[session]
+    lo_min = lo_h * 60.0
+    hi_min = hi_h * 60.0
+    out = np.zeros(length, dtype=np.float64)
+    for i in range(length):
+        b = ctx.bars[i]
+        t_utc = b.bar_time.astimezone(UTC)
+        minutes = t_utc.hour * 60.0 + t_utc.minute + t_utc.second / 60.0
+        if soft_edge_min <= 0:
+            out[i] = 1.0 if lo_min <= minutes < hi_min else 0.0
+        else:
+            # 境界 ±soft_edge_min 分を sigmoid blend
+            #   open_gate = sigmoid((minutes - lo_min) / soft_edge_min)
+            #   close_gate = sigmoid((hi_min - minutes) / soft_edge_min)
+            # 両 gate の積で AND-like blend (session 内で ~1、境界で急減少)
+            open_gate = sigmoid((minutes - lo_min) / soft_edge_min)
+            close_gate = sigmoid((hi_min - minutes) / soft_edge_min)
+            out[i] = float(open_gate * close_gate)
+    return out
+
+
+M2_SPEC = PrimitiveSpec(
+    id="M2",
+    name="SessionGate",
+    category="MODULATOR",
+    domain="generic",
+    param_schema=(
+        # 0=Tokyo / 1=London / 2=NY
+        ParamSpec(name="session", low=0, high=2, is_int=True, default=0),
+        ParamSpec(
+            name="soft_edge_min", low=0.0, high=60.0,
+            is_int=False, default=0.0,
+        ),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_m2_compute_all),
+    compute_all_bars=_m2_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# M3 SpreadConditionGate (MODULATOR)
+# ---------------------------------------------------------------------------
+
+
+def _m3_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    """bar close 時点の bid/ask スプレッド (bps) が threshold 以下で 1 に近づく。
+
+    spread_bps = (ask.close - bid.close) / mid * 10000
+    out = sigmoid(-k * (spread_bps - threshold_bps))
+
+    実行タイミング規約: zenigame-fx の backtest は signal at close →
+    execute next bar open のため、本 primitive は bar close 時点のスプレッドを
+    proxy として参照する（次バー約定時のスプレッドとは異なる可能性あり）。
+    厳密な next-bar spread 参照は後続 TODO で検討。
+    """
+    length = len(ctx.bars)
+    threshold_bps = _get_float_param(ctx.params, "threshold_bps")
+    k = _get_float_param(ctx.params, "k")
+    bid_c = np.array([float(b.bid.close) for b in ctx.bars], dtype=np.float64)
+    ask_c = np.array([float(b.ask.close) for b in ctx.bars], dtype=np.float64)
+    mid = (bid_c + ask_c) * 0.5
+    with np.errstate(divide="ignore", invalid="ignore"):
+        spread_bps = np.where(
+            mid > 0, (ask_c - bid_c) / mid * 10000.0, np.nan
+        )
+    out = sigmoid(-k * (spread_bps - threshold_bps))
+    out = np.where(np.isnan(spread_bps), np.nan, out)
+    # length 0 防御（length=0 のとき sigmoid 結果も length 0 だが型を維持）
+    if length == 0:
+        return np.zeros(0, dtype=np.float64)
+    return out
+
+
+M3_SPEC = PrimitiveSpec(
+    id="M3",
+    name="SpreadConditionGate",
+    category="MODULATOR",
+    domain="generic",
+    param_schema=(
+        ParamSpec(
+            name="threshold_bps", low=0.1, high=20.0,
+            is_int=False, default=2.0,
+        ),
+        ParamSpec(name="k", low=0.1, high=5.0, is_int=False, default=1.0),
+    ),
+    required_data=("ohlc", "spread"),
+    compute=_make_compute_single(_m3_compute_all),
+    compute_all_bars=_m3_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# M4 EconomicEventGate (MODULATOR)
+# ---------------------------------------------------------------------------
+
+
+def _m4_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    """high-impact event の ±window 分を抑制 gate。
+
+    formula: out = 1 - sigmoid((window_min - |Δt_min|) / scale_min)
+    Δt_min = (bar_time - event_time) を分単位で取った絶対値。
+    `min_impact` 以上のイベントだけ対象。
+
+    look-ahead 回避:
+        - `event.event_time > snapshot.as_of` のイベントは未知として除外
+        - T039: `snapshot.as_of_strict=True` の場合 **per-bar gate** を有効化、
+          `event.event_time > bar_time[i]` のイベントは bar i では除外
+          (二段ガード)。snapshot.as_of は最大 cap として残る
+        - `event.actual` は参照しない（schedule のみ使用）
+
+    snapshot=None:
+        - `strict_snapshot_required=True` → RuntimeError
+        - それ以外 → RuntimeWarning + 全 1.0 (gate 開放 = 影響なし)
+
+ succeeded in 0ms:
+        - それ以外 → RuntimeWarning + 全 1.0 (gate 開放 = 影響なし)
+    """
+    length = len(ctx.bars)
+    window_min = _get_float_param(ctx.params, "window_min")
+    scale_min = _get_float_param(ctx.params, "scale_min")
+    min_impact = _get_int_param(ctx.params, "min_impact")
+    if ctx.event_snapshot is None:
+        if ctx.strict_snapshot_required:
+            raise RuntimeError(
+                "M4 EconomicEventGate: event_snapshot is None but "
+                "strict_snapshot_required=True. "
+                "Provide EconomicEventSnapshot or disable strict mode."
+            )
+        warnings.warn(
+            "M4 EconomicEventGate: event_snapshot is None; returning 1.0 "
+            "safe default (gate open). Production path must provide "
+            "EconomicEventSnapshot (or use strict mode).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return np.ones(length, dtype=np.float64)
+
+    snapshot = ctx.event_snapshot
+    calendar = snapshot.calendar
+    as_of = snapshot.as_of
+    strict = snapshot.as_of_strict
+
+    pair = ctx.pair
+    try:
+        base, quote = calendar.instrument_currencies(pair)
+    except Exception:
+        base, quote = ("", "")
+    as_of_ts = as_of.timestamp()
+    # T039: as_of で 1 段目 cap (relevant 集合を絞り込み)。
+    # 2 段目 cap (per-bar) は strict=True のときに bar ループ内で適用する。
+    relevant_events = [
+        e for e in calendar.events
+        if e.impact >= min_impact
+        and e.currency in (base, quote)
+        and e.event_time.timestamp() <= as_of_ts
+    ]
+    out = np.ones(length, dtype=np.float64)
+    if not relevant_events:
+        return out
+    event_times = np.array(
+        [e.event_time.timestamp() for e in relevant_events], dtype=np.float64
+    )
+    # T039: per-bar gate のため event_times は昇順ソート (bisect 化のため)
+    if strict:
+        event_times = np.sort(event_times)
+    for i in range(length):
+        t = ctx.bars[i].bar_time.timestamp()
+        if strict:
+            # T039 per-bar gate: bar_time までに既知のイベントのみ採用 (二段目 cap)。
+            # event_times は昇順なので bisect_right で event_time <= t の cutoff を
+            # O(log E) で取得し、最近接候補は cutoff-1 (= 直前の既知イベント)
+            # のみを参照すれば十分 (Codex round-1 [Suggestion] 反映: prefix 全走査
+            # ではなく O(1) 評価に短縮)。strict 化では future event は除外される
+            # ため、最近接イベントは必ず "bar_time 以下で最大" の event_time。
+            cutoff = int(np.searchsorted(event_times, t, side="right"))
+            if cutoff == 0:
+                # bar i 時点で既知イベントなし → gate 開放
+                out[i] = 1.0
+                continue
+            diff_sec = t - float(event_times[cutoff - 1])
+        else:
+            # legacy MVP: 全 event の中で最近接 (将来 event も含む)。
+            # 過去/未来両側を見る必要があるため、event_times がソート済の場合は
+            # bar_time の左右から距離最小値を求めれば O(log E) だが、legacy は
+            # ソート保証無く既存挙動互換のため線形スキャンを維持。
+            diff_sec = float(np.min(np.abs(event_times - t)))
+        diff_min = abs(diff_sec) / 60.0
+        raw = (window_min - diff_min) / (scale_min + _EPS)
+        out[i] = 1.0 - float(sigmoid(raw))
+    return out
+
+
+M4_SPEC = PrimitiveSpec(
+    id="M4",
+    name="EconomicEventGate",
+    category="MODULATOR",
+    domain="generic",
+    param_schema=(
+        ParamSpec(
+            name="window_min", low=5.0, high=120.0,
+            is_int=False, default=30.0,
+        ),
+        ParamSpec(
+            name="scale_min", low=1.0, high=30.0,
+            is_int=False, default=5.0,
+        ),
+        ParamSpec(
+            name="min_impact", low=1, high=3, is_int=True, default=3,
+        ),
+    ),
+    required_data=("ohlc", "calendar.economic_event"),
+    compute=_make_compute_single(_m4_compute_all, neutral=1.0),
+    compute_all_bars=_m4_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# M5 VIXRegimeGate (MODULATOR)
+# ---------------------------------------------------------------------------
+
+
+def _m5_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    """直近の VIX 終値 (publication_ts < bar_time) を sigmoid gate に通す。
+
+    out = sigmoid((threshold - vix) / scale)
+    低 VIX (リスクオン) で 1 に近く、高 VIX (恐怖) で 0 に近づく。
+
+    look-ahead 回避:
+        - `bisect_left(pubs, bar_time)` の strict less than で同時刻 publication は除外
+
+    snapshot None or 空:
+        - `strict_snapshot_required=True` → RuntimeError
+        - それ以外 → RuntimeWarning + 全 0.5 (neutral)
+    """
+    length = len(ctx.bars)
+    threshold = _get_float_param(ctx.params, "threshold")
+    scale = _get_float_param(ctx.params, "scale")
+    if ctx.vix_snapshot is None or not ctx.vix_snapshot.observations:
+        if ctx.strict_snapshot_required:
+            raise RuntimeError(
+                "M5 VIXRegimeGate: vix_snapshot missing but "
+                "strict_snapshot_required=True. "
+                "Provide VixSeriesSnapshot or disable strict mode."
+            )
+        warnings.warn(
+            "M5 VIXRegimeGate: vix_snapshot missing; returning 0.5 safe "
+            "default (neutral). Production path must provide "
+            "VixSeriesSnapshot (or use strict mode).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return np.full(length, 0.5, dtype=np.float64)
+
+    obs = ctx.vix_snapshot.observations
+    pubs = [o[0] for o in obs]
+    vals = [o[1] for o in obs]
+    out = np.empty(length, dtype=np.float64)
+    for i in range(length):
+        bar_time = ctx.bars[i].bar_time
+        # strict less than: bisect_left → index 0 なら該当なし
+        k = bisect.bisect_left(pubs, bar_time)
+        if k == 0:
+            out[i] = 0.5  # 前に publication なし → neutral
+            continue
+        vix = vals[k - 1]
+        out[i] = float(sigmoid((threshold - vix) / (scale + _EPS)))
+    return out
+
+
+M5_SPEC = PrimitiveSpec(
+    id="M5",
+    name="VIXRegimeGate",
+    category="MODULATOR",
+    domain="generic",
+    param_schema=(
+        ParamSpec(
+            name="threshold", low=10.0, high=40.0,
+            is_int=False, default=20.0,
+        ),
+        ParamSpec(name="scale", low=1.0, high=15.0, is_int=False, default=5.0),
+    ),
+    required_data=("ohlc", "macro.vix"),
+    compute=_make_compute_single(_m5_compute_all, neutral=0.5),
+    compute_all_bars=_m5_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# M6 TrendStrengthGate (MODULATOR)
+# ---------------------------------------------------------------------------
+
+
+def _m6_compute_all(ctx: EvaluationContext) -> np.ndarray:
+    """ADX(n) を sigmoid gate に通す: 強トレンド (ADX 高) で 1、横ばいで 0。"""
+    _, h, low, c = _bars_to_mid_ohlc(ctx.bars)
+    n = _get_int_param(ctx.params, "n")
+    theta = _get_float_param(ctx.params, "theta")
+    scale = _get_float_param(ctx.params, "scale")
+    adx_arr, _plus, _minus = adx(h, low, c, n)
+    raw = (adx_arr - theta) / (scale + _EPS)
+    out = sigmoid(raw)
+    out = np.where(np.isnan(adx_arr), np.nan, out)
+    return out
+
+
+M6_SPEC = PrimitiveSpec(
+    id="M6",
+    name="TrendStrengthGate",
+    category="MODULATOR",
+    domain="generic",
+    param_schema=(
+        ParamSpec(name="n", low=7, high=28, is_int=True, default=14),
+        ParamSpec(
+            name="theta", low=10.0, high=40.0, is_int=False, default=25.0,
+        ),
+        ParamSpec(name="scale", low=2.0, high=15.0, is_int=False, default=5.0),
+    ),
+    required_data=("ohlc",),
+    compute=_make_compute_single(_m6_compute_all),
+    compute_all_bars=_m6_compute_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# 登録
+# ---------------------------------------------------------------------------
+
+
+_ALL_SPECS: tuple[PrimitiveSpec, ...] = (
+    M1_SPEC,
+    M2_SPEC,
+    M3_SPEC,
+    M4_SPEC,
+    M5_SPEC,
+    M6_SPEC,
+)
+
+
+def ensure_registered() -> None:
+    """6 modulator primitive を registry に登録する。冪等。
+
+    並行安全性: `_registry.register_if_absent` を使い、lock 内で存在確認＋
+    登録を atomic に行う（T011 directional_generic と同じ規約）。
+    """
+    from src.alpha_factory.primitives._registry import register_if_absent
+
+    for spec in _ALL_SPECS:
+        register_if_absent(spec)
+
+
+def all_specs() -> tuple[PrimitiveSpec, ...]:
+    """6 modulator PrimitiveSpec タプルを返す（テスト/インスペクション用）。"""
+    return _ALL_SPECS
+
+
+# ---------------------------------------------------------------------------
+# Public re-export
+# ---------------------------------------------------------------------------
+
+MODULATOR_SPECS: tuple[PrimitiveSpec, ...] = _ALL_SPECS
+
+codex
+既存 primitive を読むと、時間帯ゲート(M2/F6)と単純レジーム(M1/M5/M6)は既にありました。次に `bit-exact` を壊さず新 primitive を opt-in 追加するための最小配線（選択対象フラグ）の有無を確認します。
+exec
+/bin/zsh -lc "sed -n '1,280p' src/alpha_factory/config.py" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+"""Alpha Factory run-time config loader (T018)。
+
+``config/alpha_factory/default.yaml`` を frozen dataclass の階層に変換する。
+CLI override (dict) を deep-merge して最終値を決定する。
+
+SSOT:
+    - ``live_criteria`` は :class:`StageGateConfig` に一元化する
+      (``AlphaFactoryConfig.live_criteria`` は alias property)。
+    - ``cross_pair`` / ``stage_gate`` dataclass は既存 SSOT (src/alpha_factory)
+      をそのまま再利用する (re-export)。
+
+設計根拠:
+    - devnotes/20260423-2324-run-ga-full-rewrite/detailed-design.md §2
+    - devnotes/20260423-2324-run-ga-full-rewrite/detailed-design-r2.md
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
+
+import yaml  # type: ignore[import-untyped]
+
+from src.alpha_factory.cross_pair import CrossPairConfig
+from src.alpha_factory.stage_gate import StageGateConfig
+from src.utils.time import to_utc
+
+if TYPE_CHECKING:
+    from src.alpha_factory.schema_contract import SchemaEnforcementMode
+
+__all__ = [
+    "AlphaFactoryConfig",
+    "BacktestSectionConfig",
+    "CrossPairConfig",
+    "DatasetConfig",
+    "FspConfig",
+    "GAConfig",
+    "GAFeasibilityConfig",
+    "Phase2Config",
+    "Phase4Config",  # PR4
+    "SchemaContractConfig",  # T058
+    "StageGateConfig",
+    "StageWindowsConfig",
+    "load_config",
+]
+
+
+# ---------------------------------------------------------------------------
+# dataclass 階層
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DatasetConfig:
+    """Dataset 範囲 (instrument / start / end). 既存 summary 互換を維持。"""
+
+    instrument: str
+    start: datetime
+    end: datetime
+
+    def __post_init__(self) -> None:
+        if not self.instrument:
+            raise ValueError("dataset.instrument must be non-empty")
+        if self.end <= self.start:
+            raise ValueError(
+                f"dataset.end ({self.end}) must be > dataset.start "
+                f"({self.start})"
+            )
+
+
+@dataclass(frozen=True)
+class BacktestSectionConfig:
+    """Backtest 設定。``BacktestConfig`` (engine) へ渡す際は instrument を
+    factory 側で付与する。"""
+
+    initial_cash: Decimal
+    leverage: int
+    units: int
+    max_spread_bps: Decimal | None = None
+    holding_cost_per_day_bps: Decimal = Decimal("0")
+    session_close_utc_hours: tuple[int, ...] = (23,)
+
+    def __post_init__(self) -> None:
+        if self.leverage < 1:
+            raise ValueError(f"backtest.leverage must be >= 1: {self.leverage}")
+        if self.units < 1:
+            raise ValueError(f"backtest.units must be >= 1: {self.units}")
+        if self.holding_cost_per_day_bps < 0:
+            raise ValueError(
+                f"backtest.holding_cost_per_day_bps must be >= 0: "
+                f"{self.holding_cost_per_day_bps}"
+            )
+        if self.max_spread_bps is not None and self.max_spread_bps < 0:
+            raise ValueError(
+                f"backtest.max_spread_bps must be >= 0 when set: "
+                f"{self.max_spread_bps}"
+            )
+        for h in self.session_close_utc_hours:
+            if not 0 <= h <= 23:
+                raise ValueError(
+                    f"backtest.session_close_utc_hours out of range: {h}"
+                )
+
+
+@dataclass(frozen=True)
+class GAFeasibilityConfig:
+    """GA selection 用 feasibility 制約 (T031 Phase 1: trade_count=0 淘汰のみ)."""
+
+    entry_count_min: int = 1
+    apply_from_generation: int = 0
+    enable_fallback_when_all_infeasible: bool = True
+    entry_count_min_hard_cap: int = 10000
+
+    def __post_init__(self) -> None:
+        if self.entry_count_min < 0:
+            raise ValueError("ga.feasibility.entry_count_min must be >= 0")
+        if self.entry_count_min > self.entry_count_min_hard_cap:
+            raise ValueError(
+                f"ga.feasibility.entry_count_min ({self.entry_count_min}) "
+                f"exceeds hard cap ({self.entry_count_min_hard_cap})"
+            )
+        if self.apply_from_generation < 0:
+            raise ValueError("ga.feasibility.apply_from_generation must be >= 0")
+
+
+@dataclass(frozen=True)
+class GAConfig:
+    """GA hyper-parameters. Stage A の fitness_pen (sharpe - α·size_norm) を
+    内部選択の基底指標とする (R2: fitness_metric != sharpe は warning 出して
+    sharpe として処理)。"""
+
+    population_size: int
+    generations: int
+    crossover_rate: float
+    mutation_rate: float
+    tournament_size: int
+    elite_count: int
+    max_depth: int
+    max_clause: int = 1
+    fitness_metric: Literal["total_pnl", "sharpe", "calmar"] = "sharpe"
+    seed: int | None = None
+    complexity_alpha: float = 0.03
+    complexity_size_ref: float = 10.0
+    n_edit_max: int = 3
+    feasibility: GAFeasibilityConfig = field(default_factory=GAFeasibilityConfig)
+    # T052: GA 評価並列ワーカー数 (1 = sequential, 2 以上で multiprocessing.Pool)。
+    # L1 selection / L2 row-order 決定論性は worker 数に依存しない契約。
+    # 実測 per-worker RSS は pymalloc アリーナ断片化 (run_backtest の Decimal
+    # churn 由来) により数 GB 規模になり得る。max_tasks_per_child で頭打ちする。
+    # 正確な per-worker 試算は Decimal churn 削減 (別タスク) 完了後に再評価。
+    # 上書きは CLI `--max-workers` または YAML `ga.max_workers`。
+    # @ref: devnotes/20260514-2045-ga-worker-memory/
+    max_workers: int = 2
+    # GA 評価 worker のリサイクル間隔 (multiprocessing.Pool の maxtasksperchild)。
+    # worker が指定タスク数を処理したらプロセスごと退役 → 新規 spawn し、
+    # 断片化した pymalloc アリーナを OS に完全返却して per-worker RSS を頭打ちにする。
+    # None = リサイクルなし (従来挙動)。run_ga.py は None 時に
+    # 2*population_size//max_workers (約 2 世代ごと) を自動導出する。
+    # 決定論: 退役 worker は同一 initargs で再 init されるため L1/L2 不変。
+    # @ref: devnotes/20260514-2045-ga-worker-memory/
+    max_tasks_per_child: int | None = None
+    # T101: warmstart pool。初期集団の warmstart_ratio 分を既知 mission/Stage-C
+    # 個体 (warmstart_motif_archive の archive Parquet から抽出) で生成し、
+    # mission 個体を seed 非依存に保持する (再現性確保)。default 0.0 = 完全行動不変。
+    warmstart_ratio: float = 0.0
+    warmstart_motif_archive: str | None = None
+    # T112: NSGA-II only selection (Phase2 step5a)。True で _breed_next_gen の
+    # parent 選抜を Stage B pooled fold-CV Pareto 3軸 (net_pnl/max_dd/mission_inf_gap)
+    # の non-dominated sort + crowding に置換。default False で従来 tournament と
+    # bit-exact 一致。軸は archive pareto_b_* 列 (T111/T112) 由来。
+    nsga2_selection_enabled: bool = False
+
+    def __post_init__(self) -> None:
+        if self.population_size < 1:
+            raise ValueError("ga.population_size must be >= 1")
+        if not 0.0 <= self.warmstart_ratio <= 1.0:
+            raise ValueError(
+                f"ga.warmstart_ratio must be in [0, 1]: {self.warmstart_ratio}"
+            )
+        if self.max_workers < 1:
+            raise ValueError(
+                f"ga.max_workers must be >= 1: {self.max_workers}"
+            )
+        if (
+            self.max_tasks_per_child is not None
+            and self.max_tasks_per_child < 1
+        ):
+            raise ValueError(
+                "ga.max_tasks_per_child must be >= 1 or None: "
+                f"{self.max_tasks_per_child}"
+            )
+        if self.generations < 0:
+            raise ValueError("ga.generations must be >= 0")
+        if self.elite_count < 0:
+            raise ValueError("ga.elite_count must be >= 0")
+        if self.elite_count > self.population_size:
+            raise ValueError("ga.elite_count must be <= population_size")
+        if not 0.0 <= self.crossover_rate <= 1.0:
+            raise ValueError("ga.crossover_rate must be in [0, 1]")
+        if not 0.0 <= self.mutation_rate <= 1.0:
+            raise ValueError("ga.mutation_rate must be in [0, 1]")
+        if self.tournament_size < 1:
+            raise ValueError("ga.tournament_size must be >= 1")
+        if self.max_clause < 1:
+            raise ValueError("ga.max_clause must be >= 1")
+        if self.max_depth < 1:
+            raise ValueError("ga.max_depth must be >= 1")
+        if self.n_edit_max < 0:
+            raise ValueError("ga.n_edit_max must be >= 0")
+        if self.complexity_size_ref <= 0.0:
+            raise ValueError("ga.complexity_size_ref must be > 0")
+        if self.feasibility.apply_from_generation > self.generations:
+            raise ValueError(
+                f"ga.feasibility.apply_from_generation "
+                f"({self.feasibility.apply_from_generation}) must be "
+                f"<= ga.generations ({self.generations})"
+            )
+
+
+@dataclass(frozen=True)
+class StageWindowsConfig:
+    """Stage A/B/C bars の切り出しルール (T087: Stage A/B disjoint 化適用後)。
+
+    - Stage A bars = ``[dataset.end - stage_a_window, dataset.end)``
+    - Stage B bars = ``[dataset.start, dataset.end - stage_a_window)``
+      (Stage A 期間を時系列上 disjoint に除外)
+    - Stage C holdout bars = ``[dataset.end, dataset.end + stage_c_holdout_days)``
+      を DB から別途取得。取得不能時は **fail-closed (RuntimeError)**。
+      かつての ``allow_stage_c_fallback_slice`` (Stage B 末尾を holdout に再利用)
+      は :mod:`stage_partition_guard` の disjoint 検証と矛盾するため T087 で廃止。
+    """
+
+    stage_a_window_days: int = 60
+    stage_c_holdout_days: int = 60
+
+    def __post_init__(self) -> None:
+        if self.stage_a_window_days < 1:
+            raise ValueError("stage_windows.stage_a_window_days must be >= 1")
+        if self.stage_c_holdout_days < 1:
+            raise ValueError("stage_windows.stage_c_holdout_days must be >= 1")
+
+
+@dataclass(frozen=True)
+class FspConfig:
+    """T036: Factor Shadow Plane (FSP) — single instrument 専用 diagnostic layer 設定.
+
+    Phase 1: diagnostic-only (選抜介入なし)、post-RUN 独立計算。default で無効。
+    詳細: docs/alpha_factory/factor-shadow-plane.md (新規) /
+    devnotes/20260425-0956-factor-shadow-plane-single-instr/
+    """
+
+    enabled: bool = False
+    factors: tuple[str, ...] = ("DXY",)
+    sampling_mode: Literal["daily"] = "daily"
+    window_days: int = 60
+    factor_asof_lag: int = 1
+    conditioning_set: Literal[
+        "all_bars_all_individuals"
+    ] = "all_bars_all_individuals"
+
+    def __post_init__(self) -> None:
+        if self.window_days < 1:
+            raise ValueError(
+                f"factor_shadow.window_days must be >= 1: got {self.window_days}"
+            )
+        if self.factor_asof_lag < 0:
+            raise ValueError(
+                f"factor_shadow.factor_asof_lag must be >= 0: "
+                f"got {self.factor_asof_lag}"
+            )
+        if not self.factors:
+            raise ValueError("factor_shadow.factors must be non-empty")
+
+
+@dataclass(frozen=True)
+class SchemaContractConfig:
+
+exec
+/bin/zsh -lc "grep -RIn \"selected_primitive\\|primitive_ids\\|ensure_registered\\|experimental\\|feature flag\\|nsga2_selection_enabled\\|cross_pair\" scripts/alpha_factory/run_ga.py src/alpha_factory src/ga 2>/dev/null | head -n 260" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+scripts/alpha_factory/run_ga.py:109:from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
+scripts/alpha_factory/run_ga.py:200:    # nsga2_selection_enabled=True 時のみ _breed_next_gen が消費。default OFF では
+scripts/alpha_factory/run_ga.py:206:    # T115: cross-pair 実測シグナル (archive cross_pair_aggregate_fitness 由来)。
+scripts/alpha_factory/run_ga.py:207:    # cross_pair.selection_pressure=True 時のみ _selection_key が tie-break に消費。
+scripts/alpha_factory/run_ga.py:210:    cross_pair_margin: float | None = None
+scripts/alpha_factory/run_ga.py:294:    m = entry.cross_pair_margin
+scripts/alpha_factory/run_ga.py:299:def _resolve_cross_pair_selection_pressure(cfg: Any) -> tuple[bool, str]:
+scripts/alpha_factory/run_ga.py:309:    cp = cfg.cross_pair
+scripts/alpha_factory/run_ga.py:313:        # cross_pair eval が走らず aggregate_fitness が None → 圧が乗らない
+scripts/alpha_factory/run_ga.py:314:        return False, "cross_pair.enable=False (aggregate_fitness 計算されず no-op)"
+scripts/alpha_factory/run_ga.py:315:    if getattr(cfg.ga, "nsga2_selection_enabled", False):
+scripts/alpha_factory/run_ga.py:317:        return False, "nsga2_selection_enabled=True (legacy tournament 経路でないため no-op)"
+scripts/alpha_factory/run_ga.py:564:            "nsga2_selection_enabled": args.nsga2_selection,
+scripts/alpha_factory/run_ga.py:572:        "cross_pair": {
+scripts/alpha_factory/run_ga.py:573:            "enable": args.cross_pair_enable,
+scripts/alpha_factory/run_ga.py:574:            "selection_pressure": args.cross_pair_selection_pressure,
+scripts/alpha_factory/run_ga.py:962:        "run_ga.cross_pair_anchor_loaded",
+scripts/alpha_factory/run_ga.py:1137:    T112: ``ga_cfg.nsga2_selection_enabled=True`` のとき NSGA-II 経路
+scripts/alpha_factory/run_ga.py:1141:    if getattr(ga_cfg, "nsga2_selection_enabled", False):
+scripts/alpha_factory/run_ga.py:1398:            cross_pair_margin=_coerce_optional_float(
+scripts/alpha_factory/run_ga.py:1399:                row.get("cross_pair_aggregate_fitness")
+scripts/alpha_factory/run_ga.py:1614:    cross_pair_mode: str,
+scripts/alpha_factory/run_ga.py:1626:    _cp_sel_eff, _cp_sel_reason = _resolve_cross_pair_selection_pressure(cfg)
+scripts/alpha_factory/run_ga.py:1749:        "cross_pair_config": {
+scripts/alpha_factory/run_ga.py:1750:            "mode": cfg.cross_pair.mode,
+scripts/alpha_factory/run_ga.py:1751:            "aggregator_lambda": cfg.cross_pair.aggregator_lambda,
+scripts/alpha_factory/run_ga.py:1753:            "selection_pressure_requested": cfg.cross_pair.selection_pressure,
+scripts/alpha_factory/run_ga.py:1757:                cfg.cross_pair.selection_pressure_margin_threshold
+scripts/alpha_factory/run_ga.py:1760:        "cross_pair_runtime_mode": cross_pair_mode,
+scripts/alpha_factory/run_ga.py:1765:            "v3_5_cross_pair_pressure_continuous" if _cp_sel_eff else "v3_3"
+scripts/alpha_factory/run_ga.py:2208:    ensure_registered()
+scripts/alpha_factory/run_ga.py:2360:    if cfg.cross_pair.enable:
+scripts/alpha_factory/run_ga.py:2361:        from src.alpha_factory.cross_pair import ANCHOR_PAIRS
+scripts/alpha_factory/run_ga.py:2368:                "run_ga.cross_pair.target_not_configured",
+scripts/alpha_factory/run_ga.py:2391:                "run_ga.cross_pair.enabled",
+scripts/alpha_factory/run_ga.py:2401:    cross_pair_mode = _cp_runtime_mode
+scripts/alpha_factory/run_ga.py:2474:        cp_inputs=_cp_inputs,  # T114: cross_pair.enable 時のみ非None (本番parallel経路)
+scripts/alpha_factory/run_ga.py:2520:        cross_pair_cfg=cfg.cross_pair,
+scripts/alpha_factory/run_ga.py:2528:            cross_pair_config=cfg.cross_pair,
+scripts/alpha_factory/run_ga.py:2545:        _cp_sel_pressure, _cp_sel_reason = _resolve_cross_pair_selection_pressure(cfg)
+scripts/alpha_factory/run_ga.py:2546:        _cp_sel_threshold = cfg.cross_pair.selection_pressure_margin_threshold
+scripts/alpha_factory/run_ga.py:2548:            "run_ga.cross_pair.selection_pressure",
+scripts/alpha_factory/run_ga.py:2551:            requested=cfg.cross_pair.selection_pressure,
+scripts/alpha_factory/run_ga.py:2774:            cross_pair_mode=cross_pair_mode,
+src/alpha_factory/stage_gate.py:190:            (A / B_IS / B_fold / C_base / C_stress / C_cross_pair)。
+src/alpha_factory/stage_gate.py:191:            注: C_stress は step 1.7 で追加、 C_cross_pair は step 1.8 で追加。
+src/alpha_factory/stage_gate.py:193:        legacy: BacktestMetrics (= 既存判定経路、 cross_pair の場合は per-pair `bt`)。
+src/alpha_factory/stage_gate.py:196:            他 stage (= A / B_IS / C_base / C_stress / C_cross_pair) は None。
+src/alpha_factory/stage_gate.py:200:            stage_label="C_cross_pair" のとき必須、 他 stage (= A / B_IS /
+src/alpha_factory/stage_gate.py:210:        ValueError: stage_label="C_cross_pair" かつ pair_label が None / 空文字 /
+src/alpha_factory/stage_gate.py:212:            識別子契約 SSOT、 C_cross_pair log entry は (stage, genome, pair) で
+src/alpha_factory/stage_gate.py:214:        ValueError: stage_label != "C_cross_pair" かつ pair_label is not None
+src/alpha_factory/stage_gate.py:215:            (= step 1.8 acceptance D5、 pair_label は C_cross_pair 専用、
+src/alpha_factory/stage_gate.py:244:    if stage_label == "C_cross_pair":
+src/alpha_factory/stage_gate.py:247:                "_log_canonical_dual_path(stage_label='C_cross_pair') requires "
+src/alpha_factory/stage_gate.py:249:                "C_cross_pair log entry は (stage, genome, pair) で一意特定可能 "
+src/alpha_factory/stage_gate.py:254:                "_log_canonical_dual_path(stage_label='C_cross_pair') requires "
+src/alpha_factory/stage_gate.py:262:            "pair_label (= step 1.8 識別子契約 SSOT、 pair_label は C_cross_pair 専用、 "
+src/alpha_factory/stage_gate.py:850:    """Stage C で cross_pair_evaluator に渡す入力 (型安全 TypedDict)."""
+src/alpha_factory/stage_gate.py:861:    ``cross_pair.py`` で per-pair backtest 結果 (= trades / equity_curve / bt) を
+src/alpha_factory/stage_gate.py:869:    本 dataclass は ``stage_gate.py`` 側に定義することで、 ``cross_pair.py`` から
+src/alpha_factory/stage_gate.py:874:        ``cross_pair.py`` からは ``from src.alpha_factory.stage_gate import
+src/alpha_factory/stage_gate.py:876:        - cross_pair.py → stage_gate.py の単方向 import (= 既存配線維持)
+src/alpha_factory/stage_gate.py:877:        - stage_gate.py → cross_pair.py の逆 import は禁止 (= 循環依存 防止)
+src/alpha_factory/stage_gate.py:882:        bars / trades / equity_curve は production code (= cross_pair.py /
+src/alpha_factory/stage_gate.py:939:def _validate_cross_pair_inputs(inputs: object) -> CrossPairInputs:
+src/alpha_factory/stage_gate.py:940:    """``cross_pair_inputs`` の実行時バリデーション."""
+src/alpha_factory/stage_gate.py:943:            f"cross_pair_inputs must be a Mapping: got {type(inputs).__name__}"
+src/alpha_factory/stage_gate.py:948:        raise ValueError(f"cross_pair_inputs missing keys: {sorted(missing)}")
+src/alpha_factory/stage_gate.py:950:        raise TypeError("cross_pair_inputs['target_pair'] must be str")
+src/alpha_factory/stage_gate.py:952:        raise TypeError("cross_pair_inputs['pair_bars_map'] must be Mapping")
+src/alpha_factory/stage_gate.py:954:        raise TypeError("cross_pair_inputs['meta_map'] must be Mapping")
+src/alpha_factory/stage_gate.py:1872:    cross_pair_evaluator: CrossPairEvaluator | None = None,
+src/alpha_factory/stage_gate.py:1873:    cross_pair_inputs: Mapping[str, object] | None = None,
+src/alpha_factory/stage_gate.py:1880:    (``passed`` には影響しない、``cross_pair_evaluator=None`` 許容)。
+src/alpha_factory/stage_gate.py:1933:        # stress / cross_pair は別軸で step 1.5 スコープ外 (= 別 log で混入なし)。
+src/alpha_factory/stage_gate.py:2131:    cross_pair_payload: dict[str, object] = {
+src/alpha_factory/stage_gate.py:2136:    if cross_pair_evaluator is not None:
+src/alpha_factory/stage_gate.py:2137:        if cross_pair_inputs is None:
+src/alpha_factory/stage_gate.py:2139:                "cross_pair_inputs required when cross_pair_evaluator is set"
+src/alpha_factory/stage_gate.py:2141:        validated = _validate_cross_pair_inputs(cross_pair_inputs)
+src/alpha_factory/stage_gate.py:2144:            cp_result = cross_pair_evaluator.evaluate(
+src/alpha_factory/stage_gate.py:2153:                "stage_c.cross_pair_failure",
+src/alpha_factory/stage_gate.py:2159:            cross_pair_payload["error_type"] = type(exc).__name__
+src/alpha_factory/stage_gate.py:2162:            cross_pair_payload["skipped"] = True
+src/alpha_factory/stage_gate.py:2163:            cross_pair_payload["result"] = None
+src/alpha_factory/stage_gate.py:2166:            # (archive `_extract_cross_pair` が payload.skipped を見て
+src/alpha_factory/stage_gate.py:2174:            cross_pair_payload["skipped"] = cp_skipped
+src/alpha_factory/stage_gate.py:2175:            cross_pair_payload["result"] = cp_result
+src/alpha_factory/stage_gate.py:2177:    # === B Phase 2 step 1.8: cross_pair dual-path (= 別 try-finally で物理隔離 +
+src/alpha_factory/stage_gate.py:2179:    # cross_pair_payload 確定後に走る。 dual-path 経路の例外有無 / disabled mode /
+src/alpha_factory/stage_gate.py:2184:        cp_result_local = cross_pair_payload.get("result")
+src/alpha_factory/stage_gate.py:2187:            and not bool(cross_pair_payload["skipped"])
+src/alpha_factory/stage_gate.py:2203:                            stage="C_cross_pair",
+src/alpha_factory/stage_gate.py:2210:                            stage_label="C_cross_pair",
+src/alpha_factory/stage_gate.py:2219:                            stage="C_cross_pair",
+src/alpha_factory/stage_gate.py:2233:                            stage="C_cross_pair",
+src/alpha_factory/stage_gate.py:2245:                            stage_label="C_cross_pair",
+src/alpha_factory/stage_gate.py:2251:                                stage_label="C_cross_pair",
+src/alpha_factory/stage_gate.py:2260:                                stage="C_cross_pair",
+src/alpha_factory/stage_gate.py:2269:                            stage="C_cross_pair",
+src/alpha_factory/stage_gate.py:2280:        cp_result_for_sanitize = cross_pair_payload.get("result")
+src/alpha_factory/stage_gate.py:2284:            cross_pair_payload["result"] = replace(
+src/alpha_factory/stage_gate.py:2321:            "cross_pair": cross_pair_payload,
+src/alpha_factory/mission_inf_gap.py:10:Phase 1 (本 TODO = T062 PR 1): 単体実装 + テストのみ、 GA / archive / cross_pair 未変更.
+src/alpha_factory/config.py:9:    - ``cross_pair`` / ``stage_gate`` dataclass は既存 SSOT (src/alpha_factory)
+src/alpha_factory/config.py:28:from src.alpha_factory.cross_pair import CrossPairConfig
+src/alpha_factory/config.py:175:    nsga2_selection_enabled: bool = False
+src/alpha_factory/config.py:464:    cross_pair: CrossPairConfig
+src/alpha_factory/config.py:589:        nsga2_selection_enabled=bool(raw.get("nsga2_selection_enabled", False)),
+src/alpha_factory/config.py:658:def _build_cross_pair(raw: Mapping[str, Any]) -> CrossPairConfig:
+src/alpha_factory/config.py:750:        cross_pair=_build_cross_pair(raw.get("cross_pair") or {}),
+src/alpha_factory/canonical_metrics.py:10:``swim_lane.py`` / ``archive.py`` / ``cross_pair.py`` / ``config.py`` /
+src/alpha_factory/nsga2_selection.py:17:Phase 1 (本 TODO = T065 PR 1): 単体実装 + テストのみ、 GA loop / archive / cross_pair /
+src/alpha_factory/stage_bc_evaluator.py:15:``swim_lane.py`` / ``cross_pair.py`` への置換は **Phase 2 (別 PR、 T065 統合と同時)**
+src/alpha_factory/stage_bc_evaluator.py:86:    "compute_cross_pair_shadow_score",
+src/alpha_factory/stage_bc_evaluator.py:138:    CROSS_PAIR = "cross_pair"
+src/alpha_factory/stage_bc_evaluator.py:184:"""synthesis § 5.4: 5/5 全通過で cross_pair_pass=PASS."""
+src/alpha_factory/stage_bc_evaluator.py:371:    - ``cross_pair_pass``: PASS / FAIL 二値 (PENDING なし、 概念 Round 3 [S1])
+src/alpha_factory/stage_bc_evaluator.py:382:    cross_pair_pass: StagePassStatus
+src/alpha_factory/stage_bc_evaluator.py:898:    - cross_pair_pass は PASS / FAIL 二値 (PENDING なし、 詳細 Round 1 [C4] で raise)
+src/alpha_factory/stage_bc_evaluator.py:914:            cross_pair_pass が PASS/FAIL 二値以外.
+src/alpha_factory/stage_bc_evaluator.py:978:    cross_pair_pass = (
+src/alpha_factory/stage_bc_evaluator.py:985:    if cross_pair_pass not in (StagePassStatus.PASS, StagePassStatus.FAIL):
+src/alpha_factory/stage_bc_evaluator.py:987:            f"cross_pair_pass must be PASS or FAIL "
+src/alpha_factory/stage_bc_evaluator.py:988:            f"(binary contract): {cross_pair_pass}"
+src/alpha_factory/stage_bc_evaluator.py:991:    shadow_robustness_score = compute_cross_pair_shadow_score(per_pair_results)
+src/alpha_factory/stage_bc_evaluator.py:998:    elif cross_pair_pass == StagePassStatus.FAIL:
+src/alpha_factory/stage_bc_evaluator.py:1006:        and cross_pair_pass == StagePassStatus.PASS
+src/alpha_factory/stage_bc_evaluator.py:1012:        # live=True, cross_pair=PASS, stress=PENDING のみ到達
+src/alpha_factory/stage_bc_evaluator.py:1022:        cross_pair_pass=cross_pair_pass,
+src/alpha_factory/stage_bc_evaluator.py:1090:def compute_cross_pair_shadow_score(
+src/alpha_factory/cross_pair.py:10:    - :func:`evaluate_cross_pair` — pure function: 3 backtest + 集約
+src/alpha_factory/cross_pair.py:50:    "evaluate_cross_pair",
+src/alpha_factory/cross_pair.py:103:    # が計測される (汎化定量化)。graduation は cross_pair.passed で自然機能 (Stage C
+src/alpha_factory/cross_pair.py:123:                "cross_pair.selection_pressure_margin_threshold must be 0.0 when "
+src/alpha_factory/cross_pair.py:125:                "cross_pair margin; threshold is no longer applied): "
+src/alpha_factory/cross_pair.py:159:    cross_pair.py 内では参照保持のみ、 canonical 計算は呼ばない (= 案 A' 責務境界、
+src/alpha_factory/cross_pair.py:205:            "cross_pair.pair_failure",
+src/alpha_factory/cross_pair.py:263:def evaluate_cross_pair(
+src/alpha_factory/cross_pair.py:270:    cross_pair_config: CrossPairConfig,
+src/alpha_factory/cross_pair.py:286:        cross_pair_config: 通過基準と mode。
+src/alpha_factory/cross_pair.py:302:            target, anchors_map, cross_pair_config,
+src/alpha_factory/cross_pair.py:315:            target, anchors_map, cross_pair_config, reason=reason,
+src/alpha_factory/cross_pair.py:322:    # canonical 計算 + log emit、 cross_pair.py 内では canonical 計算は呼ばない)
+src/alpha_factory/cross_pair.py:345:        mean_sharpe - cross_pair_config.aggregator_lambda * std_sharpe
+src/alpha_factory/cross_pair.py:361:            else sharpe_ratio >= cross_pair_config.sharpe_target_cross_ratio_min
+src/alpha_factory/cross_pair.py:363:        "mean": mean_sharpe >= cross_pair_config.mean_sharpe_cross_min,
+src/alpha_factory/cross_pair.py:364:        "min": min_sharpe >= cross_pair_config.min_sharpe_cross_min,
+src/alpha_factory/cross_pair.py:391:        "aggregator_lambda": cross_pair_config.aggregator_lambda,
+src/alpha_factory/cross_pair.py:399:        "mode": cross_pair_config.mode,
+src/alpha_factory/cross_pair.py:405:        aggregator_name=f"mean_minus_{cross_pair_config.aggregator_lambda}_std",
+src/alpha_factory/cross_pair.py:426:    Stage C ``evaluate_stage_c(cross_pair_evaluator=...)`` に注入する thin
+src/alpha_factory/cross_pair.py:427:    adapter。``evaluate(...)`` 内で :func:`evaluate_cross_pair` を呼ぶ。
+src/alpha_factory/cross_pair.py:437:        cross_pair_config: CrossPairConfig,
+src/alpha_factory/cross_pair.py:443:        self._config = cross_pair_config
+src/alpha_factory/cross_pair.py:461:                    "cross_pair.provider_failure",
+src/alpha_factory/cross_pair.py:467:        return evaluate_cross_pair(
+src/alpha_factory/cross_pair.py:474:            cross_pair_config=self._config,
+src/alpha_factory/__init__.py:4:cross_pair などのモジュールが追加される。
+src/alpha_factory/primitives/_base.py:35:# required_data の canonical naming。cross_pair.<pair> は startswith + 非空で許容。
+src/alpha_factory/primitives/_base.py:79:_REQUIRED_DATA_PREFIXES: tuple[str, ...] = ("cross_pair.",)
+src/alpha_factory/primitives/_base.py:87:        2. `cross_pair.<pair>` 形式で <pair> 部分が非空
+src/alpha_factory/primitives/modulator_generic.py:13:ensure_registered() を production path から 1 回呼ぶことで 6 個を registry に
+src/alpha_factory/primitives/modulator_generic.py:503:def ensure_registered() -> None:
+src/alpha_factory/primitives/__init__.py:25:    ensure_registered,
+src/alpha_factory/primitives/__init__.py:49:    "ensure_registered",
+src/alpha_factory/primitives/_registry.py:7:    本 registry は bootstrap 段階（プロセス起動直後の ensure_registered()）で
+src/alpha_factory/primitives/_registry.py:15:    production path (GA entry) から ensure_registered() を明示的に呼ぶ。
+src/alpha_factory/primitives/_registry.py:55:    T011 の ensure_registered で冪等かつ並行安全な登録パスを提供するため追加。
+src/alpha_factory/primitives/_registry.py:118:def ensure_registered() -> None:
+src/alpha_factory/primitives/_registry.py:131:        ensure_registered as _reg_directional_generic,
+src/alpha_factory/primitives/_registry.py:134:        ensure_registered as _reg_modulator_generic,
+src/alpha_factory/primitives/_registry.py:137:        ensure_registered as _reg_pair_specific,
+src/alpha_factory/primitives/pair_specific.py:409:    required_data=("ohlc", "cross_pair.EUR_USD", "cross_pair.USD_JPY"),
+src/alpha_factory/primitives/pair_specific.py:915:def ensure_registered() -> None:
+src/alpha_factory/primitives/directional_generic.py:15:ensure_registered() を production path から 1 回呼ぶことで 14 個を registry に登録する。
+src/alpha_factory/primitives/directional_generic.py:661:def ensure_registered() -> None:
+src/alpha_factory/primitives/evaluator.py:11:- strict_aux_required + selected_primitive_ids で起動時 preflight verify
+src/alpha_factory/primitives/evaluator.py:63:        selected_primitive_ids: preflight verify 対象の primitive ID 群
+src/alpha_factory/primitives/evaluator.py:82:        selected_primitive_ids: Iterable[str] | None = None,
+src/alpha_factory/primitives/evaluator.py:100:            if selected_primitive_ids is None:
+src/alpha_factory/primitives/evaluator.py:102:                    "strict_aux_required=True requires selected_primitive_ids "
+src/alpha_factory/primitives/evaluator.py:105:            self._preflight_verify(tuple(selected_primitive_ids))
+src/alpha_factory/primitives/evaluator.py:124:        if key.startswith("cross_pair."):
+src/alpha_factory/primitives/evaluator.py:125:            return key[len("cross_pair."):] in self._aux_pair_mid_close
+src/alpha_factory/parallel_eval.py:30:from src.alpha_factory.cross_pair import (
+src/alpha_factory/parallel_eval.py:34:from src.alpha_factory.primitives import RegistryEvaluator, ensure_registered
+src/alpha_factory/parallel_eval.py:278:    cross_pair: CrossPairResult | None
+src/alpha_factory/parallel_eval.py:399:    cross_pair_cfg: CrossPairConfig,
+src/alpha_factory/parallel_eval.py:440:            cross_pair=None,
+src/alpha_factory/parallel_eval.py:449:            cross_pair=None,
+src/alpha_factory/parallel_eval.py:473:            cross_pair=None,
+src/alpha_factory/parallel_eval.py:482:            cross_pair_config=cross_pair_cfg,
+src/alpha_factory/parallel_eval.py:499:            cross_pair_evaluator=cp_evaluator,
+src/alpha_factory/parallel_eval.py:500:            cross_pair_inputs=cp_inputs_dict,
+src/alpha_factory/parallel_eval.py:507:    cp_result = _extract_cross_pair_result(c_result)
+src/alpha_factory/parallel_eval.py:513:        cross_pair=cp_result,
+src/alpha_factory/parallel_eval.py:517:def _extract_cross_pair_result(stage_c: StageResult) -> CrossPairResult | None:
+src/alpha_factory/parallel_eval.py:520:    skipped / 型不一致なら None。``swim_lane.LaneManager._extract_cross_pair_result``
+src/alpha_factory/parallel_eval.py:526:    cp_obj = payload_obj.get("cross_pair")
+src/alpha_factory/parallel_eval.py:613:        cross_pair=None,
+src/alpha_factory/parallel_eval.py:632:    cross_pair_cfg: CrossPairConfig,
+src/alpha_factory/parallel_eval.py:638:    primitive registry を ``ensure_registered()`` で再構築 (spawn 経由で
+src/alpha_factory/parallel_eval.py:643:    ensure_registered()
+src/alpha_factory/parallel_eval.py:645:    _WORKER_CROSS_PAIR_CFG = cross_pair_cfg
+src/alpha_factory/parallel_eval.py:685:        cross_pair_cfg: CrossPairConfig,
+src/alpha_factory/parallel_eval.py:715:        self._cross_pair_cfg = cross_pair_cfg
+src/alpha_factory/parallel_eval.py:730:                    cross_pair_cfg,
+src/alpha_factory/parallel_eval.py:784:                    self._cross_pair_cfg,
+src/alpha_factory/archive.py:113:        # = mean_sharpe - λ·std)。in-loop selection pressure の源。cross_pair 未実行
+src/alpha_factory/archive.py:115:        pa.field("cross_pair_aggregate_fitness", pa.float64(), nullable=True),
+src/alpha_factory/archive.py:119:        pa.field("cross_pair_mean_sharpe", pa.float64(), nullable=True),
+src/alpha_factory/archive.py:120:        pa.field("cross_pair_min_sharpe", pa.float64(), nullable=True),
+src/alpha_factory/archive.py:121:        pa.field("cross_pair_target_ratio", pa.float64(), nullable=True),
+src/alpha_factory/archive.py:122:        pa.field("cross_pair_pair_failure_count", pa.int64(), nullable=True),
+src/alpha_factory/archive.py:183:        # nsga2_selection_enabled=True 時のみ消費、 default OFF では観測のみ。
+src/alpha_factory/archive.py:271:        "cross_pair_aggregate_fitness": None,  # T115
+src/alpha_factory/archive.py:272:        "cross_pair_mean_sharpe": None,  # T116 観測
+src/alpha_factory/archive.py:273:        "cross_pair_min_sharpe": None,  # T116 観測
+src/alpha_factory/archive.py:274:        "cross_pair_target_ratio": None,  # T116 観測
+src/alpha_factory/archive.py:275:        "cross_pair_pair_failure_count": None,  # T116 観測
+src/alpha_factory/archive.py:548:def _extract_cross_pair(
+src/alpha_factory/archive.py:551:    """``payload["cross_pair"]`` から ``(skipped, result)`` を取り出す。"""
+src/alpha_factory/archive.py:552:    cp_obj = payload.get("cross_pair")
+src/alpha_factory/archive.py:795:        # nsga2_selection_enabled=True 時に _update_cache が breed cache へ運ぶ。
+src/alpha_factory/archive.py:814:        ``ii_lite_pass`` は ``stage_result.metrics["payload"]["cross_pair"]``
+src/alpha_factory/archive.py:864:        skipped, cp_result = _extract_cross_pair(payload)
+src/alpha_factory/archive.py:867:            row["cross_pair_aggregate_fitness"] = None  # T115
+src/alpha_factory/archive.py:868:            row["cross_pair_mean_sharpe"] = None  # T116
+src/alpha_factory/archive.py:869:            row["cross_pair_min_sharpe"] = None
+src/alpha_factory/archive.py:870:            row["cross_pair_target_ratio"] = None
+src/alpha_factory/archive.py:871:            row["cross_pair_pair_failure_count"] = None
+src/alpha_factory/archive.py:876:            row["cross_pair_aggregate_fitness"] = _finite_or_none(
+src/alpha_factory/archive.py:880:            row["cross_pair_mean_sharpe"] = _finite_or_none(
+src/alpha_factory/archive.py:883:            row["cross_pair_min_sharpe"] = _finite_or_none(
+src/alpha_factory/archive.py:886:            row["cross_pair_target_ratio"] = _finite_or_none(
+src/alpha_factory/archive.py:891:            row["cross_pair_pair_failure_count"] = sum(
+src/alpha_factory/failure_handling.py:1129:    - ``per_pair_results={}`` (cross_pair_pass=FAIL に整合)
+src/alpha_factory/failure_handling.py:1131:    - ``stress_pass=PENDING`` / ``cross_pair_pass=FAIL``
+src/alpha_factory/failure_handling.py:1141:        cross_pair_pass=StagePassStatus.FAIL,
+src/alpha_factory/_registry_bridge.py:21:    ensure_registered,
+src/alpha_factory/_registry_bridge.py:46:    """``ensure_registered()`` 後の full registry を ``random_gen`` 用に変換する。
+src/alpha_factory/_registry_bridge.py:52:    ensure_registered()
+src/alpha_factory/swim_lane.py:53:from src.alpha_factory.cross_pair import (
+src/alpha_factory/swim_lane.py:222:        - ``stage_gate_config`` / ``cross_pair_config``: 全 lane / 全 stage で共有。
+src/alpha_factory/swim_lane.py:244:        cross_pair_config: CrossPairConfig,
+src/alpha_factory/swim_lane.py:310:        self._cross_pair_config = cross_pair_config
+src/alpha_factory/swim_lane.py:406:        cross_pair_result: CrossPairResult | None,
+src/alpha_factory/swim_lane.py:410:        ``cross_pair_result`` が ``None`` (skipped / 例外 fallback) の場合は
+src/alpha_factory/swim_lane.py:413:        ``cross_pair_result.passed`` の bool 値のみを参照するため Phase 4 で
+src/alpha_factory/swim_lane.py:419:            cross_pair_result: cross-pair (ii-lite) 評価結果。``None`` なら
+src/alpha_factory/swim_lane.py:427:        if cross_pair_result is None:
+src/alpha_factory/swim_lane.py:429:        return bool(cross_pair_result.passed)
+src/alpha_factory/swim_lane.py:688:            cp_evaluator, cp_inputs = self._build_cross_pair_args(lane, genome)
+src/alpha_factory/swim_lane.py:696:                cross_pair_evaluator=cp_evaluator,
+src/alpha_factory/swim_lane.py:697:                cross_pair_inputs=cp_inputs,
+src/alpha_factory/swim_lane.py:717:            cp_result = self._extract_cross_pair_result(c_result)
+src/alpha_factory/swim_lane.py:922:            cp_result = self._extract_cross_pair_result(c_result)
+src/alpha_factory/swim_lane.py:950:    def _build_cross_pair_args(
+
+exec
+/bin/zsh -lc "sed -n '280,620p' src/alpha_factory/config.py" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+class SchemaContractConfig:
+    """T058: schema_contract enforcement settings.
+
+    Attributes:
+        enforcement_mode: ``log_only`` (T058 default) or ``fail_closed`` (T067).
+    """
+
+    enforcement_mode: str = "log_only"
+
+    def __post_init__(self) -> None:
+        from src.alpha_factory.schema_contract import SchemaEnforcementMode
+
+        valid = {m.value for m in SchemaEnforcementMode}
+        if self.enforcement_mode not in valid:
+            raise ValueError(
+                f"schema_contract.enforcement_mode must be one of "
+                f"{sorted(valid)}: got {self.enforcement_mode!r}"
+            )
+
+    def to_mode(self) -> SchemaEnforcementMode:
+        from src.alpha_factory.schema_contract import SchemaEnforcementMode
+
+        return SchemaEnforcementMode(self.enforcement_mode)
+
+
+@dataclass(frozen=True)
+class Phase2Config:
+    """B Phase 2 切替コミット 用 config (= cascade port v2 段階統合管理).
+
+    cascade port v2 で導入した 8 module (canonical_metrics / cpps_archive /
+    nsga2_selection / loop_closure / failure_handling / stage_a_evaluator /
+    stage_bc_evaluator / observability) の main flow 統合フェーズを管理する。
+
+    canonical_metrics_mode (B step 1):
+        - log_only: dual-path で canonical 5 metrics を計算 + log のみ (default)、
+          legacy 判定は完全に不変 (= regression 0)。
+        - disabled: canonical 計算を完全 skip (= 計算 overhead 0、 緊急時 fallback)。
+        - fail_closed: 後続別 TODO で導入予定 (= step 1 では不許容、 __post_init__ で
+          ValueError raise = Codex Round 1 [Warning] 4 取込)。
+    """
+
+    canonical_metrics_mode: Literal["log_only", "disabled"] = "log_only"
+
+    def __post_init__(self) -> None:
+        # Codex Round 1 [Warning] 4 取込: step 1 では fail_closed を許容しない契約固定
+        # (= 後続別 TODO で許容値を Literal["log_only", "fail_closed", "disabled"] に拡張)
+        valid = {"log_only", "disabled"}
+        if self.canonical_metrics_mode not in valid:
+            raise ValueError(
+                f"Phase2Config.canonical_metrics_mode must be one of {sorted(valid)}, "
+                f"got {self.canonical_metrics_mode!r}. "
+                f"fail_closed は step 1 範囲外 (= 後続別 TODO で導入)."
+            )
+
+
+@dataclass(frozen=True)
+class Phase4Config:
+    """PR4 = legacy_pnl_smoke fitness opt-in + anti-luck guard 用 config.
+
+    Stage A fitness 関数に opt-in flag を導入し、 mission_shortfall 方向への探索圧
+    (= clipped_pnl_slack 加算) と anti-luck guard (= max_dd≈0 lucky run の連続抑制)
+    を加える。 default は legacy (= 行動完全不変)。
+
+    fitness_mode:
+        - legacy: 現状 fitness 関数 (= sharpe - α*size_norm - tc_penalty)、 default、
+          完全行動不変。
+        - legacy_pnl_smoke: legacy + β*clipped_pnl_slack*persistence_weight
+          - lucky_run_penalty。 **1 RUN smoke 検証必須** (= 行動変更)。
+
+    smoke 検証は user 実行 (= ``scripts/alpha_factory/run_ga.py --fitness-mode
+    legacy_pnl_smoke ...`` で 1 RUN、 60-487 分、 baseline 5 RUN median 比較)。
+
+    詳細: ``devnotes/20260513-1715-todo-pr4-legacy-pnl-smoke/``.
+    """
+
+    fitness_mode: Literal["legacy", "legacy_pnl_smoke"] = "legacy"
+    beta: float = 0.05
+    persistence_weight: float = 0.5  # PR4 minimal scope = 固定値
+    lucky_hard_penalty: float = 1.0
+    lucky_soft_penalty: float = 0.3
+
+    def __post_init__(self) -> None:
+        valid = {"legacy", "legacy_pnl_smoke"}
+        if self.fitness_mode not in valid:
+            raise ValueError(
+                f"Phase4Config.fitness_mode must be one of {sorted(valid)}, "
+                f"got {self.fitness_mode!r}."
+            )
+        # NaN/Inf 防御 (= Codex impl-review Round 1 [Warning] 反映: nan は比較を
+        # すり抜けるため `not 0.0 <= x <= 1.0` だけでは取り逃がす。 isfinite で
+        # 先に弾き、 fitness_pen が nan/-inf 化して GA selection 順序性を壊すのを
+        # 未然防止)。 SSOT は本 Phase4Config 側、 StageGateConfig 側は二重防御。
+        import math as _math
+
+        for fname, fval in (
+            ("beta", self.beta),
+            ("persistence_weight", self.persistence_weight),
+            ("lucky_hard_penalty", self.lucky_hard_penalty),
+            ("lucky_soft_penalty", self.lucky_soft_penalty),
+        ):
+            if not _math.isfinite(fval):
+                raise ValueError(
+                    f"Phase4Config.{fname} must be finite "
+                    f"(NaN/±Inf forbidden), got {fval}"
+                )
+        if not 0.0 <= self.beta <= 1.0:
+            raise ValueError(
+                f"Phase4Config.beta must be in [0.0, 1.0], got {self.beta}"
+            )
+        if not 0.0 <= self.persistence_weight <= 1.0:
+            raise ValueError(
+                f"Phase4Config.persistence_weight must be in [0.0, 1.0], "
+                f"got {self.persistence_weight}"
+            )
+        if self.lucky_hard_penalty < 0.0 or self.lucky_soft_penalty < 0.0:
+            raise ValueError(
+                f"Phase4Config.lucky_* penalty must be non-negative, "
+                f"got hard={self.lucky_hard_penalty} "
+                f"soft={self.lucky_soft_penalty}"
+            )
+        # HARD >= SOFT 契約: hard は max_dd≈0 即時抑制、 soft は max_dd<0.5%
+        # 連続抑制、 hard 側が強い違反シグナルでなければ順序整合性違反。
+        if self.lucky_hard_penalty < self.lucky_soft_penalty:
+            raise ValueError(
+                f"Phase4Config.lucky_hard_penalty ({self.lucky_hard_penalty}) "
+                f"must be >= lucky_soft_penalty ({self.lucky_soft_penalty}) "
+                f"(= hard は max_dd≈0 即時抑制、 soft は max_dd<0.5% 連続抑制、"
+                f" hard 側が強い signal でなければ順序整合性違反)"
+            )
+
+
+@dataclass(frozen=True)
+class MultiPairTrainingConfig:
+    """T117: multi-pair training (最小 spike)。
+
+    GA fitness を EUR_JPY 単一でなく複数ペアで評価し、全ペアで取引+利益する
+    汎化戦略を進化させる。anchor 取引枯渇 (cross-pair pair_failure) + anchor
+    低性能を学習側で根本対処。
+
+    - ``enable=False`` (default) は単一ペア = 現挙動 bit-exact。
+    - ``enable=True`` 時、``scope`` のステージ fitness を ``pairs`` で評価し
+      ``aggregate`` (min=全ペア機能強制 / mean) で集約。
+    - spike: ``scope="stage_a"`` のみ (Stage B/C は target 現状維持)。
+    """
+
+    enable: bool = False
+    pairs: tuple[str, ...] = ()
+    aggregate: str = "min"  # "min" | "mean"
+    scope: str = "stage_a"  # spike: stage_a のみ
+
+    def __post_init__(self) -> None:
+        if self.aggregate not in ("min", "mean"):
+            raise ValueError(
+                f"MultiPairTrainingConfig.aggregate must be min|mean: "
+                f"{self.aggregate}"
+            )
+        if self.scope != "stage_a":
+            raise ValueError(
+                f"MultiPairTrainingConfig.scope must be stage_a (spike): "
+                f"{self.scope}"
+            )
+        if self.enable and len(self.pairs) < 2:
+            raise ValueError(
+                "MultiPairTrainingConfig.enable=True requires >=2 pairs "
+                f"(target + anchor(s)): got {self.pairs}"
+            )
+        if len(set(self.pairs)) != len(self.pairs):
+            raise ValueError(
+                f"MultiPairTrainingConfig.pairs must be unique: {self.pairs}"
+            )
+
+
+@dataclass(frozen=True)
+class AlphaFactoryConfig:
+    """Alpha Factory 全体 config。loader から返される SSOT 構造。
+
+    ``live_criteria`` は ``stage_gate.live_criteria`` に一元化され、property
+    として expose される (R1 #5 対応)。
+    """
+
+    dataset: DatasetConfig
+    backtest: BacktestSectionConfig
+    ga: GAConfig
+    stage_gate: StageGateConfig
+    cross_pair: CrossPairConfig
+    stage_windows: StageWindowsConfig
+    fsp: FspConfig = field(default_factory=FspConfig)
+    schema_contract: SchemaContractConfig = field(  # T058
+        default_factory=SchemaContractConfig
+    )
+    phase2: Phase2Config = field(default_factory=Phase2Config)  # B step 1 で追加
+    phase4: Phase4Config = field(default_factory=Phase4Config)  # PR4 で追加
+    multi_pair_training: MultiPairTrainingConfig = field(  # T117
+        default_factory=MultiPairTrainingConfig
+    )
+
+    @property
+    def live_criteria(self) -> Mapping[str, float | int]:
+        """``stage_gate.live_criteria`` への alias (SSOT 参照)."""
+        return self.stage_gate.live_criteria
+
+
+# ---------------------------------------------------------------------------
+# Loader
+# ---------------------------------------------------------------------------
+
+
+def _parse_dt(value: object) -> datetime:
+    if not value:
+        raise ValueError("datetime string must be non-empty")
+    s = str(value)
+    return to_utc(datetime.fromisoformat(s.replace("Z", "+00:00")))
+
+
+def _deep_merge(
+    base: Mapping[str, Any], overrides: Mapping[str, Any]
+) -> dict[str, Any]:
+    """dict を recursively merge する。override 側の ``None`` は skip。"""
+    out: dict[str, Any] = dict(base)
+    for k, v in overrides.items():
+        if v is None:
+            continue
+        if isinstance(v, Mapping) and isinstance(out.get(k), Mapping):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def _build_dataset(raw: Mapping[str, Any]) -> DatasetConfig:
+    return DatasetConfig(
+        instrument=str(raw.get("instrument", "")),
+        start=_parse_dt(raw.get("start")),
+        end=_parse_dt(raw.get("end")),
+    )
+
+
+def _build_backtest(raw: Mapping[str, Any]) -> BacktestSectionConfig:
+    max_spread_raw = raw.get("max_spread_bps")
+    return BacktestSectionConfig(
+        initial_cash=Decimal(str(raw.get("initial_cash", "1000000"))),
+        leverage=int(raw.get("leverage", 25)),
+        units=int(raw.get("units", 10000)),
+        max_spread_bps=(
+            Decimal(str(max_spread_raw)) if max_spread_raw is not None else None
+        ),
+        holding_cost_per_day_bps=Decimal(
+            str(raw.get("holding_cost_per_day_bps", "0"))
+        ),
+        session_close_utc_hours=tuple(
+            int(h) for h in raw.get("session_close_utc_hours", (23,))
+        ),
+    )
+
+
+def _strict_bool(value: Any, default: bool) -> bool:
+    """文字列 'false'/'no'/'0' を True 扱いする ``bool(...)`` の罠を回避."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "yes", "1", "on"):
+            return True
+        if v in ("false", "no", "0", "off"):
+            return False
+        raise ValueError(f"invalid bool string: {value!r}")
+    if isinstance(value, (int, float)):
+        return bool(value)
+    raise ValueError(f"unsupported bool type: {type(value).__name__}")
+
+
+def _build_feasibility(raw: Mapping[str, Any] | None) -> GAFeasibilityConfig:
+    feas_raw: Mapping[str, Any] = raw or {}
+    return GAFeasibilityConfig(
+        entry_count_min=int(feas_raw.get("entry_count_min", 1)),
+        apply_from_generation=int(feas_raw.get("apply_from_generation", 0)),
+        enable_fallback_when_all_infeasible=_strict_bool(
+            feas_raw.get("enable_fallback_when_all_infeasible"), default=True
+        ),
+    )
+
+
+def _build_ga(raw: Mapping[str, Any]) -> GAConfig:
+    return GAConfig(
+        population_size=int(raw.get("population_size", 40)),
+        generations=int(raw.get("generations", 15)),
+        crossover_rate=float(raw.get("crossover_rate", 0.7)),
+        mutation_rate=float(raw.get("mutation_rate", 0.3)),
+        tournament_size=int(raw.get("tournament_size", 3)),
+        elite_count=int(raw.get("elite_count", 2)),
+        max_depth=int(raw.get("max_depth", 4)),
+        max_clause=int(raw.get("max_clause", 1)),
+        fitness_metric=raw.get("fitness_metric", "sharpe"),
+        seed=raw.get("seed"),
+        complexity_alpha=float(raw.get("complexity_alpha", 0.03)),
+        complexity_size_ref=float(raw.get("complexity_size_ref", 10.0)),
+        n_edit_max=int(raw.get("n_edit_max", 3)),
+        feasibility=_build_feasibility(raw.get("feasibility")),
+        max_workers=int(raw.get("max_workers", 2)),
+        max_tasks_per_child=(
+            int(mtpc)
+            if (mtpc := raw.get("max_tasks_per_child")) is not None
+            else None
+        ),
+        warmstart_ratio=float(raw.get("warmstart_ratio", 0.0)),
+        warmstart_motif_archive=raw.get("warmstart_motif_archive"),
+        # T112: NSGA-II selection flag (config→GAConfig 伝搬。 default False)。
+        nsga2_selection_enabled=bool(raw.get("nsga2_selection_enabled", False)),
+    )
+
+
+def _build_stage_gate(
+    stage_gate_raw: Mapping[str, Any],
+    live_criteria_raw: Mapping[str, Any],
+) -> StageGateConfig:
+    a_raw = stage_gate_raw.get("stage_a") or {}
+    b_raw = stage_gate_raw.get("stage_b") or {}
+    c_raw = stage_gate_raw.get("stage_c") or {}
+    kwargs: dict[str, Any] = {
+        "stage_a_window_days": int(a_raw.get("window_days", 60)),
+        "stage_a_alpha": float(a_raw.get("alpha", 0.03)),
+        "stage_a_threshold": float(a_raw.get("threshold", 0.0)),
+        # T034: 取引未成立 (no_exposure) を sentinel 化するための下限
+        "min_exposure_trade_count": int(
+            a_raw.get("min_exposure_trade_count", 1)
+        ),
+        "stage_b_window_months": int(b_raw.get("window_months", 18)),
+        "wf_train_days": int(b_raw.get("wf_train_days", 120)),
+        "wf_test_days": int(b_raw.get("wf_test_days", 20)),
+        "wf_step_days": int(b_raw.get("wf_step_days", 20)),
+        "wf_embargo_days": int(b_raw.get("wf_embargo_days", 1)),
+        "stage_b_median_oos_sharpe_min": float(
+            b_raw.get("median_oos_sharpe_min", 0.20)
+        ),
+        "stage_b_positive_fold_min": float(
+            b_raw.get("positive_fold_min", 0.60)
+        ),
+        "stage_b_dsr_min": float(b_raw.get("dsr_min", 0.0)),
+        "wf_min_folds_required": int(b_raw.get("wf_min_folds_required", 2)),
+
+exec
+/bin/zsh -lc "sed -n '1,220p' src/alpha_factory/_registry_bridge.py" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+"""``src.ga.random_gen`` 用 primitive registry bridge (T018).
+
+``src.alpha_factory.primitives._registry`` (完全 PrimitiveSpec + ComputeFn) を
+``src.ga.random_gen.PrimitiveRegistry`` (``{id -> random_gen.PrimitiveSpec}``)
+に変換する。Category は :func:`slot_from_category` (SSOT) を経由して
+directional / modulator に射影する (R2: 将来 category 追加時のドリフト防止)。
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from src.alpha_factory.primitives._base import (
+    ParamSpec,
+    slot_from_category,
+)
+from src.alpha_factory.primitives._base import (
+    PrimitiveCategory as _FullCategory,
+)
+from src.alpha_factory.primitives._registry import (
+    ensure_registered,
+    list_all,
+)
+from src.ga.random_gen import ParamRange
+from src.ga.random_gen import PrimitiveSpec as RandomGenSpec
+
+__all__ = ["build_random_gen_registry"]
+
+
+def _category_to_random_gen(
+    cat: _FullCategory,
+) -> Literal["directional", "modulator"]:
+    """primitives ``PrimitiveCategory`` を ``random_gen`` の 2 値 category に
+    射影する。SSOT の ``slot_from_category`` を経由する。"""
+    slot = slot_from_category(cat)  # "directional" | "local_gate"
+    return "modulator" if slot == "local_gate" else "directional"
+
+
+def _param_spec_to_range(p: ParamSpec) -> ParamRange:
+    if p.is_int:
+        return (int(p.low), int(p.high))
+    return (float(p.low), float(p.high))
+
+
+def build_random_gen_registry() -> dict[str, RandomGenSpec]:
+    """``ensure_registered()`` 後の full registry を ``random_gen`` 用に変換する。
+
+    Returns:
+        ``{primitive_id -> RandomGenSpec}`` (random_gen が期待する
+        ``PrimitiveRegistry`` と互換)。
+    """
+    ensure_registered()
+    out: dict[str, RandomGenSpec] = {}
+    for spec in list_all():
+        out[spec.id] = RandomGenSpec(
+            id=spec.id,
+            category=_category_to_random_gen(spec.category),
+            domain=spec.domain,
+            param_schema={
+                p.name: _param_spec_to_range(p) for p in spec.param_schema
+            },
+        )
+    return out
+
+exec
+/bin/zsh -lc "sed -n '1,280p' src/ga/random_gen.py" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+"""Clause Genome の初期個体生成（T008）。
+
+T007 で定義された Clause ベース Genome（SignalConfig × ClauseConfig ×
+PositionConfig × RiskConfig）に対応した random 生成ルーチン群。
+
+primitive_registry から ID / 範囲を引き、SignalConfig を組み立てる。
+本 TODO では `_dummy_registry.DUMMY_REGISTRY` を tests から渡す前提で、
+src/ga/random_gen.py 自体は registry I/F のみ公開。T010 primitives-registry
+で正式な RegistryEvaluator が整備されたら DUMMY_REGISTRY を置換。
+
+学術引用:
+- Montana, D. J. (1995). Strongly Typed Genetic Programming. Evolutionary
+  Computation, 3(2), 199-230.（category による slot 制約の理論根拠）
+"""
+
+from __future__ import annotations
+
+import random
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Literal
+
+from src.dsl.enforce import enforce_consistency
+from src.dsl.genome import (
+    ClauseConfig,
+    Genome,
+    PositionConfig,
+    RiskConfig,
+    SignalConfig,
+)
+
+PrimitiveCategory = Literal["directional", "modulator"]
+PrimitiveDomain = Literal["generic", "pair_specific"]
+ParamRange = tuple[float, float] | tuple[int, int]
+
+
+@dataclass(frozen=True)
+class PrimitiveSpec:
+    """primitive の最小メタ情報。T010 で正式 Registry に置き換える前提の暫定型。"""
+
+    id: str
+    category: PrimitiveCategory
+    domain: PrimitiveDomain
+    param_schema: Mapping[str, ParamRange]
+
+
+PrimitiveRegistry = Mapping[str, PrimitiveSpec]
+
+# 生成レンジ（enforce_consistency で clip されるため、意図的にやや広めに取る）
+_DIR_WEIGHT_RANGE = (0.5, 1.5)
+_GATE_WEIGHT_RANGE = (-1.5, 1.5)
+_CLAUSE_WEIGHT_RANGE = (0.5, 1.5)
+_ENTRY_THRESHOLD_RANGE = (0.1, 0.5)
+_EXIT_THRESHOLD_RANGE = (0.0, 0.3)
+_MAX_POS_RANGE = (1, 3)
+_TIME_STOP_RANGE = (0, 240)
+_STOP_ATR_RANGE = (1.0, 3.0)
+_TAKE_ATR_RANGE = (1.0, 4.0)
+
+
+def _filter_by_category(
+    registry: PrimitiveRegistry, category: PrimitiveCategory
+) -> list[PrimitiveSpec]:
+    return [p for p in registry.values() if p.category == category]
+
+
+def random_params(
+    rng: random.Random, spec: PrimitiveSpec
+) -> dict[str, float | int]:
+    """param_schema からパラメータ値をサンプリング。
+
+    lo/hi の型で int / float を推論。返される dict は毎回新規作成されるので
+    registry 側の schema と reference を共有しない。
+    """
+    out: dict[str, float | int] = {}
+    for key, (lo, hi) in spec.param_schema.items():
+        if isinstance(lo, int) and isinstance(hi, int):
+            out[key] = rng.randint(lo, hi)
+        else:
+            out[key] = rng.uniform(float(lo), float(hi))
+    return out
+
+
+def random_signal_config(
+    rng: random.Random,
+    slot: Literal["directional", "local_gate"],
+    registry: PrimitiveRegistry,
+) -> SignalConfig:
+    """slot に応じた category の primitive をランダム選択し SignalConfig を組み立てる。
+
+    directional slot → category=directional のみ
+    local_gate slot → category=modulator のみ
+
+    Raises:
+        ValueError: 対応 category の primitive が registry に存在しない場合。
+    """
+    category: PrimitiveCategory = (
+        "directional" if slot == "directional" else "modulator"
+    )
+    pool = _filter_by_category(registry, category)
+    if not pool:
+        raise ValueError(
+            f"random_signal_config: no primitives with category={category} in registry"
+        )
+    spec = rng.choice(pool)
+    weight = (
+        rng.uniform(*_DIR_WEIGHT_RANGE)
+        if slot == "directional"
+        else rng.uniform(*_GATE_WEIGHT_RANGE)
+    )
+    return SignalConfig(name=spec.id, weight=weight, params=random_params(rng, spec))
+
+
+def random_clause(
+    rng: random.Random,
+    n_directional: int,
+    n_gate: int,
+    registry: PrimitiveRegistry,
+) -> ClauseConfig:
+    """1 Clause 分の directional + local_gate を生成。
+
+    重複 name は enforce_consistency で dedupe されるが、本関数内では
+    軽微な再抽選で緩和する（完全保証はしない、registry が小さい場合は重複許容）。
+
+    Raises:
+        ValueError: n_directional < 1 の場合。
+    """
+    if n_directional < 1:
+        raise ValueError("random_clause: n_directional must be >= 1")
+    dirs: list[SignalConfig] = []
+    seen_dir: set[str] = set()
+    attempts = 0
+    while len(dirs) < n_directional and attempts < n_directional * 5:
+        sig = random_signal_config(rng, "directional", registry)
+        if sig.name not in seen_dir:
+            dirs.append(sig)
+            seen_dir.add(sig.name)
+        attempts += 1
+    while len(dirs) < n_directional:
+        dirs.append(random_signal_config(rng, "directional", registry))
+
+    gates: list[SignalConfig] = []
+    for _ in range(n_gate):
+        gates.append(random_signal_config(rng, "local_gate", registry))
+
+    return ClauseConfig(
+        directional=tuple(dirs),
+        local_gate=tuple(gates),
+        weight=rng.uniform(*_CLAUSE_WEIGHT_RANGE),
+    )
+
+
+def random_position_config(rng: random.Random) -> PositionConfig:
+    """PositionConfig をランダム生成。entry > exit は enforce が swap で保証。"""
+    return PositionConfig(
+        entry_threshold=rng.uniform(*_ENTRY_THRESHOLD_RANGE),
+        exit_threshold=rng.uniform(*_EXIT_THRESHOLD_RANGE),
+        max_pos=rng.randint(*_MAX_POS_RANGE),
+        time_stop_min=rng.randint(*_TIME_STOP_RANGE),
+    )
+
+
+def random_risk_config(rng: random.Random) -> RiskConfig:
+    """RiskConfig をランダム生成。"""
+    return RiskConfig(
+        stop_atr=rng.uniform(*_STOP_ATR_RANGE),
+        take_atr=rng.uniform(*_TAKE_ATR_RANGE),
+    )
+
+
+def random_genome(
+    rng: random.Random,
+    name: str,
+    units: int,
+    *,
+    max_clause: int,
+    max_depth: int,
+    registry: PrimitiveRegistry,
+) -> Genome:
+    """初期個体を生成し enforce_consistency で最終正規化して返す（bounded retry 3 回）。
+
+    Args:
+        rng: 乱数源。
+        name: Genome 名。
+        units: units（発注単位）。
+        max_clause: clause 数上限（初期世代は 1 固定推奨、後続 TODO で段階解放）。
+        max_depth: 1 clause 内の directional + local_gate の総数上限（幅）。
+        registry: primitive registry。
+
+    Raises:
+        ValueError: max_clause / max_depth が 1 未満。
+        RuntimeError: 3 回 retry してもゲノム生成に失敗した場合。
+    """
+    if max_clause < 1:
+        raise ValueError("max_clause must be >= 1")
+    if max_depth < 1:
+        raise ValueError("max_depth must be >= 1")
+    for _ in range(3):
+        try:
+            n_clause = rng.randint(1, max_clause)
+            clauses: list[ClauseConfig] = []
+            for _i in range(n_clause):
+                # gate は enforce 制約と整合し最大 1 本に制限
+                n_gate = rng.randint(0, min(1, max_depth - 1))
+                n_dir = rng.randint(1, max_depth - n_gate)
+                clauses.append(random_clause(rng, n_dir, n_gate, registry))
+            genome = Genome(
+                name=name,
+                units=units,
+                clauses=tuple(clauses),
+                position=random_position_config(rng),
+                risk=random_risk_config(rng),
+            )
+            return enforce_consistency(genome)
+        except ValueError:
+            continue
+    raise RuntimeError(
+        "random_genome: failed to generate a valid genome after 3 retries"
+    )
+
+exec
+/bin/zsh -lc "sed -n '1,260p' src/alpha_factory/primitives/_registry.py" in /Users/ishitoya/repository/zenigame-fx
+ succeeded in 0ms:
+"""primitives-registry の登録・取得 API（T010 骨格）。
+
+registry は module-level dict。本 TODO では空のまま。
+後続 primitive 実装 TODO で register されて埋まる。
+
+並行性方針:
+    本 registry は bootstrap 段階（プロセス起動直後の ensure_registered()）で
+    書込が完了し、以降は read-only となる想定。ただし import 順序や
+    テスト並列実行（pytest-xdist 等）で register/clear が多重呼び出しされる
+    可能性を吸収するため、write 操作 (register / clear) は threading.Lock で
+    保護する。read 操作 (get_primitive / list_*) はロックしない
+    （CPython の dict は原子操作が多く、bootstrap 後は変更されない前提）。
+
+Bootstrap 方針:
+    production path (GA entry) から ensure_registered() を明示的に呼ぶ。
+    副作用 import 単独には依存しない（登録漏れ検出のため）。
+"""
+
+from __future__ import annotations
+
+import threading
+
+from src.alpha_factory.primitives._base import (
+    PrimitiveCategory,
+    PrimitiveDomain,
+    PrimitiveSpec,
+    validate_primitive_spec,
+)
+
+_PRIMITIVES: dict[str, PrimitiveSpec] = {}
+_LOCK = threading.Lock()
+
+
+def register(spec: PrimitiveSpec) -> None:
+    """PrimitiveSpec を registry に登録する。
+
+    登録前に validate_primitive_spec で不変条件を検証する
+    （required_data の canonical naming、param_schema 重複名、low/high/default
+    整合など）。
+
+    Raises:
+        ValueError: 同じ id が既に登録されている、あるいは spec が不変条件違反。
+                    silent override は許さない。
+    """
+    validate_primitive_spec(spec)
+    with _LOCK:
+        if spec.id in _PRIMITIVES:
+            raise ValueError(f"primitive {spec.id!r} already registered")
+        _PRIMITIVES[spec.id] = spec
+
+
+def register_if_absent(spec: PrimitiveSpec) -> bool:
+    """原子的に登録する。既登録なら False、新規登録なら True を返す。
+
+    T011 の ensure_registered で冪等かつ並行安全な登録パスを提供するため追加。
+    `try get_primitive / except KeyError: register` は非原子的で、並行時に
+    `register` 側 `ValueError` を引き起こすため、本関数で lock 内に存在確認＋
+    登録を atomic に閉じ込める。
+
+    Notes:
+        validate_primitive_spec は既存チェック前に呼ぶ。新規 spec の健全性は
+        常に検証する（既存 id でも spec 側が壊れていれば silent skip せず fail する）。
+
+    Raises:
+        ValueError: spec が不変条件違反。
+    """
+    validate_primitive_spec(spec)
+    with _LOCK:
+        if spec.id in _PRIMITIVES:
+            return False
+        _PRIMITIVES[spec.id] = spec
+        return True
+
+
+def get_primitive(primitive_id: str) -> PrimitiveSpec:
+    """id で PrimitiveSpec を取得する。
+
+    Raises:
+        KeyError: id が未登録の場合。
+    """
+    if primitive_id not in _PRIMITIVES:
+        raise KeyError(f"primitive {primitive_id!r} not in registry")
+    return _PRIMITIVES[primitive_id]
+
+
+def list_all() -> tuple[PrimitiveSpec, ...]:
+    """全 PrimitiveSpec を登録順（dict 挿入順）で返す。"""
+    return tuple(_PRIMITIVES.values())
+
+
+def list_by_category(
+    category: PrimitiveCategory,
+) -> tuple[PrimitiveSpec, ...]:
+    """指定 category の PrimitiveSpec を登録順で返す。"""
+    return tuple(
+        spec for spec in _PRIMITIVES.values() if spec.category == category
+    )
+
+
+def list_by_domain(
+    domain: PrimitiveDomain,
+) -> tuple[PrimitiveSpec, ...]:
+    """指定 domain の PrimitiveSpec を登録順で返す。"""
+    return tuple(
+        spec for spec in _PRIMITIVES.values() if spec.domain == domain
+    )
+
+
+def clear() -> None:
+    """registry を空にする（テスト用）。
+
+    本番 path では呼ばない。tests 内の fixture などで isolation のために使う。
+    """
+    with _LOCK:
+        _PRIMITIVES.clear()
+
+
+def ensure_registered() -> None:
+    """primitive モジュールの明示的 bootstrap 関数。
+
+    T011 で `directional_generic` の 14 primitive、T012 で `modulator_generic`
+    の 6 primitive (M1-M6)、T013 で `pair_specific` の 12 primitive (P1-P12) を
+    登録する（合計 32）。
+    冪等（複数回呼んでも 2 回目以降は既登録 spec は register_if_absent で skip）。
+    並行呼び出しに対しては register_if_absent 内部 Lock で安全。
+
+    production path (GA entry) から明示的に 1 回呼ぶ規約。
+    """
+    # 遅延 import（循環回避）。_base.py は触らずに実装モジュールだけ呼ぶ。
+    from src.alpha_factory.primitives.directional_generic import (
+        ensure_registered as _reg_directional_generic,
+    )
+    from src.alpha_factory.primitives.modulator_generic import (
+        ensure_registered as _reg_modulator_generic,
+    )
+    from src.alpha_factory.primitives.pair_specific import (
+        ensure_registered as _reg_pair_specific,
+    )
+
+    _reg_directional_generic()
+    _reg_modulator_generic()
+    _reg_pair_specific()
+
+codex
+1. **(B) vs (C) の収束**
+- **採用: (B) 新 primitive 追加**。
+- 理由（Fact）: cross-pair は cycle12 まで7連敗 + 今回キャンペーン全体でも `ii_lite_pass=0` 継続、74k副作用時も holdout 品質と逆相関。
+- 理由（Interpretation）: (C) は目的関数・学習枠組みの再設計が必要で、現 mission（単一ペア holdout 品質向上）に対する EV が低すぎる。  
+一方 (B) は frontier を維持したまま表現力を増やせるので、成功確度/実装コスト比で優位。
+
+2. **(B) で最有力の信号ファミリー**
+- **(a) マルチタイムフレーム合成**が最有力。
+- 具体 primitive: **`F15 MTFTrendPullback`**（TREND_FOLLOW）。
+- 根拠: 現32 primitiveは実質 single-TF（時間帯ゲートやvolゲートはあるが、上位足構造×下位足エントリがない）。  
+  直交性が最も高く、ノイズの多い M1 で「方向（HTF）とタイミング（LTF）」を1 primitiveで同時に持てるため、**中央値改善**の期待値が高い。
+
+3. **最小実装方針**
+- **カテゴリ**: `TREND_FOLLOW`
+- **再利用**: `_indicators.py` の `ema`, `atr`, `_EPS` を再利用（新規依存なし）。
+- **新規最小 helper**: `M1 -> 完了済みHTF OHLC` 変換（未確定HTFバーは参照しない）。
+- **計算**:
+  - `trend = tanh((ema_htf_fast - ema_htf_slow)/(atr_htf + eps))`
+  - `pullback = tanh((ema_ltf - close)/(k_entry*atr_ltf + eps))`
+  - `align = max(0, trend * pullback)`
+  - `out = trend * align`（`[-1,+1]`）
+- **ParamSpec（最小）**:
+  - `htf_min` (5..30, int)
+  - `trend_fast_n` (2..12, int)
+  - `trend_slow_n` (8..36, int)
+  - `entry_n` (5..40, int)
+  - `k_entry` (0.5..3.0, float)
+- **bit-exact維持**:
+  - `default OFF` の opt-in flag（例: `ga.experimental.mtf_trend_pullback_enabled=false`）
+  - random_gen で当該IDを flag ON 時のみ母集団へ投入（OFF時は既存32本と同一挙動）。
+
+4. **反証可能な R105 成功基準（frontier維持 + 上限向上）**
+- 検証設計: **同一 seed 反実仮想**（control=OFF, treatment=ON）を2 seedで実施。
+- **合格条件（全て必須）**:
+  1. `mission_candidate_count_treat >= 0.85 * control`（両seed）
+  2. `stage_c_pass_count_treat >= 0.85 * control`（両seed）
+  3. pooledで `median(annualized_sharpe)` が `+0.20` 以上改善
+  4. pooledで `median(total_pnl)` が `+5,000` 以上改善
+  5. tail確認として `p90(total_pnl)` 改善（または `max_pnl > 108,810` 更新）
+- いずれか未達なら **REJECTED**（INCONCLUSIVEを避けない）。
+
+**全体判定: (B) を採用し、次の一手は `F15 MTFTrendPullback` を opt-in で最小実装して R105 反実仮想検証。**
+tokens used
+73,931
