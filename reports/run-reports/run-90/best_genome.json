@@ -1,0 +1,32 @@
+{
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "name": "g2_i29",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F3",
+          "weight": 1.0273483128537944,
+          "params": {
+            "n": 46,
+            "k": 0.7068546401999855,
+            "atr_n": 8
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 1.0593350999934725
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.2836167343106616,
+    "exit_threshold": 0.0881480724873,
+    "max_pos": 1,
+    "time_stop_min": 129
+  },
+  "risk": {
+    "stop_atr": 2.4884887983409927,
+    "take_atr": 2.636827462400875
+  }
+}

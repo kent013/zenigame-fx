@@ -1,0 +1,51 @@
+{
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "name": "g15_i33",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F4",
+          "weight": 0.7684585961648039,
+          "params": {
+            "n": 23,
+            "scale": 23.272862943722615
+          }
+        },
+        {
+          "name": "P9",
+          "weight": 1.0484836504196149,
+          "params": {
+            "mom_n": 34,
+            "scale": 0.03065828927649981,
+            "staleness_bars": 314
+          }
+        },
+        {
+          "name": "P7",
+          "weight": 0.5089755825389835,
+          "params": {
+            "spx_n": 28,
+            "spx_staleness_bars": 68,
+            "vix_scale": 4.184115855104329,
+            "vix_staleness_days": 10.33345392120087,
+            "vix_threshold": 29.38988799492197
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.8535983127510927
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.22441984500647974,
+    "exit_threshold": -0.09633634530065346,
+    "max_pos": 3,
+    "time_stop_min": 0
+  },
+  "risk": {
+    "stop_atr": 2.4419977303771776,
+    "take_atr": 3.3996594737873886
+  }
+}

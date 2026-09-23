@@ -1,0 +1,30 @@
+{
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "name": "g11_i9",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F10",
+          "weight": 1.5634176391378112,
+          "params": {
+            "n": 27
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.862607566922863
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.3139612868113396,
+    "exit_threshold": 0.051905793565512844,
+    "max_pos": 1,
+    "time_stop_min": 0
+  },
+  "risk": {
+    "stop_atr": 1.784036400178338,
+    "take_atr": 3.6216527801818503
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "dataset_epoch_id": "epoch_20250401_20260219",
+  "name": "g36_i91",
+  "units": 10000,
+  "clauses": [
+    {
+      "directional": [
+        {
+          "name": "F14",
+          "weight": 0.9150048480328032,
+          "params": {
+            "fast_n": 22,
+            "slow_n": 34,
+            "rv_n": 36,
+            "scale": 1.9454630021737618,
+            "k_scale": 1.909432680452455
+          }
+        }
+      ],
+      "local_gate": [
+        {
+          "name": "M6",
+          "weight": -0.0819303437347295,
+          "params": {
+            "n": 12,
+            "theta": 32.46613420515887,
+            "scale": 11.047398682771592
+          }
+        }
+      ],
+      "weight": 1.1158183215462647
+    },
+    {
+      "directional": [
+        {
+          "name": "F14",
+          "weight": 1.064263703435493,
+          "params": {
+            "fast_n": 22,
+            "slow_n": 21,
+            "rv_n": 56,
+            "scale": 2.5151611363607635,
+            "k_scale": 1.9290683994530435
+          }
+        }
+      ],
+      "local_gate": [],
+      "weight": 0.7756678346812992
+    }
+  ],
+  "position": {
+    "entry_threshold": 0.25567231182682787,
+    "exit_threshold": -0.199010452055413,
+    "max_pos": 4,
+    "time_stop_min": 0
+  },
+  "risk": {
+    "stop_atr": 1.5988347538573413,
+    "take_atr": 2.130147022311179
+  }
+}
