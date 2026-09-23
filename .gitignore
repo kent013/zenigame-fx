@@ -35,3 +35,6 @@ config/alpha_factory/default.yaml.tmp
 config/alpha_factory/default.yaml.lock
 # Added by code-review-graph
 .code-review-graph/
+
+# Claude Code runtime lock
+.claude/scheduled_tasks.lock
